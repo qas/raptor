@@ -796,6 +796,7 @@ class GoalTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("get_goal", names)
         self.assertNotIn("update_goal", names)
         self.assertNotIn("set_goal", names)
+        self.assertNotIn("cancel", names)
         session.state["model"] = "main-model"
         with patch(
             "subagents.SUBAGENT_RESPONSES_MODEL",

@@ -60,6 +60,7 @@ def tool_activity(call: dict[str, Any]) -> str:
         "update_plan": "updating todos",
         "shell": "running a shell command",
         "write_stdin": "checking a shell session",
+        "cancel": "stopping background work",
         "read_file": "reading a file",
         "read_skill": "loading a skill",
         "write_file": "writing a file",

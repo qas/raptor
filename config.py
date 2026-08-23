@@ -792,6 +792,37 @@ TOOLS = [
     },
     {
         "type": "function",
+        "name": "cancel",
+        "description": (
+            "Cancel one running background resource by its exact identifier. "
+            "Use kind=subagent with an agent_id returned by subagent, or "
+            "kind=shell with a session_id returned by shell. This is targeted; "
+            "/stop remains the user-controlled global stop operation."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "kind": {
+                    "type": "string",
+                    "enum": [
+                        "subagent",
+                        "shell",
+                    ],
+                },
+                "id": {
+                    "type": "string",
+                    "description": "Exact agent_id or shell session_id.",
+                },
+            },
+            "required": [
+                "kind",
+                "id",
+            ],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "type": "function",
         "name": "subagent",
         "description": (
             "List, start, or continue durable subagent threads using the "

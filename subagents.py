@@ -60,6 +60,7 @@ def subagent_tools(
     depth: int,
 ) -> list[dict[str, Any]]:
     excluded = {
+        "cancel",
         "get_goal",
         "update_goal",
         "set_goal",
@@ -1466,3 +1467,43 @@ async def cancel_background_subagents(*, discard_pending: bool = False) -> int:
         if changed:
             save_state()
     return len(tasks)
+
+
+async def cancel_background_subagent(agent_id: str) -> dict[str, Any]:
+    """Cancel one live background subagent without notifying its parent."""
+    record = session.subagent_records.get(agent_id)
+    if record is None:
+        return {
+            "ok": False,
+            "kind": "subagent",
+            "id": agent_id,
+            "error": f"unknown subagent: {agent_id}",
+        }
+    task = session.subagent_tasks.get(agent_id)
+    if task is None or task.done() or record.get("status") != "running":
+        return {
+            "ok": False,
+            "kind": "subagent",
+            "id": agent_id,
+            "status": record.get("status"),
+            "error": "subagent is not running in the background",
+        }
+
+    record["notify_completion"] = False
+    record["completion_pending"] = False
+    record["completion_attempts"] = 0
+    save_state()
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+    cancelled = record.get("status") == "cancelled"
+    return {
+        "ok": cancelled,
+        "kind": "subagent",
+        "id": agent_id,
+        "status": record.get("status"),
+        **(
+            {}
+            if cancelled
+            else {"error": "subagent finished before cancellation completed"}
+        ),
+    }

@@ -30,6 +30,41 @@ class BackgroundSubagentTests(unittest.IsolatedAsyncioTestCase):
             ):
                 subagents.subagent_model()
 
+    async def test_targeted_cancel_stops_one_background_subagent(self) -> None:
+        started = asyncio.Event()
+
+        async def wait_forever(**_kwargs):
+            started.set()
+            await asyncio.Event().wait()
+
+        record = {
+            "id": "worker-1",
+            "chat_id": "telegram:123",
+            "depth": 1,
+            "allow_subagents": False,
+            "notify_completion": True,
+            "completion_pending": False,
+            "completion_attempts": 0,
+            "status": "running",
+        }
+        session.subagent_records["worker-1"] = record
+        with (
+            patch.object(subagents, "run_subagent", wait_forever),
+            patch.object(subagents, "save_state"),
+            patch.object(subagents, "save_interrupted_subagent"),
+        ):
+            task = asyncio.create_task(subagents.run_background_subagent(record))
+            session.subagent_tasks["worker-1"] = task
+            await started.wait()
+
+            result = await subagents.cancel_background_subagent("worker-1")
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["status"], "cancelled")
+        self.assertEqual(record["status"], "cancelled")
+        self.assertFalse(record["completion_pending"])
+        self.assertNotIn("worker-1", session.subagent_tasks)
+
     async def test_provider_prefixed_conversation_id_is_preserved(self) -> None:
         record = {
             "id": "worker-1",

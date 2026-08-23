@@ -68,7 +68,7 @@ against the same `RAPTOR_HOME`.
 | `/thread clear` | Discard the branch and return to its parent |
 | `/thread merge` | Merge branch-native conversation items into its parent |
 | `/status` | Show runtime, context, goal, subagent, and shell status |
-| `/stop` | Cancel the current run and live shell process groups |
+| `/stop` | Cancel all active root, subagent, and shell work |
 | `/compact` | Create a durable context checkpoint |
 | `/model` | List or switch backend models |
 | `/approval` | Toggle tool approval |
@@ -121,6 +121,10 @@ side effects are not reversible.
 One root controller owns all root turns. User input, steering, background shell
 completion, subagent completion, and goal continuation enter that controller
 instead of starting competing runs.
+
+The root agent can cancel one background subagent or managed shell by its
+returned identifier. Targeted cancellation suppresses completion delivery;
+`/stop` remains the user-facing global stop operation.
 
 Each queued request retains its originating conversation and provider delivery
 context. A Responses HTTP request that becomes steering remains open and

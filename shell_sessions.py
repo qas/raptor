@@ -512,6 +512,45 @@ async def cancel_shell_sessions() -> int:
     return len(active)
 
 
+async def cancel_shell_session(session_id: str) -> dict[str, Any]:
+    """Cancel one live managed shell process group."""
+    item = _sessions.get(session_id)
+    if item is None:
+        return {
+            "ok": False,
+            "kind": "shell",
+            "id": session_id,
+            "error": f"unknown shell session: {session_id}",
+        }
+    async with item.interaction_lock:
+        if item.status != "running" or item.process.returncode is not None:
+            if item.monitor_task is not None:
+                await asyncio.gather(item.monitor_task, return_exceptions=True)
+            return {
+                "ok": False,
+                "kind": "shell",
+                "id": session_id,
+                "status": item.status,
+                "error": "shell session is not running",
+            }
+        item.detached = False
+        item.completion_pending = False
+        item.completion_attempts = 0
+        item.initial_decided.set()
+        item.status = "cancelled"
+        item.error = "command was cancelled"
+        await _terminate(item)
+        if item.monitor_task is not None:
+            await asyncio.gather(item.monitor_task, return_exceptions=True)
+    return {
+        "ok": True,
+        "kind": "shell",
+        "id": session_id,
+        "status": item.status,
+        "exit_code": item.exit_code,
+    }
+
+
 def _completion_prompt(session: ShellSession) -> str:
     payload = {
         "session_id": session.id,

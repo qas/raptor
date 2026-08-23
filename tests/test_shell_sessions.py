@@ -8,6 +8,7 @@ import shell_sessions
 from config import TOOLS
 from shell_sessions import (
     HeadTailBuffer,
+    cancel_shell_session,
     cancel_shell_sessions,
     reset_shell_sessions_for_tests,
     run_shell,
@@ -115,6 +116,38 @@ class ShellSessionTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(polled["status"], "cancelled")
 
+    async def test_targeted_cancel_stops_one_process_group(self) -> None:
+        first = await run_shell(
+            "sleep 10",
+            timeout=30,
+            yield_time_ms=250,
+            tty=False,
+            chat_id="telegram:123",
+            parent_session_id="main-1",
+        )
+        second = await run_shell(
+            "sleep 10",
+            timeout=30,
+            yield_time_ms=250,
+            tty=False,
+            chat_id="telegram:123",
+            parent_session_id="main-1",
+        )
+
+        result = await cancel_shell_session(first["session_id"])
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["status"], "cancelled")
+        self.assertEqual(running_shell_sessions(), 1)
+        first_state = await write_stdin(
+            {"session_id": first["session_id"], "yield_time_ms": 0}
+        )
+        self.assertEqual(first_state["status"], "cancelled")
+        self.assertEqual(
+            shell_sessions._sessions[second["session_id"]].status,
+            "running",
+        )
+
     async def test_detached_completion_enters_internal_event_path(self) -> None:
         delivered = AsyncMock(return_value=True)
         controller = types.ModuleType("controller")
@@ -209,6 +242,10 @@ class ShellSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("yield_time_ms", schemas["shell"]["parameters"]["properties"])
         self.assertIn("tty", schemas["shell"]["parameters"]["properties"])
         self.assertIn("write_stdin", schemas)
+        self.assertEqual(
+            schemas["cancel"]["parameters"]["required"],
+            ["kind", "id"],
+        )
 
     async def test_tty_session_accepts_interactive_input(self) -> None:
         result = await run_shell(

@@ -130,6 +130,23 @@ def truncate_tool_output(
     )
 
 
+async def cancel_tool(args: dict[str, Any]) -> dict[str, Any]:
+    """Cancel one live background resource by its typed identifier."""
+    kind = str(args.get("kind") or "").strip()
+    resource_id = str(args.get("id") or "").strip()
+    if kind not in {"subagent", "shell"}:
+        return {"ok": False, "error": "kind must be subagent or shell"}
+    if not resource_id:
+        return {"ok": False, "error": "id is required"}
+    if kind == "subagent":
+        from subagents import cancel_background_subagent
+
+        return await cancel_background_subagent(resource_id)
+    from shell_sessions import cancel_shell_session
+
+    return await cancel_shell_session(resource_id)
+
+
 async def shell_tool(
     args: dict[str, Any],
     *,
@@ -707,6 +724,9 @@ async def execute_tool(
         if name == "write_stdin":
             from shell_sessions import write_stdin
             return await write_stdin(args)
+
+        if name == "cancel":
+            return await cancel_tool(args)
 
         if name == "read_file":
             return read_file_tool(
