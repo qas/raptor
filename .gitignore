@@ -1,0 +1,31 @@
+# Raptor runtime state
+.raptor/
+
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local Python environments
+.venv/
+venv/
+
+# Local environment configuration
+.env
+.env.*
+!.env.example
+
+# Coverage output
+.coverage
+coverage.xml
+htmlcov/
+
+# Editor and operating-system files
+.idea/
+.vscode/
+.DS_Store
+
+# Scratch space
+sandbox/

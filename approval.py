@@ -1,0 +1,359 @@
+"""Tool-approval flow."""
+import asyncio
+import json
+import os
+import re
+from typing import Any
+
+from chat_provider import ActionButton, ConversationId, IncomingAction
+from chat_runtime import get_chat_provider
+from presentation import clear_pinned_status, show_pinned_status
+from session import APPROVAL_TOOLS, pending_approvals, state
+from observability import log_agent_activity, log_exception
+from tools import execute_tool
+from goals import suspend_goal_pin, sync_goal_pin
+
+
+def approval_enabled() -> bool:
+    return state.get("approval_mode") == "on"
+
+
+def approval_required(
+    call: dict[str, Any],
+) -> bool:
+    return (
+        approval_enabled()
+        and call.get("name") in APPROVAL_TOOLS
+    )
+
+
+def approval_preview(
+    call: dict[str, Any],
+) -> str:
+    name = str(
+        call.get("name")
+        or "unknown"
+    )
+
+    raw_arguments = call.get(
+        "arguments"
+    ) or "{}"
+
+    try:
+        arguments = json.loads(
+            raw_arguments
+        )
+        rendered = json.dumps(
+            arguments,
+            indent=2,
+            ensure_ascii=False,
+        )
+    except (
+        TypeError,
+        json.JSONDecodeError,
+    ):
+        rendered = str(
+            raw_arguments
+        )
+
+    # Keep interactive status previews bounded across providers.
+    if len(rendered) > 3200:
+        rendered = (
+            rendered[:3150]
+            + "\n... [truncated]"
+        )
+
+    return (
+        "Tool: "
+        + name
+        + "\n\n"
+        + rendered
+    )
+
+
+async def finalize_approval_message(
+    entry: dict[str, Any],
+    status: str,
+) -> None:
+    if entry.get("ui_finalized"):
+        return
+
+    entry["ui_finalized"] = True
+
+    chat_id = entry.get("chat_id")
+    approval_id = str(entry.get("id") or "")
+
+    log_agent_activity(
+        f"approval UI finalized: {status}"
+    )
+
+    if chat_id is None:
+        return
+
+    await sync_goal_pin(
+        chat_id,
+        released_owner="approval:" + approval_id,
+    )
+
+
+async def request_tool_approval(
+    chat_id: ConversationId,
+    call: dict[str, Any],
+) -> str:
+    loop = asyncio.get_running_loop()
+    future: asyncio.Future[str] = (
+        loop.create_future()
+    )
+
+    approval_id = os.urandom(
+        6
+    ).hex()
+    preview = approval_preview(
+        call
+    )
+
+    entry: dict[str, Any] = {
+        "id": approval_id,
+        "chat_id": chat_id,
+        "message_id": None,
+        "call": call,
+        "preview": preview,
+        "future": future,
+        "ui_finalized": False,
+    }
+    pending_approvals[approval_id] = entry
+
+    try:
+        message_id = await show_pinned_status(
+            chat_id,
+            "approval:" + approval_id,
+            "⚠️ Approval required\n\n" + preview,
+            controls=((
+                ActionButton(
+                    "✅ Approve",
+                    f"approval:{approval_id}:approve",
+                ),
+                ActionButton(
+                    "❌ Deny",
+                    f"approval:{approval_id}:deny",
+                ),
+            ),),
+        )
+        entry["message_id"] = message_id
+        await suspend_goal_pin(chat_id)
+    except Exception:
+        pending_approvals.pop(approval_id, None)
+        await sync_goal_pin(chat_id)
+        raise
+
+    try:
+        return await future
+
+    except asyncio.CancelledError:
+        if not future.done():
+            future.cancel()
+
+        await finalize_approval_message(
+            entry,
+            "⏹ Cancelled",
+        )
+        raise
+
+    finally:
+        pending_approvals.pop(
+            approval_id,
+            None,
+        )
+
+
+async def execute_tool_with_approval(
+    chat_id: ConversationId,
+    call: dict[str, Any],
+    *,
+    execution_context: dict[str, Any]
+    | None = None,
+) -> dict[str, Any]:
+    if not approval_required(
+        call
+    ):
+        return await execute_tool(
+            call,
+            chat_id=chat_id,
+            execution_context=(
+                execution_context
+            ),
+        )
+
+    log_agent_activity(
+        "waiting for approval"
+    )
+    decision = await request_tool_approval(
+        chat_id,
+        call,
+    )
+
+    if decision == "approve":
+        log_agent_activity(
+            "tool approved"
+        )
+        return await execute_tool(
+            call,
+            chat_id=chat_id,
+            execution_context=(
+                execution_context
+            ),
+        )
+
+    if decision == "steer":
+        log_agent_activity(
+            "approval superseded by steering"
+        )
+        return {
+            "ok": False,
+            "error": (
+                "Tool execution cancelled because a steering message "
+                "superseded the pending approval."
+            ),
+            "approval": "superseded",
+        }
+
+    log_agent_activity(
+        "tool denied"
+    )
+    return {
+        "ok": False,
+        "error": "Tool execution denied by user.",
+        "approval": "denied",
+    }
+
+
+async def supersede_pending_approvals(
+    chat_id: ConversationId,
+) -> int:
+    superseded = 0
+
+    for entry in list(
+        pending_approvals.values()
+    ):
+        if entry.get("chat_id") != chat_id:
+            continue
+
+        future = entry.get(
+            "future"
+        )
+
+        if not isinstance(
+            future,
+            asyncio.Future,
+        ) or future.done():
+            continue
+
+        # The steer must already be queued before this future is resolved so
+        # the agent cannot wake and perform another model call without it.
+        future.set_result(
+            "steer"
+        )
+        superseded += 1
+
+        await finalize_approval_message(
+            entry,
+            "↪️ Superseded by steering",
+        )
+
+    return superseded
+
+
+async def _answer_action(
+    action_id: str,
+    text: str = "",
+    *,
+    alert: bool = False,
+) -> None:
+    if not action_id:
+        return
+    try:
+        await get_chat_provider().answer_action(
+            action_id,
+            text,
+            alert=alert,
+        )
+    except Exception as exc:
+        log_exception("approval", "action_answer_error", exc)
+
+
+async def handle_approval_action(action: IncomingAction) -> bool:
+    provider = get_chat_provider()
+
+    if action.sender_id != provider.authorized_user_id:
+        await _answer_action(
+            action.action_id,
+            "Not authorized.",
+            alert=True,
+        )
+        return True
+
+    data = action.data
+
+    match = re.fullmatch(
+        r"approval:([0-9a-f]+):(approve|deny)",
+        data,
+    )
+
+    if not match:
+        return False
+
+    approval_id, decision = (
+        match.groups()
+    )
+    entry = pending_approvals.get(
+        approval_id
+    )
+
+    callback_chat_id = action.conversation_id
+
+    if (
+        not entry
+        or entry.get("chat_id")
+        != callback_chat_id
+    ):
+        await _answer_action(
+            action.action_id,
+            "Approval is no longer pending.",
+        )
+
+        if callback_chat_id is not None:
+            await clear_pinned_status(
+                callback_chat_id,
+                owner="approval:" + approval_id,
+            )
+        return True
+
+    future = entry.get(
+        "future"
+    )
+
+    if not isinstance(
+        future,
+        asyncio.Future,
+    ) or future.done():
+        await _answer_action(action.action_id, "Already handled.")
+        return True
+
+    await _answer_action(
+        action.action_id,
+        "Approved" if decision == "approve" else "Denied",
+    )
+
+    await finalize_approval_message(
+        entry,
+        (
+            "✅ Approved"
+            if decision == "approve"
+            else "❌ Denied"
+        ),
+    )
+
+    future.set_result(
+        decision
+    )
+    return True

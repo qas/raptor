@@ -1,0 +1,1473 @@
+"""Recursive foreground and background agent orchestration."""
+import asyncio
+import json
+import secrets
+import time
+from typing import Any
+
+from chat_provider import ConversationId
+
+from chat_store import append_item, create_session
+from config import (
+    BASE_INSTRUCTIONS,
+    COMPACTION_REASONING_EFFORT,
+    MAX_BACKGROUND_SUBAGENTS,
+    MAX_SUBAGENT_DEPTH,
+    MAX_SUBAGENT_PENDING_INPUTS,
+    MAX_SUBAGENT_TOOL_EVENTS,
+    MAX_TOOL_OUTPUT,
+    MAX_TOOL_ROUNDS,
+    SUBAGENT_RESPONSES_API_KEY,
+    SUBAGENT_RESPONSES_BASE_URL,
+    SUBAGENT_RESPONSES_MODEL,
+    SUBAGENT_RESPONSES_REASONING_EFFORT,
+    SUBAGENT_RESPONSES_MAX_RETRIES,
+    SUBAGENT_RESPONSES_RETRY_BASE_SECONDS,
+    TOOLS,
+    subagent_compaction_generation_budget,
+    subagent_context_input_budget,
+)
+from context import (
+    build_active_context,
+    checkpoint_continuation_input,
+    compact_session,
+    ensure_context_under_budget,
+    request_with_checkpoint_retry,
+)
+from engine import estimate_tokens, run_agent
+import session
+from session import (
+    bounded_interrupted_subagents,
+    prune_subagent_records,
+    save_state,
+    state,
+)
+from responses import (
+    ContextLengthError,
+    parse_context_length_error,
+    retry_transient_response,
+)
+from skills import skill_catalog_instructions
+from observability import log_event
+
+
+_completion_retry_tasks: dict[str, asyncio.Task[None]] = {}
+
+
+def _bounded_tool_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return events[-MAX_SUBAGENT_TOOL_EVENTS:]
+
+
+def subagent_tools(
+    allow_subagents: bool,
+    depth: int,
+) -> list[dict[str, Any]]:
+    excluded = {
+        "get_goal",
+        "update_goal",
+        "set_goal",
+    }
+    if not (
+        allow_subagents
+        and depth < MAX_SUBAGENT_DEPTH
+    ):
+        excluded.add("subagent")
+    return [
+        tool
+        for tool in TOOLS
+        if tool.get("name") not in excluded
+    ]
+
+
+def subagent_instructions(
+    allow_subagents: bool,
+) -> str:
+    delegation = (
+        "You may use the subagent tool because the user explicitly allowed "
+        "nested delegation."
+        if allow_subagents
+        else "You may not delegate to another subagent."
+    )
+    return (
+        BASE_INSTRUCTIONS
+        + "\n\nYou are an isolated subagent working for a parent agent. "
+        "Complete only the delegated task. Never communicate through the chat "
+        "provider "
+        "or address the user directly. Return a concise, evidence-based result "
+        "to the parent agent. Your conversation context and todos are isolated, "
+        "but filesystem and shell side effects occur in the shared workspace. "
+        + delegation
+    )
+
+
+def subagent_headers() -> dict[str, str]:
+    if not SUBAGENT_RESPONSES_API_KEY:
+        return {}
+    return {
+        "Authorization":
+            f"Bearer {SUBAGENT_RESPONSES_API_KEY}"
+    }
+
+
+def subagent_model() -> str:
+    model = SUBAGENT_RESPONSES_MODEL
+    if not model:
+        raise RuntimeError(
+            "SUBAGENT_RESPONSES_MODEL is not configured"
+        )
+    return str(model)
+
+
+def _recovery_prompt_payload(
+    recovery_context: Any,
+) -> dict[str, Any] | None:
+    """Keep subagent recovery instructions bounded.
+
+    Raw tool events are already durable in the subagent transcript and state;
+    only their count is needed in every resumed model request.
+    """
+    if not isinstance(recovery_context, dict):
+        return None
+    result = {
+        key: recovery_context.get(key)
+        for key in ("status", "last_task", "error")
+        if recovery_context.get(key) is not None
+    }
+    events = recovery_context.get("tool_events")
+    result["tool_event_count"] = (
+        len(events) if isinstance(events, list) else 0
+    )
+    return result
+
+
+def build_subagent_payload(
+    work: list[dict[str, Any]],
+    *,
+    allow_subagents: bool,
+    depth: int,
+    tools: list[dict[str, Any]] | None = None,
+    extra_instructions: str = "",
+    max_output_tokens: int | None = None,
+    reasoning_effort: str | None = SUBAGENT_RESPONSES_REASONING_EFFORT,
+) -> dict[str, Any]:
+    instructions = subagent_instructions(allow_subagents)
+    if extra_instructions:
+        instructions += "\n\n" + extra_instructions
+    payload: dict[str, Any] = {
+        "model": subagent_model(),
+        "input": work,
+        "instructions": instructions,
+        "stream": False,
+    }
+    selected_tools = (
+        subagent_tools(allow_subagents, depth)
+        if tools is None
+        else tools
+    )
+    if selected_tools:
+        payload["tools"] = selected_tools
+        payload["parallel_tool_calls"] = False
+    if max_output_tokens is not None:
+        payload["max_output_tokens"] = max_output_tokens
+    if reasoning_effort is not None:
+        payload["reasoning"] = {"effort": reasoning_effort}
+    return payload
+
+
+def estimate_subagent_request_tokens(
+    work: list[dict[str, Any]],
+    *,
+    allow_subagents: bool,
+    depth: int,
+    tools: list[dict[str, Any]] | None = None,
+    extra_instructions: str = "",
+    max_output_tokens: int | None = None,
+    reasoning_effort: str | None = SUBAGENT_RESPONSES_REASONING_EFFORT,
+) -> int:
+    return estimate_tokens(
+        build_subagent_payload(
+            work,
+            allow_subagents=allow_subagents,
+            depth=depth,
+            tools=tools,
+            extra_instructions=extra_instructions,
+            max_output_tokens=max_output_tokens,
+            reasoning_effort=reasoning_effort,
+        )
+    )
+
+
+async def _create_subagent_response_once(
+    work: list[dict[str, Any]],
+    *,
+    agent_id: str,
+    allow_subagents: bool,
+    depth: int,
+    tools: list[dict[str, Any]] | None = None,
+    extra_instructions: str = "",
+    max_output_tokens: int | None = None,
+    reasoning_effort: str | None = SUBAGENT_RESPONSES_REASONING_EFFORT,
+) -> dict[str, Any]:
+    payload = build_subagent_payload(
+        work,
+        allow_subagents=allow_subagents,
+        depth=depth,
+        tools=tools,
+        extra_instructions=extra_instructions,
+        max_output_tokens=max_output_tokens,
+        reasoning_effort=reasoning_effort,
+    )
+    response = await session.responses.post(
+        f"{SUBAGENT_RESPONSES_BASE_URL}/responses",
+        headers=subagent_headers(),
+        json=payload,
+        timeout=None,
+    )
+    if response.is_error:
+        log_event(
+            "subagent",
+            "http_error",
+            {
+                "agent_id": agent_id,
+                "status": response.status_code,
+                "body": response.text,
+            },
+        )
+        context_error = parse_context_length_error(response)
+        if context_error:
+            raise context_error
+    response.raise_for_status()
+    return response.json()
+
+
+async def create_subagent_response(
+    work: list[dict[str, Any]],
+    *,
+    agent_id: str,
+    allow_subagents: bool,
+    depth: int,
+    tools: list[dict[str, Any]] | None = None,
+    extra_instructions: str = "",
+    max_output_tokens: int | None = None,
+    reasoning_effort: str | None = SUBAGENT_RESPONSES_REASONING_EFFORT,
+) -> dict[str, Any]:
+    async def request() -> dict[str, Any]:
+        return await _create_subagent_response_once(
+            work,
+            agent_id=agent_id,
+            allow_subagents=allow_subagents,
+            depth=depth,
+            tools=tools,
+            extra_instructions=extra_instructions,
+            max_output_tokens=max_output_tokens,
+            reasoning_effort=reasoning_effort,
+        )
+
+    return await retry_transient_response(
+        request,
+        operation="Subagent Responses request",
+        log_data={"agent_id": agent_id},
+        max_retries=SUBAGENT_RESPONSES_MAX_RETRIES,
+        retry_base_seconds=SUBAGENT_RESPONSES_RETRY_BASE_SECONDS,
+    )
+
+
+async def compact_subagent_session(
+    record: dict[str, Any],
+    *,
+    allow_subagents: bool,
+    depth: int,
+    reason: str = "threshold",
+) -> bool:
+    session_id = str(record["session_id"])
+    agent_id = str(record["id"])
+
+    def estimate(items, instructions):
+        return estimate_subagent_request_tokens(
+            items,
+            allow_subagents=allow_subagents,
+            depth=depth,
+            tools=[],
+            extra_instructions=instructions,
+            max_output_tokens=subagent_compaction_generation_budget(),
+            reasoning_effort=COMPACTION_REASONING_EFFORT,
+        )
+
+    async def create(items, instructions):
+        return await create_subagent_response(
+            items,
+            agent_id=agent_id,
+            allow_subagents=allow_subagents,
+            depth=depth,
+            tools=[],
+            extra_instructions=instructions,
+            max_output_tokens=subagent_compaction_generation_budget(),
+            reasoning_effort=COMPACTION_REASONING_EFFORT,
+        )
+
+    return await compact_session(
+        session_id,
+        estimate_compaction_request=estimate,
+        create_compaction_response=create,
+        force=reason == "overflow",
+        reason=reason,
+        input_budget=subagent_context_input_budget(),
+        generation_budget=subagent_compaction_generation_budget(),
+    )
+
+
+async def maybe_compact_subagent(
+    record: dict[str, Any],
+    *,
+    allow_subagents: bool,
+    depth: int,
+) -> None:
+    budget = subagent_context_input_budget()
+    if not budget:
+        return
+    session_id = str(record["session_id"])
+    work = build_active_context(session_id)
+    if not work:
+        return
+    estimated = estimate_subagent_request_tokens(
+        work,
+        allow_subagents=allow_subagents,
+        depth=depth,
+    )
+    if estimated < budget:
+        return
+    try:
+        await ensure_context_under_budget(
+            session_id,
+            estimate_active_fn=lambda items: (
+                estimate_subagent_request_tokens(
+                    items,
+                    allow_subagents=allow_subagents,
+                    depth=depth,
+                )
+            ),
+            estimate_compaction_request=lambda items, instructions: (
+                estimate_subagent_request_tokens(
+                    items,
+                    allow_subagents=allow_subagents,
+                    depth=depth,
+                    tools=[],
+                    extra_instructions=instructions,
+                    max_output_tokens=subagent_compaction_generation_budget(),
+                    reasoning_effort=COMPACTION_REASONING_EFFORT,
+                )
+            ),
+            create_compaction_response=lambda items, instructions: (
+                create_subagent_response(
+                    items,
+                    agent_id=str(record["id"]),
+                    allow_subagents=allow_subagents,
+                    depth=depth,
+                    tools=[],
+                    extra_instructions=instructions,
+                    max_output_tokens=subagent_compaction_generation_budget(),
+                    reasoning_effort=COMPACTION_REASONING_EFFORT,
+                )
+            ),
+            reason="threshold",
+            log_source="subagent",
+            input_budget=budget,
+            generation_budget=subagent_compaction_generation_budget(),
+        )
+        log_event(
+            "subagent",
+            "context_compacted",
+            {
+                "agent_id": record.get("id"),
+                "reason": "threshold",
+            },
+        )
+    except Exception as exc:
+        log_event(
+            "subagent",
+            "compaction_error",
+            {
+                "agent_id": record.get("id"),
+                "error": f"{type(exc).__name__}: {exc}",
+            },
+        )
+
+
+async def run_subagent(
+    *,
+    agent_id: str,
+    chat_id: ConversationId,
+    depth: int,
+    allow_subagents: bool,
+) -> str:
+    from approval import execute_tool_with_approval
+    record = session.subagent_records[agent_id]
+    session_id = str(record["session_id"])
+    work = build_active_context(session_id)
+    if not work:
+        raise RuntimeError("Subagent session has no input")
+    record.setdefault("todos", [])
+    record["subagents_allowed"] = allow_subagents
+    previous_events = list(record.get("tool_events", []))
+    recovery_context = record.get("recovery_context")
+    skills_instructions = await skill_catalog_instructions()
+
+    async def drain_inputs(
+        active_work: list[dict[str, Any]],
+        turn_inputs: list[dict[str, Any]],
+    ) -> int:
+        applied = 0
+        pending = record.setdefault("pending_inputs", [])
+        while pending:
+            text = str(pending.pop(0))
+            steer_input = {"role": "user", "content": text}
+            append_item(session_id, steer_input, source="steer")
+            active_work.append(steer_input)
+            turn_inputs.append(steer_input)
+            applied += 1
+        if applied:
+            save_state()
+        return applied
+
+    def record_items(
+        items: list[dict[str, Any]],
+        source: str,
+    ) -> None:
+        for item in items:
+            append_item(session_id, item, source=source)
+
+    async def create_response(
+        active_work: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        budget = subagent_context_input_budget()
+        estimate: int | None = None
+        recovery_inst = (
+            (
+                "Recovery context from interrupted work follows. "
+                "Continue safely from the shared workspace state. "
+                "Do not assume an in-flight side effect completed "
+                "or failed; inspect before repeating it.\n\n"
+                + json.dumps(
+                    _recovery_prompt_payload(recovery_context),
+                    ensure_ascii=False,
+                )
+            )
+            if recovery_context
+            else ""
+        )
+        if skills_instructions:
+            recovery_inst = "\n\n".join(
+                part
+                for part in (recovery_inst, skills_instructions)
+                if part
+            )
+        if budget:
+            estimate = estimate_subagent_request_tokens(
+                active_work,
+                allow_subagents=allow_subagents,
+                depth=depth,
+                extra_instructions=recovery_inst,
+            )
+            if estimate >= budget:
+                fitted = await ensure_context_under_budget(
+                    session_id,
+                    estimate_active_fn=lambda items: (
+                        estimate_subagent_request_tokens(
+                            items,
+                            allow_subagents=allow_subagents,
+                            depth=depth,
+                            extra_instructions=recovery_inst,
+                        )
+                    ),
+                    estimate_compaction_request=lambda items, instructions: (
+                        estimate_subagent_request_tokens(
+                            items,
+                            allow_subagents=allow_subagents,
+                            depth=depth,
+                            tools=[],
+                            extra_instructions=instructions,
+                            max_output_tokens=subagent_compaction_generation_budget(),
+                            reasoning_effort=COMPACTION_REASONING_EFFORT,
+                        )
+                    ),
+                    create_compaction_response=lambda items, instructions: (
+                        create_subagent_response(
+                            items,
+                            agent_id=agent_id,
+                            allow_subagents=allow_subagents,
+                            depth=depth,
+                            tools=[],
+                            extra_instructions=instructions,
+                            max_output_tokens=subagent_compaction_generation_budget(),
+                            reasoning_effort=COMPACTION_REASONING_EFFORT,
+                        )
+                    ),
+                    reason="threshold",
+                    log_source="subagent",
+                    input_budget=budget,
+                    generation_budget=subagent_compaction_generation_budget(),
+                )
+                active_work[:] = fitted
+                estimate = estimate_subagent_request_tokens(
+                    active_work,
+                    allow_subagents=allow_subagents,
+                    depth=depth,
+                    extra_instructions=recovery_inst,
+                )
+
+        async def _request(items):
+            return await create_subagent_response(
+                items,
+                agent_id=agent_id,
+                allow_subagents=allow_subagents,
+                depth=depth,
+                extra_instructions=recovery_inst,
+            )
+
+        async def _compact_forced(items):
+            rebuilt = await ensure_context_under_budget(
+                session_id,
+                estimate_active_fn=lambda work: (
+                    estimate_subagent_request_tokens(
+                        work,
+                        allow_subagents=allow_subagents,
+                        depth=depth,
+                        extra_instructions=recovery_inst,
+                    )
+                ),
+                estimate_compaction_request=lambda work, instructions: (
+                    estimate_subagent_request_tokens(
+                        work,
+                        allow_subagents=allow_subagents,
+                        depth=depth,
+                        tools=[],
+                        extra_instructions=instructions,
+                        max_output_tokens=subagent_compaction_generation_budget(),
+                        reasoning_effort=COMPACTION_REASONING_EFFORT,
+                    )
+                ),
+                create_compaction_response=lambda work, instructions: (
+                    create_subagent_response(
+                        work,
+                        agent_id=agent_id,
+                        allow_subagents=allow_subagents,
+                        depth=depth,
+                        tools=[],
+                        extra_instructions=instructions,
+                        max_output_tokens=subagent_compaction_generation_budget(),
+                        reasoning_effort=COMPACTION_REASONING_EFFORT,
+                    )
+                ),
+                reason="overflow",
+                force=True,
+                include_continuation=True,
+                log_source="subagent",
+                input_budget=subagent_context_input_budget(),
+                generation_budget=subagent_compaction_generation_budget(),
+            )
+            return rebuilt
+
+        def _on_overflow(exc: BaseException) -> None:
+            log_event(
+                "subagent",
+                "context_overflow",
+                {
+                    "agent_id": agent_id,
+                    "estimated_tokens": estimate,
+                    "prompt_tokens": getattr(exc, "prompt_tokens", None),
+                    "context_tokens": getattr(exc, "context_tokens", None),
+                },
+            )
+
+        return await request_with_checkpoint_retry(
+            active_work,
+            request_fn=_request,
+            compact_fn=_compact_forced,
+            overflow_error=ContextLengthError,
+            on_overflow=_on_overflow,
+        )
+
+    async def execute_call(call: dict[str, Any]) -> dict[str, Any]:
+        # Explicit session_id so chat_history never falls back to main.
+        tool_context = dict(record)
+        tool_context["session_id"] = session_id
+        tool_context["todo_state"] = record
+        return await execute_tool_with_approval(
+            chat_id,
+            call,
+            execution_context=tool_context,
+        )
+
+    async def compact_work(
+        active_work: list[dict[str, Any]],
+        *,
+        force: bool = False,
+    ) -> list[dict[str, Any]] | None:
+        reason = "overflow" if force else "threshold"
+        if not force:
+            budget = subagent_context_input_budget()
+            if not budget:
+                return None
+            est = estimate_subagent_request_tokens(
+                active_work,
+                allow_subagents=allow_subagents,
+                depth=depth,
+            )
+            if est < budget:
+                return None
+        ok = await compact_subagent_session(
+            record,
+            allow_subagents=allow_subagents,
+            depth=depth,
+            reason=reason,
+        )
+        if not ok:
+            return None
+        rebuilt = build_active_context(session_id)
+        if reason == "overflow":
+            rebuilt.extend(checkpoint_continuation_input())
+        return rebuilt
+
+    def checkpoint(events: list[dict[str, Any]]) -> None:
+        record["tool_events"] = _bounded_tool_events(
+            previous_events + list(events)
+        )
+        save_state()
+
+    result = await run_agent(
+        work=work,
+        create_response=create_response,
+        execute_call=execute_call,
+        source="subagent",
+        agent_id=agent_id,
+        max_tool_rounds=MAX_TOOL_ROUNDS,
+        drain_inputs=drain_inputs,
+        checkpoint=checkpoint,
+        compact_context=compact_work,
+        record_items=record_items,
+    )
+    record["tool_events"] = _bounded_tool_events(
+        previous_events + list(result["tool_events"])
+    )
+    record["recovery_context"] = None
+    save_state()
+    if record.get("pending_inputs"):
+        text = str(record["pending_inputs"].pop(0))
+        append_item(
+            session_id,
+            {"role": "user", "content": text},
+            source="steer",
+        )
+        save_state()
+        return await run_subagent(
+            agent_id=agent_id,
+            chat_id=chat_id,
+            depth=depth,
+            allow_subagents=allow_subagents,
+        )
+    await maybe_compact_subagent(
+        record,
+        allow_subagents=allow_subagents,
+        depth=depth,
+    )
+    if record.get("pending_inputs"):
+        text = str(record["pending_inputs"].pop(0))
+        append_item(
+            session_id,
+            {"role": "user", "content": text},
+            source="steer",
+        )
+        save_state()
+        return await run_subagent(
+            agent_id=agent_id,
+            chat_id=chat_id,
+            depth=depth,
+            allow_subagents=allow_subagents,
+        )
+    return str(result["text"])
+
+
+def new_record(
+    task: str,
+    *,
+    chat_id: ConversationId,
+    depth: int,
+    background: bool,
+    allow_subagents: bool,
+) -> dict[str, Any]:
+    agent_id = secrets.token_hex(4)
+    parent_session_id = state.get("current_session_id")
+    session_id = create_session(
+        kind="subagent",
+        agent_id=agent_id,
+        parent_session_id=(
+            str(parent_session_id)
+            if parent_session_id
+            else None
+        ),
+    )
+    append_item(
+        session_id,
+        {"role": "user", "content": task},
+        source="delegation",
+    )
+    return {
+        "id": agent_id,
+        "session_id": session_id,
+        "parent_session_id": parent_session_id,
+        "task": task,
+        "last_task": task,
+        "task_count": 1,
+        "todos": [],
+        "pending_inputs": [],
+        "recovery_context": None,
+        "chat_id": chat_id,
+        "depth": depth,
+        "background": background,
+        "allow_subagents": allow_subagents,
+        "status": "running",
+        "started_at": int(time.time()),
+        "completed_at": None,
+        "result": None,
+        "error": None,
+        "tool_events": [],
+        "notify_completion": background,
+        "completion_pending": False,
+        "completion_notified_at": None,
+        "completion_attempts": 0,
+    }
+
+
+def lifecycle_record(
+    record: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "agent_id":
+            record.get("id"),
+        "status":
+            record.get("status"),
+        "background":
+            record.get(
+                "background"
+            ),
+        "depth":
+            record.get("depth"),
+        "started_at":
+            record.get(
+                "started_at"
+            ),
+        "completed_at":
+            record.get(
+                "completed_at"
+            ),
+        "task_count": record.get("task_count", 1),
+        "tool_event_count":
+            len(
+                record.get(
+                    "tool_events",
+                    [],
+                )
+            ),
+        "todo_count":
+            len(
+                record.get(
+                    "todos",
+                    [],
+                )
+            ),
+        "completion_pending":
+            record.get(
+                "completion_pending",
+                False,
+            ),
+        "error":
+            record.get("error"),
+    }
+
+
+def subagent_summaries() -> list[
+    dict[str, Any]
+]:
+    current = state.get("current_session_id")
+    rows: list[dict[str, Any]] = []
+    for record in session.subagent_records.values():
+        if (
+            current
+            and record.get("parent_session_id") not in {
+                None,
+                current,
+            }
+        ):
+            # Historical sessions stay discoverable via chat_history.
+            continue
+        rows.append(
+            {
+                "id": record.get("id"),
+                "status": record.get("status"),
+                "task": record.get("task"),
+                "last_task": record.get("last_task"),
+                "depth": record.get("depth"),
+                "background": record.get("background"),
+                "session_id": record.get("session_id"),
+                "parent_session_id": record.get(
+                    "parent_session_id"
+                ),
+                "started_at": record.get("started_at"),
+                "completed_at": record.get("completed_at"),
+            }
+        )
+    return rows
+
+
+def continue_record(
+    record: dict[str, Any],
+    task: str,
+    *,
+    chat_id: ConversationId,
+    depth: int,
+    background: bool,
+    allow_subagents: bool,
+) -> None:
+    if record.get(
+        "status"
+    ) in {
+        "cancelled",
+        "interrupted",
+    }:
+        record[
+            "recovery_context"
+        ] = {
+            "status":
+                record.get(
+                    "status"
+                ),
+            "last_task":
+                record.get(
+                    "last_task"
+                ),
+            "error":
+                record.get(
+                    "error"
+                ),
+            "tool_events":
+                record.get(
+                    "tool_events",
+                    [],
+                ),
+        }
+    record["last_task"] = task
+    record["task_count"] = int(record.get("task_count") or 1) + 1
+    append_item(
+        str(record["session_id"]),
+        {
+            "role": "user",
+            "content": task,
+        },
+        source="delegation",
+    )
+    record["chat_id"] = chat_id
+    record["depth"] = depth
+    record["background"] = background
+    record[
+        "allow_subagents"
+    ] = allow_subagents
+    record["status"] = "running"
+    record["started_at"] = int(
+        time.time()
+    )
+    record["completed_at"] = None
+    record["result"] = None
+    record["error"] = None
+    record["pending_inputs"] = []
+    record[
+        "notify_completion"
+    ] = background
+    record[
+        "completion_pending"
+    ] = False
+    record[
+        "completion_notified_at"
+    ] = None
+    record[
+        "completion_attempts"
+    ] = 0
+    save_state()
+
+
+def save_interrupted_subagent(
+    record: dict[str, Any],
+) -> None:
+    checkpoint = {
+        "id": record.get("id"),
+        "session_id": record.get("session_id"),
+        "interrupted_at": time.time(),
+        "tool_events": _bounded_tool_events(
+            list(record.get("tool_events") or [])
+        ),
+    }
+    interrupted = list(
+        state.get(
+            "interrupted_subagents",
+            [],
+        )
+    )
+    interrupted = [
+        item
+        for item in interrupted
+        if item.get("id")
+        != checkpoint.get("id")
+    ]
+    interrupted.append(
+        checkpoint
+    )
+    state["interrupted_subagents"] = bounded_interrupted_subagents(interrupted)
+    save_state()
+    log_event(
+        "subagent",
+        "checkpoint_saved",
+        lifecycle_record(
+            record
+        ),
+    )
+
+
+async def run_background_subagent(
+    record: dict[str, Any],
+) -> None:
+    agent_id = str(
+        record["id"]
+    )
+    try:
+        result = await run_subagent(
+            agent_id=agent_id,
+            chat_id=record["chat_id"],
+            depth=int(
+                record["depth"]
+            ),
+            allow_subagents=bool(
+                record["allow_subagents"]
+            ),
+        )
+        record["result"] = result[
+            :MAX_TOOL_OUTPUT
+        ]
+        record["status"] = "completed"
+    except asyncio.CancelledError:
+        record["status"] = "cancelled"
+        record["error"] = (
+            "Subagent was cancelled"
+        )
+        record["completed_at"] = int(
+            time.time()
+        )
+        save_interrupted_subagent(
+            record
+        )
+        raise
+    except Exception as exc:
+        record["status"] = "failed"
+        record["error"] = (
+            f"{type(exc).__name__}: {exc}"
+        )
+    finally:
+        record["completed_at"] = int(
+            time.time()
+        )
+        should_notify = bool(
+            record.get(
+                "notify_completion",
+                True,
+            )
+        )
+        record[
+            "completion_pending"
+        ] = should_notify
+        save_state()
+        log_event(
+            "subagent",
+            "completed",
+            lifecycle_record(
+                record
+            ),
+        )
+        session.subagent_tasks.pop(
+            agent_id,
+            None,
+        )
+        if should_notify:
+            await session.subagent_events.put(
+                dict(record)
+            )
+
+
+async def subagent_tool(
+    args: dict[str, Any],
+    *,
+    chat_id: ConversationId | None,
+    execution_context: dict[str, Any],
+) -> dict[str, Any]:
+    task = str(
+        args.get(
+            "task",
+            "",
+        )
+    ).strip()
+    requested_id = str(
+        args.get(
+            "agent_id",
+            "",
+        )
+    ).strip()
+    if not task:
+        if requested_id:
+            record = (
+                session.subagent_records.get(
+                    requested_id
+                )
+            )
+            if not record:
+                return {
+                    "ok": False,
+                    "error": (
+                        f"subagent {requested_id} not found"
+                    ),
+                }
+            return {
+                "ok": True,
+                "subagent": {
+                    key: value
+                    for key, value
+                    in record.items()
+                    if key
+                    not in {
+                        "notify_completion",
+                    }
+                },
+            }
+        return {
+            "ok": True,
+            "subagents":
+                subagent_summaries(),
+        }
+    if chat_id is None:
+        return {
+            "ok": False,
+            "error": (
+                "subagent requires a user-facing parent agent"
+            ),
+        }
+    parent_depth = int(
+        execution_context.get(
+            "depth",
+            0,
+        )
+    )
+    if (
+        parent_depth > 0
+        and not execution_context.get(
+            "subagents_allowed",
+            False,
+        )
+    ):
+        return {
+            "ok": False,
+            "error": (
+                "Nested subagents were not authorized"
+            ),
+        }
+    depth = parent_depth + 1
+    if depth > MAX_SUBAGENT_DEPTH:
+        return {
+            "ok": False,
+            "error": (
+                "Maximum subagent depth reached"
+            ),
+        }
+    background = bool(
+        args.get(
+            "background",
+            False,
+        )
+    )
+    if (
+        parent_depth > 0
+        and background
+    ):
+        return {
+            "ok": False,
+            "error": (
+                "Nested subagents must run in the foreground"
+            ),
+        }
+    if background and len(session.subagent_tasks) >= MAX_BACKGROUND_SUBAGENTS:
+        return {
+            "ok": False,
+            "status": "capacity_reached",
+            "error": (
+                "Background subagent capacity reached "
+                f"({MAX_BACKGROUND_SUBAGENTS})"
+            ),
+        }
+    if requested_id:
+        record = (
+            session.subagent_records.get(
+                requested_id
+            )
+        )
+        if not record:
+            return {
+                "ok": False,
+                "error": (
+                    f"subagent {requested_id} not found"
+                ),
+            }
+        if record.get(
+            "status"
+        ) == "running":
+            pending_inputs = record.setdefault(
+                "pending_inputs",
+                [],
+            )
+            if len(pending_inputs) >= MAX_SUBAGENT_PENDING_INPUTS:
+                return {
+                    "ok": False,
+                    "agent_id": requested_id,
+                    "status": "queue_full",
+                    "error": (
+                        "Subagent pending-input queue is full "
+                        f"({MAX_SUBAGENT_PENDING_INPUTS})"
+                    ),
+                }
+            record[
+                "last_task"
+            ] = task
+            record["task_count"] = int(
+                record.get("task_count") or 1
+            ) + 1
+            pending_inputs.append(task)
+            save_state()
+            log_event(
+                "subagent",
+                "steering_queued",
+                {
+                    "agent_id":
+                        requested_id,
+                    "input": task,
+                },
+            )
+            return {
+                "ok": True,
+                "agent_id":
+                    requested_id,
+                "status":
+                    "steering_queued",
+            }
+        allow_subagents = (
+            bool(
+                args[
+                    "allow_subagents"
+                ]
+            )
+            if "allow_subagents"
+            in args
+            else bool(
+                record.get(
+                    "allow_subagents",
+                    False,
+                )
+            )
+        )
+        continue_record(
+            record,
+            task,
+            chat_id=chat_id,
+            depth=depth,
+            background=background,
+            allow_subagents=(
+                allow_subagents
+                and depth
+                < MAX_SUBAGENT_DEPTH
+            ),
+        )
+    else:
+        allow_subagents = bool(
+            args.get(
+                "allow_subagents",
+                False,
+            )
+        )
+        record = new_record(
+            task,
+            chat_id=chat_id,
+            depth=depth,
+            background=background,
+            allow_subagents=(
+                allow_subagents
+                and depth
+                < MAX_SUBAGENT_DEPTH
+            ),
+        )
+    agent_id = str(
+        record["id"]
+    )
+    session.subagent_records[
+        agent_id
+    ] = record
+    prune_subagent_records()
+    save_state()
+    log_event(
+        "subagent",
+        "started",
+        lifecycle_record(
+            record
+        ),
+    )
+    if background:
+        task_handle = asyncio.create_task(
+            run_background_subagent(
+                record
+            )
+        )
+        session.subagent_tasks[
+            agent_id
+        ] = task_handle
+        return {
+            "ok": True,
+            "agent_id": agent_id,
+            "status": "running",
+        }
+    try:
+        result = await run_subagent(
+            agent_id=agent_id,
+            chat_id=chat_id,
+            depth=depth,
+            allow_subagents=bool(
+                record[
+                    "allow_subagents"
+                ]
+            ),
+        )
+        record["result"] = result[
+            :MAX_TOOL_OUTPUT
+        ]
+        record["status"] = "completed"
+        save_state()
+        return {
+            "ok": True,
+            "agent_id": agent_id,
+            "status": "completed",
+            "result": record["result"],
+        }
+    except asyncio.CancelledError:
+        record["status"] = "cancelled"
+        record["error"] = (
+            "Subagent was cancelled"
+        )
+        record["completed_at"] = int(
+            time.time()
+        )
+        save_interrupted_subagent(
+            record
+        )
+        raise
+    except Exception as exc:
+        record["status"] = "failed"
+        record["error"] = (
+            f"{type(exc).__name__}: {exc}"
+        )
+        save_state()
+        return {
+            "ok": False,
+            "agent_id": agent_id,
+            "status": "failed",
+            "error": record["error"],
+        }
+    finally:
+        record["completed_at"] = int(
+            time.time()
+        )
+        prune_subagent_records()
+        save_state()
+        log_event(
+            "subagent",
+            "completed",
+            lifecycle_record(
+                record
+            ),
+        )
+
+
+def completion_prompt(
+    record: dict[str, Any],
+) -> str:
+    payload = {
+        "agent_id": record.get("id"),
+        "task": (
+            record.get("last_task")
+            or record.get("task")
+        ),
+        "status": record.get("status"),
+        "result": record.get("result"),
+        "error": record.get("error"),
+    }
+    return (
+        "A background subagent has finished. Assess its result as the parent "
+        "agent and send the user the relevant outcome. Do not describe "
+        "this notification as a new user request.\n\n"
+        + json.dumps(
+            payload,
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
+
+
+async def requeue_completion(
+    agent_id: str,
+    delay: float,
+) -> None:
+    await asyncio.sleep(
+        delay
+    )
+    record = (
+        session.subagent_records.get(
+            agent_id
+        )
+    )
+    if (
+        record
+        and record.get(
+            "completion_pending"
+        )
+    ):
+        await session.subagent_events.put(
+            dict(record)
+        )
+
+
+def schedule_completion_retry(agent_id: str, delay: float) -> None:
+    previous = _completion_retry_tasks.get(agent_id)
+    if previous is not None and not previous.done():
+        previous.cancel()
+    task = asyncio.create_task(requeue_completion(agent_id, delay))
+    _completion_retry_tasks[agent_id] = task
+
+    def remove(completed: asyncio.Task[None]) -> None:
+        if _completion_retry_tasks.get(agent_id) is completed:
+            _completion_retry_tasks.pop(agent_id, None)
+
+    task.add_done_callback(remove)
+
+
+async def completion_event_loop() -> None:
+    from controller import enqueue_internal_input
+    for record in (
+        session.subagent_records.values()
+    ):
+        if record.get(
+            "completion_pending"
+        ):
+            await session.subagent_events.put(
+                dict(record)
+            )
+    while True:
+        record = await session.subagent_events.get()
+        try:
+            live_record = (
+                session.subagent_records.get(
+                    str(
+                        record["id"]
+                    )
+                )
+            )
+            if (
+                not live_record
+                or not live_record.get(
+                    "completion_pending"
+                )
+            ):
+                continue
+            try:
+                delivered = await enqueue_internal_input(
+                    record["chat_id"],
+                    completion_prompt(
+                        record
+                    ),
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                delivered = False
+                log_event(
+                    "subagent",
+                    "completion_delivery_error",
+                    {
+                        "agent_id": record.get("id"),
+                        "type": type(exc).__name__,
+                        "message": str(exc),
+                    },
+                )
+            if delivered:
+                live_record[
+                    "completion_pending"
+                ] = False
+                live_record[
+                    "completion_notified_at"
+                ] = int(
+                    time.time()
+                )
+                live_record[
+                    "completion_attempts"
+                ] = 0
+                prune_subagent_records()
+                save_state()
+            else:
+                attempts = int(
+                    live_record.get(
+                        "completion_attempts",
+                        0,
+                    )
+                ) + 1
+                live_record[
+                    "completion_attempts"
+                ] = attempts
+                save_state()
+                schedule_completion_retry(
+                    str(live_record["id"]),
+                    float(min(60, 2 ** min(attempts, 6))),
+                )
+        finally:
+            session.subagent_events.task_done()
+
+
+async def cancel_background_subagents() -> int:
+    tasks: list[asyncio.Task] = []
+    for agent_id, task in list(
+        session.subagent_tasks.items()
+    ):
+        if task.done():
+            continue
+        record = session.subagent_records.get(
+            agent_id
+        )
+        if record:
+            record[
+                "notify_completion"
+            ] = False
+        tasks.append(
+            task
+        )
+    for task in tasks:
+        task.cancel()
+    if tasks:
+        await asyncio.gather(
+            *tasks,
+            return_exceptions=True,
+        )
+    retry_tasks = tuple(_completion_retry_tasks.values())
+    _completion_retry_tasks.clear()
+    for task in retry_tasks:
+        task.cancel()
+    if retry_tasks:
+        await asyncio.gather(*retry_tasks, return_exceptions=True)
+    return len(tasks)

@@ -1,0 +1,283 @@
+import json
+import os
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+_ROOT = Path(__file__).resolve().parent.parent
+_HOME = Path(tempfile.mkdtemp(prefix="raptor-chat-store-"))
+os.environ["TG_BOT_TOKEN"] = "test-token"
+os.environ["TG_USER_ID"] = "1"
+os.environ["RAPTOR_HOME"] = str(_HOME)
+os.environ["AGENT_WORKDIR"] = str(_HOME)
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
+
+import chat_store
+
+
+class ChatStoreTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._chat_dir = Path(tempfile.mkdtemp(prefix="chats-"))
+        self._chat_patch = patch.object(
+            chat_store,
+            "CHAT_DIR",
+            self._chat_dir,
+        )
+        self._chat_patch.start()
+        self.addCleanup(self._chat_patch.stop)
+        chat_store._SEQ_CACHE.clear()
+
+    def test_session_creation_creates_jsonl(self) -> None:
+        sid = chat_store.create_session(kind="main")
+        path = chat_store.chat_path(sid)
+        self.assertTrue(path.is_file())
+        events = chat_store.read_events(sid)
+        self.assertEqual(events[0]["type"], "session_start")
+        self.assertEqual(events[0]["kind"], "main")
+        self.assertEqual(events[0]["seq"], 1)
+
+    def test_sequence_numbers_monotonic(self) -> None:
+        sid = chat_store.create_session(kind="main")
+        a = chat_store.append_item(
+            sid,
+            {"role": "user", "content": "one"},
+            source="user",
+        )
+        b = chat_store.append_item(
+            sid,
+            {"role": "user", "content": "two"},
+            source="user",
+        )
+        self.assertEqual(a["seq"], 2)
+        self.assertEqual(b["seq"], 3)
+
+    def test_append_never_rewrites_previous_lines(self) -> None:
+        sid = chat_store.create_session(kind="main")
+        path = chat_store.chat_path(sid)
+        before = path.read_text(encoding="utf-8")
+        chat_store.append_item(
+            sid,
+            {"role": "user", "content": "x"},
+            source="user",
+        )
+        after = path.read_text(encoding="utf-8")
+        self.assertTrue(after.startswith(before))
+        self.assertGreater(len(after), len(before))
+
+    def test_raw_responses_items_round_trip(self) -> None:
+        sid = chat_store.create_session(kind="main")
+        item = {
+            "type": "function_call",
+            "name": "shell",
+            "call_id": "c1",
+            "arguments": '{"command":"ls"}',
+        }
+        written = chat_store.append_item(
+            sid,
+            item,
+            source="assistant",
+        )
+        loaded = chat_store.item_events(sid)[-1]
+        self.assertEqual(loaded["item"], item)
+        self.assertEqual(written["item"], item)
+
+    def test_checkpoint_and_session_end_persist(self) -> None:
+        sid = chat_store.create_session(kind="main")
+        chat_store.append_item(
+            sid,
+            {"role": "user", "content": "hi"},
+            source="user",
+        )
+        cp = chat_store.append_checkpoint(
+            sid,
+            summary="done so far",
+            through_seq=2,
+            input_from_seq=2,
+            input_to_seq=2,
+            reason="manual",
+            anchors=[
+                {
+                    "seq": 2,
+                    "item": {"role": "user", "content": "hi"},
+                }
+            ],
+        )
+        end = chat_store.end_session(
+            sid,
+            reason="new_session",
+            todos=[{"id": 1, "text": "t"}],
+        )
+        self.assertEqual(cp["type"], "checkpoint")
+        self.assertEqual(end["type"], "session_end")
+        self.assertEqual(
+            chat_store.latest_checkpoint(sid)["summary"],
+            "done so far",
+        )
+        self.assertEqual(
+            chat_store.latest_checkpoint(sid)["anchors"][0]["item"]["content"],
+            "hi",
+        )
+
+    def test_main_and_subagent_sessions_isolated(self) -> None:
+        main = chat_store.create_session(kind="main")
+        child = chat_store.create_session(
+            kind="subagent",
+            agent_id="abcd1234",
+            parent_session_id=main,
+        )
+        chat_store.append_item(
+            main,
+            {"role": "user", "content": "parent"},
+            source="user",
+        )
+        chat_store.append_item(
+            child,
+            {"role": "user", "content": "child"},
+            source="delegation",
+        )
+        self.assertEqual(
+            [e["item"]["content"] for e in chat_store.item_events(main)],
+            ["parent"],
+        )
+        self.assertEqual(
+            [e["item"]["content"] for e in chat_store.item_events(child)],
+            ["child"],
+        )
+        start = chat_store.read_events(child)[0]
+        self.assertEqual(start["parent_session_id"], main)
+        self.assertEqual(start["agent_id"], "abcd1234")
+
+    def test_invalid_session_id_rejected(self) -> None:
+        with self.assertRaises(ValueError):
+            chat_store.chat_path("../escape")
+        with self.assertRaises(ValueError):
+            chat_store.append_item(
+                "not-a-session",
+                {"role": "user", "content": "x"},
+                source="user",
+            )
+
+    def test_partial_final_line_repaired_before_append(
+        self,
+    ) -> None:
+        sid = chat_store.create_session(kind="main")
+        path = chat_store.chat_path(sid)
+        path.write_bytes(
+            path.read_bytes() + b'{"v":1,"seq":99,"partial"'
+        )
+        self.assertTrue(chat_store.repair_chat_file(sid))
+        chat_store.append_item(
+            sid,
+            {"role": "user", "content": "after-repair"},
+            source="user",
+        )
+        lines = [
+            line
+            for line in path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        for line in lines:
+            json.loads(line)
+        self.assertIn(
+            "after-repair",
+            lines[-1],
+        )
+
+    def test_append_repairs_crash_tail_automatically(
+        self,
+    ) -> None:
+        sid = chat_store.create_session(kind="main")
+        path = chat_store.chat_path(sid)
+        good = path.read_bytes()
+        path.write_bytes(good + b'{"broken":')
+        chat_store.append_item(
+            sid,
+            {"role": "user", "content": "ok"},
+            source="user",
+        )
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if line.strip():
+                json.loads(line)
+
+    def test_healthy_append_does_not_reread_whole_file(
+        self,
+    ) -> None:
+        sid = chat_store.create_session(kind="main")
+        path = chat_store.chat_path(sid)
+        reads = {"n": 0}
+        real_read = Path.read_bytes
+
+        def counted_read(self):
+            reads["n"] += 1
+            return real_read(self)
+
+        with patch.object(Path, "read_bytes", counted_read):
+            chat_store.append_item(
+                sid,
+                {"role": "user", "content": "cheap"},
+                source="user",
+            )
+        self.assertEqual(reads["n"], 0)
+        self.assertTrue(path.read_bytes().endswith(b"\n"))
+
+    def test_compaction_render_truncates_oversized_record(
+        self,
+    ) -> None:
+        huge = "H" * 50_000
+        records = [
+            {
+                "type": "item",
+                "seq": 2,
+                "item": {
+                    "role": "user",
+                    "content": huge,
+                },
+            }
+        ]
+        rendered = chat_store.render_compaction_records(
+            records,
+            max_record_chars=2_000,
+        )
+        self.assertLessEqual(len(rendered), 2_000)
+        self.assertIn(
+            "truncated for checkpoint generation",
+            rendered,
+        )
+        self.assertIn("USER", rendered)
+        self.assertNotIn(huge, rendered)
+
+    def test_compaction_render_leaves_archive_untouched(
+        self,
+    ) -> None:
+        sid = chat_store.create_session(kind="main")
+        huge = "CANONICAL-BLOB-" + ("Z" * 40_000)
+        event = chat_store.append_item(
+            sid,
+            {"role": "user", "content": huge},
+            source="user",
+        )
+        before = chat_store.chat_path(sid).read_text(
+            encoding="utf-8"
+        )
+        rendered = chat_store.render_compaction_records(
+            [event],
+            max_record_chars=1_500,
+        )
+        after = chat_store.chat_path(sid).read_text(
+            encoding="utf-8"
+        )
+        self.assertEqual(before, after)
+        stored = chat_store.item_events(sid)[-1]["item"]["content"]
+        self.assertEqual(stored, huge)
+        self.assertLessEqual(len(rendered), 1_500)
+        self.assertIn(
+            "truncated for checkpoint generation",
+            rendered,
+        )
+
+
+if __name__ == "__main__":
+    unittest.main()
