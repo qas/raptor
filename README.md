@@ -19,7 +19,8 @@ providers can run at the same time without sharing replies or transport state.
 - **Bounded.** Context, tool output, subagent records, and recovery events have
   explicit limits.
 - **Observable.** Structured lifecycle events record requests, compaction,
-  retries, tools, and completion delivery.
+  retries, tools, and completion delivery without logging prompt or tool-result
+  bodies.
 - **Extensible.** Providers and workspace-local skills use small explicit
   contracts.
 
@@ -63,12 +64,15 @@ against the same `RAPTOR_HOME`.
 | Command | Behavior |
 |---|---|
 | `/new` | Archive the current session and create a clean one |
+| `/chats [term]` | List recent chats, or find chats containing a term |
+| `/resume <session-id>` | Resume a prior main chat by its full ID |
 | `/ask <message>` | Run a stateless side query without changing conversation history |
 | `/thread` | Fork a temporary conversation branch |
 | `/thread clear` | Discard the branch and return to its parent |
 | `/thread merge` | Merge branch-native conversation items into its parent |
 | `/status` | Show runtime, context, goal, subagent, and shell status |
-| `/stop` | Cancel all active root, subagent, and shell work |
+| `/stop` | Interrupt the current root turn; background work continues |
+| `/stop all` | Interrupt the root and cancel background subagents and shells |
 | `/compact` | Create a durable context checkpoint |
 | `/model` | List or switch backend models |
 | `/approval` | Toggle tool approval |
@@ -95,6 +99,8 @@ side effects are not reversible.
 | `agent.py` | Root turn execution and compaction integration |
 | `engine.py` | Tool-round engine and response parsing |
 | `controller.py` | Single-owner root scheduling and goal continuation |
+| `turn_runtime.py` | Root-turn ownership, identity, and bounded interruption |
+| `runtime_events.py` | Typed background-completion events delivered to the root |
 | `observability.py` | Structured runtime events and activity labels |
 | `responses.py` | Outbound Responses client, streaming, and retry policy |
 | `response_errors.py` | Shared Responses protocol errors |
@@ -124,7 +130,7 @@ instead of starting competing runs.
 
 The root agent can cancel one background subagent or managed shell by its
 returned identifier. Targeted cancellation suppresses completion delivery;
-`/stop` remains the user-facing global stop operation.
+`/stop all` is the user-facing global stop operation.
 
 Each queued request retains its originating conversation and provider delivery
 context. A Responses HTTP request that becomes steering remains open and
@@ -175,12 +181,15 @@ There is no unbounded automatic retry loop.
 Shell commands wait for `yield_time_ms` and then return a managed session ID if
 still running. `write_stdin` polls output or writes to a PTY. Detached
 completions re-enter through the root controller and retry delivery if the
-controller temporarily fails. `/stop` terminates every live process group.
+controller temporarily fails. `/stop all` terminates every live process group.
 
 Subagents have isolated transcripts and independent backend, reasoning, retry,
 and context-window configuration. Completed record retention and recovery tool
 events are bounded; running, interrupted, and undelivered completion records
-are protected from pruning.
+are protected from pruning. Their private tool history is never projected into
+the parent. A subagent compacts lazily when its next model request needs room,
+so finishing a child does not trigger speculative compaction or delay its
+result.
 
 ## Storage
 
