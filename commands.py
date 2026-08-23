@@ -83,7 +83,7 @@ from threads import (
 )
 from thread_state import current_thread, thread_active
 from turn_runtime import turns
-from todos import normalize_persisted_plan
+from todos import validate_plan
 
 # ---------------------------------------------------------------------------
 # Chat commands
@@ -169,7 +169,12 @@ def _format_chat_sessions(
 def _archived_todos(session_id: str) -> list[dict[str, Any]]:
     for event in reversed(read_events(session_id)):
         if event.get("type") == "session_end":
-            return normalize_persisted_plan(event.get("todos"))
+            try:
+                return validate_plan(event.get("todos"))
+            except ValueError as exc:
+                raise RuntimeError(
+                    f"Invalid archived plan in session {session_id}: {exc}"
+                ) from exc
     return []
 
 

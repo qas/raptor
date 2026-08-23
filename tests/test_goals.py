@@ -361,6 +361,23 @@ class GoalTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(current_goal()["status"], GOAL_ACTIVE)
         self.assertEqual(current_goal()["objective"], "revised objective")
 
+    def test_model_cannot_update_goal_after_user_pauses_it(self) -> None:
+        replace_goal("paused objective")
+        goal_id = current_goal()["id"]
+        pause_goal()
+
+        result = update_goal_tool(
+            {
+                "goal_id": goal_id,
+                "status": "blocked",
+                "reason": "late model result",
+            }
+        )
+
+        self.assertFalse(result["ok"])
+        self.assertIn("only an active goal", result["error"])
+        self.assertEqual(current_goal()["status"], GOAL_PAUSED)
+
     def test_model_goal_update_requires_a_change(self) -> None:
         replace_goal("initial objective")
 
@@ -1146,6 +1163,13 @@ class GoalTests(unittest.IsolatedAsyncioTestCase):
             GOAL_PAUSED,
         )
         self.assertIn("paused after restart", notice)
+
+    def test_invalid_persisted_goal_status_is_reported(self) -> None:
+        replace_goal("invalid state")
+        current_goal()["status"] = "unknown"
+
+        with self.assertRaisesRegex(RuntimeError, "persisted goal status"):
+            prepare_goal_on_startup()
 
     async def test_lost_wakeup_race_restarts_controller(
         self,

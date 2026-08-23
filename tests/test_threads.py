@@ -148,6 +148,36 @@ class ThreadTests(unittest.IsolatedAsyncioTestCase):
             1,
         )
 
+    async def test_merge_is_idempotent_after_partial_append(self) -> None:
+        result = await start_thread("!room:example.org")
+        branch = str(result["thread"]["session_id"])
+        branch_event = chat_store.append_item(
+            branch,
+            {"role": "user", "content": "branch question"},
+            source="user",
+        )
+        chat_store.append_event(
+            self.parent,
+            {
+                "type": "item",
+                "source": "thread_merge",
+                "origin": {
+                    "session_id": branch,
+                    "seq": branch_event["seq"],
+                },
+                "item": branch_event["item"],
+            },
+        )
+
+        merged = await finish_thread("!room:example.org", merge=True)
+
+        self.assertEqual(merged["merged_items"], 0)
+        work = build_active_context(self.parent)
+        self.assertEqual(
+            sum(item.get("content") == "branch question" for item in work),
+            1,
+        )
+
     async def test_real_agent_turn_writes_only_to_branch(self) -> None:
         async def fake_stream(_chat_id, _items, **_kwargs):
             return {

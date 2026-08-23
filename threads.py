@@ -8,6 +8,7 @@ from typing import Any
 from chat_provider import ConversationId, IncomingAction
 from chat_runtime import get_chat_provider
 from chat_store import (
+    append_event,
     append_item,
     append_meta,
     create_session,
@@ -112,17 +113,37 @@ async def finish_thread(
         return {"ok": False, "error": "Thread session state is invalid."}
     merged = 0
     if merge:
+        existing_origins = {
+            (
+                str(origin.get("session_id") or ""),
+                int(origin.get("seq") or 0),
+            )
+            for event in item_events(parent_id)
+            if event.get("source") == "thread_merge"
+            and isinstance((origin := event.get("origin")), dict)
+        }
         for event in item_events(branch_id):
             if event.get("source") == "thread_seed":
                 continue
             item = event.get("item")
             if not isinstance(item, dict):
                 continue
-            append_item(
+            origin = (branch_id, int(event.get("seq") or 0))
+            if origin in existing_origins:
+                continue
+            append_event(
                 parent_id,
-                copy.deepcopy(item),
-                source="thread_merge",
+                {
+                    "type": "item",
+                    "source": "thread_merge",
+                    "origin": {
+                        "session_id": origin[0],
+                        "seq": origin[1],
+                    },
+                    "item": copy.deepcopy(item),
+                },
             )
+            existing_origins.add(origin)
             merged += 1
     end_session(
         branch_id,

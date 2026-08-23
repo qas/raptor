@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import sys
 import tempfile
 import unittest
@@ -216,6 +217,18 @@ class ChatStoreTests(unittest.TestCase):
         for line in path.read_text(encoding="utf-8").splitlines():
             if line.strip():
                 json.loads(line)
+
+    def test_complete_corrupt_event_is_reported(self) -> None:
+        sid = chat_store.create_session(kind="main")
+        path = chat_store.chat_path(sid)
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write("not-json\n")
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            rf"{re.escape(str(path))}:2",
+        ):
+            chat_store.read_events(sid)
 
     def test_healthy_append_does_not_reread_whole_file(
         self,

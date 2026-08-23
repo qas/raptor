@@ -1,6 +1,7 @@
 """Session rotation (/new) tests."""
 import asyncio
 import copy
+import json
 import os
 import sys
 import tempfile
@@ -252,6 +253,19 @@ class SessionRotationTests(unittest.IsolatedAsyncioTestCase):
         state_path.write_text("not-json")
         with patch.object(session, "STATE_PATH", state_path):
             with self.assertRaisesRegex(RuntimeError, "Could not load state"):
+                session.load_state()
+
+    def test_invalid_persisted_plan_is_reported(self) -> None:
+        state_path = Path(tempfile.mkdtemp()) / "state.json"
+        state_path.write_text(
+            json.dumps({
+                "todos": [
+                    {"id": 1, "text": "old shape", "status": "pending"}
+                ]
+            })
+        )
+        with patch.object(session, "STATE_PATH", state_path):
+            with self.assertRaisesRegex(RuntimeError, "persisted root plan"):
                 session.load_state()
 
 

@@ -461,9 +461,7 @@ def prepare_goal_on_startup(*, root_interrupted: bool = False) -> str | None:
         return None
     status = goal.get("status")
     if status not in GOAL_STATUSES:
-        state["goal"] = None
-        save_state()
-        return None
+        raise RuntimeError(f"Invalid persisted goal status: {status!r}")
     if thread_active():
         return None
     unclean = root_interrupted or bool(state.get("interrupted_subagents"))
@@ -514,7 +512,7 @@ def update_goal_tool(args: dict[str, Any]) -> dict[str, Any]:
     goal_id = str(args.get("goal_id") or "").strip()
     status = str(args.get("status") or "").strip()
     objective = " ".join(str(args.get("objective") or "").split())
-    reason = str(args.get("reason") or "").strip()
+    reason = " ".join(str(args.get("reason") or "").split())
     if not goal_id:
         return {
             "ok": False,
@@ -537,6 +535,14 @@ def update_goal_tool(args: dict[str, Any]) -> dict[str, Any]:
             "ok": False,
             "error": "reason is required when blocking a goal",
         }
+    if len(reason) > MAX_BLOCKED_REASON_CHARS:
+        return {
+            "ok": False,
+            "error": (
+                "blocked reason exceeds "
+                f"{MAX_BLOCKED_REASON_CHARS} characters"
+            ),
+        }
     goal = current_goal()
     if not goal or str(goal.get("id")) != goal_id:
         _log("goal_stale_update", goal)
@@ -544,6 +550,14 @@ def update_goal_tool(args: dict[str, Any]) -> dict[str, Any]:
             "ok": False,
             "error": (
                 "stale goal id; goal was replaced"
+            ),
+        }
+    if goal.get("status") != GOAL_ACTIVE:
+        return {
+            "ok": False,
+            "error": (
+                f"goal is {goal.get('status')}; only an active goal "
+                "can be updated by the agent"
             ),
         }
     if objective:

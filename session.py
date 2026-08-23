@@ -22,7 +22,7 @@ from config import (
     STATE_PATH,
 )
 from runtime_events import RuntimeEvent
-from todos import normalize_persisted_plan
+from todos import validate_plan
 from storage import write_text_atomic
 
 DEFAULT_STATE: dict[str, Any] = {
@@ -38,6 +38,13 @@ DEFAULT_STATE: dict[str, Any] = {
     "goal": None,
     "thread": None,
 }
+
+
+def _load_plan(value: Any, owner: str) -> list[dict[str, str]]:
+    try:
+        return validate_plan(value)
+    except ValueError as exc:
+        raise RuntimeError(f"Invalid persisted {owner} plan: {exc}") from exc
 
 
 def _prune_subagent_mapping(
@@ -138,15 +145,16 @@ def load_state() -> dict[str, Any]:
         ]
     else:
         result["pending_inputs"] = []
-    result["todos"] = normalize_persisted_plan(result.get("todos"))
+    result["todos"] = _load_plan(result.get("todos"), "root")
     goal = result.get("goal")
     if goal is not None and not isinstance(goal, dict):
         result["goal"] = None
     if isinstance(result.get("goal"), dict):
         result["goal"].setdefault("blocked_reason", None)
         result["goal"].setdefault("notified_status", None)
-        result["goal"]["todos"] = normalize_persisted_plan(
-            result["goal"].get("todos")
+        result["goal"]["todos"] = _load_plan(
+            result["goal"].get("todos"),
+            "goal",
         )
     thread = result.get("thread")
     if thread is not None and not isinstance(thread, dict):
@@ -172,7 +180,10 @@ def load_state() -> dict[str, Any]:
     for record in result["subagents"].values():
         if not isinstance(record, dict):
             continue
-        record["todos"] = normalize_persisted_plan(record.get("todos"))
+        record["todos"] = _load_plan(
+            record.get("todos"),
+            f"subagent {record.get('id') or 'unknown'}",
+        )
         pending_subagent_inputs = record.get("pending_inputs")
         record["pending_inputs"] = (
             [

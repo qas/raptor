@@ -17,6 +17,24 @@ _SESSION_ID_RE = re.compile(
 )
 
 
+def _decode_event_line(
+    path: Path,
+    line: str,
+    line_number: int,
+) -> dict[str, Any]:
+    try:
+        event = json.loads(line)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(
+            f"Invalid transcript event at {path}:{line_number}"
+        ) from exc
+    if not isinstance(event, dict):
+        raise RuntimeError(
+            f"Transcript event must be an object at {path}:{line_number}"
+        )
+    return event
+
+
 def new_session_id() -> str:
     stamp = datetime.now(timezone.utc).strftime(
         "%Y%m%d-%H%M%S"
@@ -99,14 +117,11 @@ def _scan_max_seq(session_id: str) -> int:
         return 0
     max_seq = 0
     with path.open("r", encoding="utf-8") as f:
-        for line in f:
+        for line_number, line in enumerate(f, start=1):
             line = line.strip()
             if not line:
                 continue
-            try:
-                event = json.loads(line)
-            except json.JSONDecodeError:
-                continue
+            event = _decode_event_line(path, line, line_number)
             seq = event.get("seq")
             if isinstance(seq, int) and seq > max_seq:
                 max_seq = seq
@@ -247,16 +262,11 @@ def read_events(session_id: str) -> list[dict[str, Any]]:
         return []
     events: list[dict[str, Any]] = []
     with path.open("r", encoding="utf-8") as f:
-        for line in f:
+        for line_number, line in enumerate(f, start=1):
             line = line.strip()
             if not line:
                 continue
-            try:
-                event = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(event, dict):
-                events.append(event)
+            events.append(_decode_event_line(path, line, line_number))
     return events
 
 
@@ -283,13 +293,11 @@ def _session_summary(path: Path) -> dict[str, Any] | None:
     first: dict[str, Any] | None = None
     last: dict[str, Any] | None = None
     with path.open("r", encoding="utf-8") as handle:
-        for line in handle:
-            try:
-                event = json.loads(line)
-            except json.JSONDecodeError:
+        for line_number, line in enumerate(handle, start=1):
+            line = line.strip()
+            if not line:
                 continue
-            if not isinstance(event, dict):
-                continue
+            event = _decode_event_line(path, line, line_number)
             if first is None:
                 first = event
             if start is None and event.get("type") == "session_start":
@@ -331,13 +339,11 @@ def session_contains_text(session_id: str, query: str) -> bool:
     if not path.is_file():
         return False
     with path.open("r", encoding="utf-8") as handle:
-        for line in handle:
-            try:
-                event = json.loads(line)
-            except json.JSONDecodeError:
+        for line_number, line in enumerate(handle, start=1):
+            line = line.strip()
+            if not line:
                 continue
-            if not isinstance(event, dict):
-                continue
+            event = _decode_event_line(path, line, line_number)
             if needle in render_compaction_records([event]).casefold():
                 return True
     return False

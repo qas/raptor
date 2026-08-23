@@ -47,11 +47,3 @@ def validate_plan(value: Any) -> list[dict[str, str]]:
     if in_progress > 1:
         raise ValueError("at most one step can be in_progress")
     return plan
-
-
-def normalize_persisted_plan(value: Any) -> list[dict[str, str]]:
-    """Load only valid canonical plans; malformed state becomes empty."""
-    try:
-        return validate_plan(value)
-    except ValueError:
-        return []

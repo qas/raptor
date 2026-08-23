@@ -20,7 +20,7 @@ if str(_ROOT) not in sys.path:
 
 import session
 from commands import format_todos
-from todos import MAX_TODO_ITEMS, normalize_persisted_plan
+from todos import MAX_TODO_ITEMS, validate_plan
 from tools import (
     TOOL_HANDLERS,
     execute_tool,
@@ -134,13 +134,13 @@ class UpdatePlanTests(unittest.TestCase):
         )
         self.assertEqual(context["todos"], [])
 
-    def test_load_normalization_rejects_noncanonical_items(self) -> None:
-        normalized = normalize_persisted_plan(
-            [
-                {"id": 1, "text": "One", "status": "pending"},
-            ]
-        )
-        self.assertEqual(normalized, [])
+    def test_persisted_plan_rejects_noncanonical_items(self) -> None:
+        with self.assertRaises(ValueError):
+            validate_plan(
+                [
+                    {"id": 1, "text": "One", "status": "pending"},
+                ]
+            )
 
     def test_rejects_unknown_fields_and_oversized_plans(self) -> None:
         with patch("tools.save_state") as save:
