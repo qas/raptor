@@ -180,19 +180,24 @@ class MultiProvider:
             if event.conversation_id is not None
             else None
         )
+        sender_id = (
+            self.authorized_user_id
+            if event.sender_id == provider.authorized_user_id
+            else f"{provider.name}:{event.sender_id}"
+        )
         if isinstance(event, IncomingMessage):
             assert conversation_id is not None
             normalized = replace(
                 event,
                 conversation_id=conversation_id,
-                sender_id=self.authorized_user_id,
+                sender_id=sender_id,
             )
         elif isinstance(event, IncomingAction):
             normalized = replace(
                 event,
                 action_id=f"{provider.name}:{event.action_id}",
                 conversation_id=conversation_id,
-                sender_id=self.authorized_user_id,
+                sender_id=sender_id,
             )
         else:
             normalized = event

@@ -144,7 +144,7 @@ class MultiProviderTests(unittest.IsolatedAsyncioTestCase):
         await self.api.events.put(
             IncomingMessage(
                 conversation_id="api:default",
-                sender_id="api:user",
+                sender_id=self.api.authorized_user_id,
                 message_id="request-1",
                 text="/status",
             )
@@ -181,7 +181,7 @@ class MultiProviderTests(unittest.IsolatedAsyncioTestCase):
             IncomingAction(
                 action_id="action-1",
                 conversation_id="api:default",
-                sender_id="api:user",
+                sender_id=self.api.authorized_user_id,
                 message_id="status-1",
                 data="steer:abcd:cancel",
             )
@@ -202,10 +202,20 @@ class MultiProviderTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_ready_events_from_both_providers_are_not_lost(self) -> None:
         await self.telegram.events.put(
-            IncomingMessage("123", "tg:user", "tg-1", "telegram text")
+            IncomingMessage(
+                "123",
+                self.telegram.authorized_user_id,
+                "tg-1",
+                "telegram text",
+            )
         )
         await self.api.events.put(
-            IncomingMessage("api:default", "api:user", "api-1", "api text")
+            IncomingMessage(
+                "api:default",
+                self.api.authorized_user_id,
+                "api-1",
+                "api text",
+            )
         )
         first = await self.multi.poll(None, timeout=1)
         second = await self.multi.poll(first.cursor, timeout=1)
@@ -219,7 +229,7 @@ class MultiProviderTests(unittest.IsolatedAsyncioTestCase):
             IncomingAction(
                 action_id="action-1",
                 conversation_id="api:default",
-                sender_id="api:user",
+                sender_id=self.api.authorized_user_id,
                 message_id="status-1",
                 data="approval:abc:approve",
             )
@@ -232,6 +242,21 @@ class MultiProviderTests(unittest.IsolatedAsyncioTestCase):
             ("answer", "action-1", "accepted", False),
             self.api.calls,
         )
+
+    async def test_does_not_promote_unauthorized_provider_sender(self) -> None:
+        await self.telegram.events.put(
+            IncomingMessage(
+                conversation_id="123",
+                sender_id="intruder",
+                message_id="message-1",
+                text="run this",
+            )
+        )
+
+        event = (await self.multi.poll(None, timeout=1)).events[0]
+
+        self.assertNotEqual(event.sender_id, self.multi.authorized_user_id)
+        self.assertEqual(event.sender_id, "telegram:intruder")
 
     async def test_unqualified_ids_are_rejected(self) -> None:
         with self.assertRaisesRegex(ValueError, "multiplexed conversation"):

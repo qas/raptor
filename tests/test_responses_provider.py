@@ -187,6 +187,13 @@ class ResponsesApiProviderTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('"delta":" answer"', wire)
         self.assertIn("event: response.output_text.done", wire)
         self.assertIn("event: response.completed", wire)
+        self.assertIn(
+            'event: response.reasoning_summary_text.delta\n'
+            'data: {"type":"response.reasoning_summary_text.delta",'
+            '"item_id":',
+            wire,
+        )
+        self.assertIn('"output_index":1', wire)
 
     async def test_stream_sends_heartbeat_while_agent_is_silent(self) -> None:
         class Writer:
@@ -398,6 +405,13 @@ class ResponsesApiProviderTests(unittest.IsolatedAsyncioTestCase):
             }],
             "pinned": True,
         }])
+
+    async def test_lists_the_agent_model(self) -> None:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(self.base_url + "/v1/models")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["data"][0]["id"], "raptor")
 
     async def test_bearer_auth_when_configured(self) -> None:
         await self.provider.close()

@@ -264,17 +264,7 @@ class ResponsesApiProvider:
 
     def _response(self, pending: PendingResponse, text: str) -> dict[str, Any]:
         message_id = "msg_" + secrets.token_hex(12)
-        output: list[dict[str, Any]] = []
-        if pending.reasoning_summary:
-            output.append({
-                "id": pending.reasoning_item_id,
-                "type": "reasoning",
-                "summary": [{
-                    "type": "summary_text",
-                    "text": pending.reasoning_summary,
-                }],
-            })
-        output.append({
+        output: list[dict[str, Any]] = [{
             "id": message_id,
             "type": "message",
             "status": "completed",
@@ -284,7 +274,16 @@ class ResponsesApiProvider:
                 "text": text,
                 "annotations": [],
             }],
-        })
+        }]
+        if pending.reasoning_summary:
+            output.append({
+                "id": pending.reasoning_item_id,
+                "type": "reasoning",
+                "summary": [{
+                    "type": "summary_text",
+                    "text": pending.reasoning_summary,
+                }],
+            })
         return {
             "id": pending.response_id,
             "object": "response",
@@ -320,7 +319,7 @@ class ResponsesApiProvider:
                 pending.events.put_nowait({
                     "type": "response.reasoning_summary_text.done",
                     "item_id": pending.reasoning_item_id,
-                    "output_index": 0,
+                    "output_index": 1,
                     "summary_index": 0,
                     "text": pending.reasoning_summary,
                 })
@@ -373,7 +372,7 @@ class ResponsesApiProvider:
         pending.events.put_nowait({
             "type": "response.reasoning_summary_text.delta",
             "item_id": pending.reasoning_item_id,
-            "output_index": 0,
+            "output_index": 1,
             "summary_index": 0,
             "delta": text,
         })
@@ -682,6 +681,17 @@ class ResponsesApiProvider:
                 await self._write_json(writer, 200, {
                     "object": "raptor.status.list",
                     "data": list(self.messages.values()),
+                })
+                return
+            if method == "GET" and path == "/v1/models":
+                await self._write_json(writer, 200, {
+                    "object": "list",
+                    "data": [{
+                        "id": "raptor",
+                        "object": "model",
+                        "created": 0,
+                        "owned_by": "raptor",
+                    }],
                 })
                 return
             if method != "POST":
