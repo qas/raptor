@@ -107,10 +107,18 @@ def _anchor_input_items(
     anchors: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     return [
-        copy.deepcopy(anchor["item"])
+        _chronological_input_item(anchor["item"])
         for anchor in anchors
         if isinstance(anchor.get("item"), dict)
     ]
+
+
+def _chronological_input_item(item: dict[str, Any]) -> dict[str, Any]:
+    """Keep instruction authority out of chronological model input."""
+    result = copy.deepcopy(item)
+    if result.get("role") in {"developer", "system"}:
+        result["role"] = "user"
+    return result
 
 
 def checkpoint_continuation_input() -> list[dict[str, Any]]:
@@ -124,7 +132,7 @@ def build_active_context(
     checkpoint = latest_checkpoint(session_id)
     if not checkpoint:
         return [
-            copy.deepcopy(event["item"])
+            _chronological_input_item(event["item"])
             for event in items
             if isinstance(event.get("item"), dict)
         ]
@@ -139,7 +147,7 @@ def build_active_context(
             continue
         item = event.get("item")
         if isinstance(item, dict):
-            active.append(copy.deepcopy(item))
+            active.append(_chronological_input_item(item))
     return active
 
 
@@ -394,7 +402,7 @@ def _fit_checkpoint_to_active_budget(
     anchors = _checkpoint_anchors(checkpoint)
     through_seq = int(checkpoint.get("through_seq") or 0)
     tail = [
-        copy.deepcopy(event["item"])
+        _chronological_input_item(event["item"])
         for event in item_events(session_id)
         if int(event.get("seq") or 0) > through_seq
         and isinstance(event.get("item"), dict)

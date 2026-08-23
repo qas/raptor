@@ -273,7 +273,7 @@ class TranscriptDurabilityTests(unittest.IsolatedAsyncioTestCase):
         items = [event["item"] for event in chat_store.item_events(sid)]
         self.assertEqual(items[-2]["type"], "function_call_output")
         self.assertEqual(items[-2]["call_id"], "call-1")
-        self.assertEqual(items[-1]["role"], "developer")
+        self.assertEqual(items[-1]["role"], "user")
         self.assertIn("turn_aborted", items[-1]["content"])
 
     def test_subagent_checkpoint_reference_is_bounded(self) -> None:

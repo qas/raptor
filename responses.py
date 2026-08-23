@@ -104,7 +104,7 @@ def parse_context_length_error(
 
     try:
         body = response.json()
-    except Exception:
+    except ValueError:
         body = None
 
     error = (
@@ -263,6 +263,16 @@ def instructions(
     )
 
 
+def validate_chronological_input(input_items: list[dict[str, Any]]) -> None:
+    """Require all instruction authority to use the top-level field."""
+    for item in input_items:
+        if item.get("role") in {"developer", "system"}:
+            raise ValueError(
+                "Chronological input cannot contain developer or system "
+                "messages; use the instructions field"
+            )
+
+
 def build_response_payload(
     input_items: list[
         dict[str, Any]
@@ -279,6 +289,7 @@ def build_response_payload(
     reasoning_summary: str | None = None,
     stream: bool = False,
 ) -> dict[str, Any]:
+    validate_chronological_input(input_items)
     payload: dict[str, Any] = {
         "input": input_items,
         "instructions": instructions(
@@ -389,6 +400,7 @@ def build_stateless_response_payload(
     tools: list[dict[str, Any]] | None = TOOLS,
 ) -> dict[str, Any]:
     """Build an instruction-free request for the in-memory ``/ask`` loop."""
+    validate_chronological_input(input_items)
     payload: dict[str, Any] = {
         "model": model,
         "input": input_items,

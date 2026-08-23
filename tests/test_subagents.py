@@ -19,6 +19,17 @@ class BackgroundSubagentTests(unittest.IsolatedAsyncioTestCase):
             else:
                 session.subagent_events.task_done()
 
+    def test_subagent_payload_rejects_instruction_roles_in_history(self) -> None:
+        with (
+            patch.object(subagents, "SUBAGENT_RESPONSES_MODEL", "test-model"),
+            self.assertRaisesRegex(ValueError, "instructions field"),
+        ):
+            subagents.build_subagent_payload(
+                [{"role": "developer", "content": "late instruction"}],
+                allow_subagents=False,
+                depth=1,
+            )
+
     async def test_subagent_model_never_falls_back_to_main_selection(self) -> None:
         with (
             patch.object(subagents, "SUBAGENT_RESPONSES_MODEL", ""),

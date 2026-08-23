@@ -60,6 +60,36 @@ class ContextTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(active), 2)
         self.assertEqual(active[0]["content"], "a")
 
+    def test_instruction_roles_are_normalized_in_chronological_input(
+        self,
+    ) -> None:
+        chat_store.append_item(
+            self.session_id,
+            {"role": "developer", "content": "runtime event"},
+            source="runtime",
+        )
+
+        active = context.build_active_context(self.session_id)
+
+        self.assertEqual(active, [{"role": "user", "content": "runtime event"}])
+
+    def test_checkpoint_tail_normalizes_instruction_roles(self) -> None:
+        old = self._add_user("before checkpoint")
+        chat_store.append_checkpoint(
+            self.session_id,
+            summary="checkpoint body",
+            through_seq=old["seq"],
+        )
+        chat_store.append_item(
+            self.session_id,
+            {"role": "developer", "content": "runtime event"},
+            source="runtime",
+        )
+
+        active = context.build_active_context(self.session_id)
+
+        self.assertEqual(active[-1], {"role": "user", "content": "runtime event"})
+
     def test_checkpoint_summary_plus_tail(self) -> None:
         self._add_user("old")
         old = self._add_assistant("old-reply")

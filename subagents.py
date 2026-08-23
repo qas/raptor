@@ -46,6 +46,7 @@ from responses import (
     ContextLengthError,
     parse_context_length_error,
     retry_transient_response,
+    validate_chronological_input,
 )
 from skills import skill_catalog_instructions
 from observability import log_event
@@ -174,6 +175,7 @@ def build_subagent_payload(
     max_output_tokens: int | None = None,
     reasoning_effort: str | None = SUBAGENT_RESPONSES_REASONING_EFFORT,
 ) -> dict[str, Any]:
+    validate_chronological_input(work)
     instructions = subagent_instructions(allow_subagents)
     if extra_instructions:
         instructions += "\n\n" + extra_instructions

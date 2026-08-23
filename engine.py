@@ -272,6 +272,16 @@ async def run_agent(
                     },
                 )
                 raise
+            except Exception as exc:
+                call_result = {
+                    "ok": False,
+                    "error": f"{type(exc).__name__}: {exc}",
+                }
+            if not isinstance(call_result, dict):
+                call_result = {
+                    "ok": False,
+                    "error": "Tool returned a non-object result",
+                }
             event["status"] = (
                 "completed" if call_result.get("ok") else "failed"
             )

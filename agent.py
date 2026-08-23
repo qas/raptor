@@ -64,7 +64,7 @@ def record_turn_interrupted(session_id: str) -> None:
     append_item(
         session_id,
         {
-            "role": "developer",
+            "role": "user",
             "content": (
                 "<turn_aborted>\n"
                 + TURN_ABORTED_GUIDANCE
@@ -301,7 +301,7 @@ async def agent_turn(
         and turn_source == "user"
     )
     user_item = {
-        "role": "user" if turn_source == "user" else "developer",
+        "role": "user",
         "content": user_text,
     }
     append_item(
@@ -386,9 +386,9 @@ async def agent_turn(
         extra_instructions = ""
         if internal:
             extra_instructions = (
-                "The current developer-role input is a runtime event, "
-                "not a new message authored by the user. Process it and "
-                "communicate only the relevant outcome to the user."
+                "The current user-role input is an internal Raptor event, "
+                "not a message authored by the user. Process it and "
+                "communicate only the relevant outcome."
             )
         extra_instructions = combine_instructions(
             extra_instructions,

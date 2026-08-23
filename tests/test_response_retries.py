@@ -18,6 +18,15 @@ import responses
 
 
 class ResponseRetryTests(unittest.IsolatedAsyncioTestCase):
+    def test_response_payload_rejects_instruction_roles_in_history(self) -> None:
+        with self.assertRaisesRegex(ValueError, "instructions field"):
+            responses.build_response_payload(
+                [
+                    {"role": "user", "content": "hello"},
+                    {"role": "developer", "content": "late instruction"},
+                ]
+            )
+
     async def test_incomplete_stream_retries_then_succeeds(self) -> None:
         completed = {"status": "completed", "output": []}
         request = AsyncMock(

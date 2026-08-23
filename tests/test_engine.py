@@ -115,6 +115,50 @@ class AgentEngineTests(unittest.IsolatedAsyncioTestCase):
         output = json.loads(recorded[1]["output"])
         self.assertEqual(output["status"], "interrupted")
 
+    async def test_tool_exception_becomes_matching_failure_output(self) -> None:
+        recorded: list[dict] = []
+        responses = [
+            {
+                "output": [{
+                    "type": "function_call",
+                    "name": "read_file",
+                    "call_id": "call-1",
+                    "arguments": "{}",
+                }]
+            },
+            {
+                "output": [{
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "recovered"}],
+                }]
+            },
+        ]
+
+        async def create_response(_work):
+            return responses.pop(0)
+
+        async def execute_call(_call):
+            raise RuntimeError("approval transport failed")
+
+        def record_items(items, _source):
+            recorded.extend(items)
+
+        result = await run_agent(
+            work=[],
+            create_response=create_response,
+            execute_call=execute_call,
+            source="test",
+            max_tool_rounds=1,
+            record_items=record_items,
+        )
+
+        self.assertEqual(result["text"], "recovered")
+        self.assertEqual(recorded[1]["type"], "function_call_output")
+        failure = json.loads(recorded[1]["output"])
+        self.assertFalse(failure["ok"])
+        self.assertIn("approval transport failed", failure["error"])
+
 
 if __name__ == "__main__":
     unittest.main()
