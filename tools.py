@@ -1,5 +1,6 @@
 """Agent tool implementations and dispatch."""
 import json
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
@@ -12,7 +13,7 @@ from chat_store import (
     render_item_text,
     validate_session_id,
 )
-from config import AGENT_WORKDIR, MAX_TOOL_OUTPUT
+from config import AGENT_WORKDIR, MAX_TOOL_OUTPUT, TOOLS
 from session import save_state, state
 from todos import MAX_TODO_EXPLANATION_CHARS, validate_plan
 
@@ -117,15 +118,15 @@ def truncate_tool_output(
             False,
         )
 
-    keep = max(
-        1000,
-        MAX_TOOL_OUTPUT // 2,
-    )
+    marker = "\n... [truncated] ...\n"
+    retained = MAX_TOOL_OUTPUT - len(marker)
+    keep_head = retained // 2
+    keep_tail = retained - keep_head
 
     return (
-        text[:keep]
-        + "\n... [truncated] ...\n"
-        + text[-keep:],
+        text[:keep_head]
+        + marker
+        + text[-keep_tail:],
         True,
     )
 
@@ -471,13 +472,20 @@ def list_dir_tool(
         )
     )
 
-    return {
+    result = {
         "ok": True,
         "path":
             relative,
         "entries":
             entries,
     }
+    while (
+        entries
+        and len(json.dumps(result, ensure_ascii=False)) > MAX_TOOL_OUTPUT
+    ):
+        entries.pop()
+        result["truncated"] = True
+    return result
 
 
 def _resolve_history_session_id(
@@ -673,125 +681,201 @@ def chat_history_tool(
     }
 
 
+ToolHandler = Callable[
+    [dict[str, Any], ConversationId | None, dict[str, Any]],
+    Awaitable[dict[str, Any]],
+]
+
+
+async def _execute_update_plan(
+    args: dict[str, Any],
+    _chat_id: ConversationId | None,
+    context: dict[str, Any],
+) -> dict[str, Any]:
+    return update_plan_tool(args, context.get("todo_state"))
+
+
+async def _execute_shell(
+    args: dict[str, Any],
+    chat_id: ConversationId | None,
+    context: dict[str, Any],
+) -> dict[str, Any]:
+    return await shell_tool(
+        args,
+        chat_id=chat_id,
+        execution_context=context,
+    )
+
+
+async def _execute_write_stdin(
+    args: dict[str, Any],
+    _chat_id: ConversationId | None,
+    _context: dict[str, Any],
+) -> dict[str, Any]:
+    from shell_sessions import write_stdin
+
+    return await write_stdin(args)
+
+
+async def _execute_cancel(
+    args: dict[str, Any],
+    _chat_id: ConversationId | None,
+    _context: dict[str, Any],
+) -> dict[str, Any]:
+    return await cancel_tool(args)
+
+
+async def _execute_read_file(
+    args: dict[str, Any],
+    _chat_id: ConversationId | None,
+    _context: dict[str, Any],
+) -> dict[str, Any]:
+    return read_file_tool(args)
+
+
+async def _execute_read_skill(
+    args: dict[str, Any],
+    _chat_id: ConversationId | None,
+    _context: dict[str, Any],
+) -> dict[str, Any]:
+    from skills import read_skill_tool
+
+    return await read_skill_tool(args)
+
+
+async def _execute_write_file(
+    args: dict[str, Any],
+    _chat_id: ConversationId | None,
+    _context: dict[str, Any],
+) -> dict[str, Any]:
+    return write_file_tool(args)
+
+
+async def _execute_edit_file(
+    args: dict[str, Any],
+    _chat_id: ConversationId | None,
+    _context: dict[str, Any],
+) -> dict[str, Any]:
+    return edit_file_tool(args)
+
+
+async def _execute_list_dir(
+    args: dict[str, Any],
+    _chat_id: ConversationId | None,
+    _context: dict[str, Any],
+) -> dict[str, Any]:
+    return list_dir_tool(args)
+
+
+async def _execute_get_goal(
+    _args: dict[str, Any],
+    _chat_id: ConversationId | None,
+    _context: dict[str, Any],
+) -> dict[str, Any]:
+    from goals import get_goal_tool_result
+
+    return get_goal_tool_result()
+
+
+async def _execute_update_goal(
+    args: dict[str, Any],
+    _chat_id: ConversationId | None,
+    _context: dict[str, Any],
+) -> dict[str, Any]:
+    from goals import update_goal_tool
+
+    return update_goal_tool(args)
+
+
+async def _execute_set_goal(
+    args: dict[str, Any],
+    chat_id: ConversationId | None,
+    _context: dict[str, Any],
+) -> dict[str, Any]:
+    from goals import set_goal_tool
+
+    return await set_goal_tool(args, chat_id=chat_id)
+
+
+async def _execute_chat_history(
+    args: dict[str, Any],
+    _chat_id: ConversationId | None,
+    context: dict[str, Any],
+) -> dict[str, Any]:
+    return chat_history_tool(args, execution_context=context)
+
+
+async def _execute_subagent(
+    args: dict[str, Any],
+    chat_id: ConversationId | None,
+    context: dict[str, Any],
+) -> dict[str, Any]:
+    from subagents import subagent_tool
+
+    return await subagent_tool(
+        args,
+        chat_id=chat_id,
+        execution_context=context,
+    )
+
+
+TOOL_HANDLERS: dict[str, ToolHandler] = {
+    "update_plan": _execute_update_plan,
+    "shell": _execute_shell,
+    "write_stdin": _execute_write_stdin,
+    "cancel": _execute_cancel,
+    "read_file": _execute_read_file,
+    "read_skill": _execute_read_skill,
+    "write_file": _execute_write_file,
+    "edit_file": _execute_edit_file,
+    "list_dir": _execute_list_dir,
+    "get_goal": _execute_get_goal,
+    "update_goal": _execute_update_goal,
+    "set_goal": _execute_set_goal,
+    "chat_history": _execute_chat_history,
+    "subagent": _execute_subagent,
+}
+
+
+def validate_tool_catalog() -> None:
+    schema_names = {str(tool.get("name")) for tool in TOOLS}
+    handler_names = set(TOOL_HANDLERS)
+    if schema_names != handler_names:
+        missing_handlers = sorted(schema_names - handler_names)
+        missing_schemas = sorted(handler_names - schema_names)
+        raise RuntimeError(
+            "tool catalog mismatch: "
+            f"missing handlers={missing_handlers}, "
+            f"missing schemas={missing_schemas}"
+        )
+
+
+validate_tool_catalog()
+
+
 async def execute_tool(
     call: dict[str, Any],
     *,
     chat_id: ConversationId | None = None,
-    execution_context: dict[str, Any]
-    | None = None,
+    execution_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     try:
-        args = json.loads(
-            call.get(
-                "arguments"
-            )
-            or "{}"
-        )
-
+        args = json.loads(str(call.get("arguments") or "{}"))
     except json.JSONDecodeError as exc:
-        return {
-            "ok": False,
-            "error":
-                f"bad JSON arguments: {exc}",
-        }
+        return {"ok": False, "error": f"bad JSON arguments: {exc}"}
+    if not isinstance(args, dict):
+        return {"ok": False, "error": "tool arguments must be a JSON object"}
 
-    name = call.get(
-        "name"
-    )
+    name = str(call.get("name") or "")
+    handler = TOOL_HANDLERS.get(name)
+    if handler is None:
+        return {"ok": False, "error": f"unknown tool: {name}"}
     context = (
         execution_context
         if execution_context is not None
-        else {
-            "depth": 0,
-            "subagents_allowed": True,
-        }
+        else {"depth": 0, "subagents_allowed": True}
     )
-
     try:
-        if name == "update_plan":
-            return update_plan_tool(
-                args,
-                context.get("todo_state"),
-            )
-
-        if name == "shell":
-            return await shell_tool(
-                args,
-                chat_id=chat_id,
-                execution_context=context,
-            )
-
-        if name == "write_stdin":
-            from shell_sessions import write_stdin
-            return await write_stdin(args)
-
-        if name == "cancel":
-            return await cancel_tool(args)
-
-        if name == "read_file":
-            return read_file_tool(
-                args
-            )
-
-        if name == "read_skill":
-            from skills import read_skill_tool
-            return await read_skill_tool(args)
-
-        if name == "write_file":
-            return write_file_tool(
-                args
-            )
-
-        if name == "edit_file":
-            return edit_file_tool(
-                args
-            )
-
-        if name == "list_dir":
-            return list_dir_tool(
-                args
-            )
-
-        if name == "get_goal":
-            from goals import get_goal_tool_result
-            return get_goal_tool_result()
-
-        if name == "update_goal":
-            from goals import update_goal_tool
-            return update_goal_tool(args)
-
-        if name == "set_goal":
-            from goals import set_goal_tool
-            return await set_goal_tool(
-                args,
-                chat_id=chat_id,
-            )
-
-        if name == "chat_history":
-            return chat_history_tool(
-                args,
-                execution_context=context,
-            )
-
-        if name == "subagent":
-            from subagents import subagent_tool
-            return await subagent_tool(
-                args,
-                chat_id=chat_id,
-                execution_context=context,
-            )
-
-        return {
-            "ok": False,
-            "error":
-                f"unknown tool: {name}",
-        }
-
+        return await handler(args, chat_id, context)
     except Exception as exc:
-        return {
-            "ok": False,
-            "error": (
-                f"{type(exc).__name__}: "
-                f"{exc}"
-            ),
-        }
+        return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}

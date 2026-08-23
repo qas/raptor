@@ -21,13 +21,36 @@ if str(_ROOT) not in sys.path:
 import session
 from commands import format_todos
 from todos import MAX_TODO_ITEMS, normalize_persisted_plan
-from tools import execute_tool, update_plan_tool
+from tools import (
+    TOOL_HANDLERS,
+    execute_tool,
+    list_dir_tool,
+    truncate_tool_output,
+    update_plan_tool,
+)
 
 
 class UpdatePlanTests(unittest.TestCase):
     def setUp(self) -> None:
         session.state.clear()
         session.state.update(copy.deepcopy(session.DEFAULT_STATE))
+
+    def test_every_tool_schema_has_exactly_one_handler(self) -> None:
+        from config import TOOLS
+
+        self.assertEqual(
+            {tool["name"] for tool in TOOLS},
+            set(TOOL_HANDLERS),
+        )
+
+    def test_text_and_directory_results_respect_output_budget(self) -> None:
+        with patch("tools.MAX_TOOL_OUTPUT", 1024):
+            text, truncated = truncate_tool_output("x" * 2000)
+            result = list_dir_tool({"path": ".", "max_entries": 2000})
+
+        self.assertTrue(truncated)
+        self.assertEqual(len(text), 1024)
+        self.assertLessEqual(len(json.dumps(result)), 1024)
 
     def test_replaces_entire_ordered_plan_without_ids(self) -> None:
         plan = [

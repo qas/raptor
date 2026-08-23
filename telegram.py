@@ -586,7 +586,7 @@ async def send(
         "sent",
         {
             "chat_id": chat_id,
-            "text": text,
+            "text_chars": len(text),
         },
     )
     for part in split_message(

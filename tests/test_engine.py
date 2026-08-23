@@ -1,0 +1,120 @@
+import asyncio
+import json
+import unittest
+from unittest.mock import patch
+
+from config import MAX_TOOL_OUTPUT
+from engine import function_call_output, run_agent
+
+
+class AgentEngineTests(unittest.IsolatedAsyncioTestCase):
+    def test_function_output_bounds_oversized_result_as_valid_json(self) -> None:
+        item = function_call_output(
+            {"call_id": "call-1"},
+            {"ok": True, "content": "x" * (MAX_TOOL_OUTPUT * 2)},
+        )
+
+        self.assertLessEqual(len(item["output"]), MAX_TOOL_OUTPUT)
+        payload = json.loads(item["output"])
+        self.assertTrue(payload["ok"])
+        self.assertTrue(payload["truncated"])
+        self.assertGreater(payload["original_chars"], MAX_TOOL_OUTPUT)
+
+    async def test_tool_result_log_excludes_result_payload(self) -> None:
+        responses = [
+            {
+                "output": [
+                    {
+                        "type": "function_call",
+                        "name": "read_file",
+                        "call_id": "call-1",
+                        "arguments": '{"path":"secret"}',
+                    }
+                ]
+            },
+            {
+                "output": [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [
+                            {"type": "output_text", "text": "done"}
+                        ],
+                    }
+                ]
+            },
+        ]
+
+        async def create_response(_work):
+            return responses.pop(0)
+
+        async def execute_call(_call):
+            return {"ok": True, "text": "private tool payload"}
+
+        with patch("engine.log_event") as logged:
+            await run_agent(
+                work=[],
+                create_response=create_response,
+                execute_call=execute_call,
+                source="test",
+                max_tool_rounds=1,
+            )
+
+        tool_log = next(
+            call
+            for call in logged.call_args_list
+            if call.args[1] == "tool_result"
+        )
+        self.assertNotIn("result", tool_log.args[2])
+        self.assertNotIn("private tool payload", json.dumps(tool_log.args[2]))
+
+    async def test_interruption_records_matching_tool_output(self) -> None:
+        started = asyncio.Event()
+        recorded: list[dict] = []
+
+        async def create_response(_work):
+            return {
+                "id": "response-1",
+                "status": "completed",
+                "output": [
+                    {
+                        "type": "function_call",
+                        "name": "shell",
+                        "call_id": "call-1",
+                        "arguments": '{"command":"sleep 60"}',
+                    }
+                ],
+            }
+
+        async def execute_call(_call):
+            started.set()
+            await asyncio.Event().wait()
+
+        def record_items(items, _source):
+            recorded.extend(items)
+
+        with patch("engine.log_event"):
+            task = asyncio.create_task(
+                run_agent(
+                    work=[],
+                    create_response=create_response,
+                    execute_call=execute_call,
+                    source="test",
+                    max_tool_rounds=1,
+                    record_items=record_items,
+                )
+            )
+            await started.wait()
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+
+        self.assertEqual(recorded[0]["type"], "function_call")
+        self.assertEqual(recorded[1]["type"], "function_call_output")
+        self.assertEqual(recorded[1]["call_id"], "call-1")
+        output = json.loads(recorded[1]["output"])
+        self.assertEqual(output["status"], "interrupted")
+
+
+if __name__ == "__main__":
+    unittest.main()

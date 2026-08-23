@@ -7,6 +7,9 @@ from typing import Any
 
 
 _REDACTED = "[REDACTED]"
+_MAX_LOG_STRING = 2_000
+_MAX_LOG_COLLECTION = 50
+_MAX_LOG_DEPTH = 6
 _SECRET_TEXT_PATTERNS = (
     re.compile(r"(?i)(authorization\s*[:=]\s*bearer\s+)[^\s,;]+"),
     re.compile(r"(?i)(bearer\s+)[A-Za-z0-9._~+/=-]+"),
@@ -55,6 +58,37 @@ def redact_sensitive(value: Any) -> Any:
     return value
 
 
+def bound_log_value(value: Any, *, depth: int = 0) -> Any:
+    """Bound diagnostic payloads before serialization."""
+    if depth >= _MAX_LOG_DEPTH:
+        return "[MAX_DEPTH]"
+    if isinstance(value, str):
+        if len(value) <= _MAX_LOG_STRING:
+            return value
+        omitted = len(value) - _MAX_LOG_STRING
+        return value[:_MAX_LOG_STRING] + f"... [{omitted} chars omitted]"
+    if isinstance(value, dict):
+        items = list(value.items())
+        bounded = {
+            key: bound_log_value(item, depth=depth + 1)
+            for key, item in items[:_MAX_LOG_COLLECTION]
+        }
+        if len(items) > _MAX_LOG_COLLECTION:
+            bounded["_omitted_fields"] = len(items) - _MAX_LOG_COLLECTION
+        return bounded
+    if isinstance(value, (list, tuple)):
+        bounded_items = [
+            bound_log_value(item, depth=depth + 1)
+            for item in value[:_MAX_LOG_COLLECTION]
+        ]
+        if len(value) > _MAX_LOG_COLLECTION:
+            bounded_items.append(
+                f"[{len(value) - _MAX_LOG_COLLECTION} items omitted]"
+            )
+        return bounded_items
+    return value
+
+
 def tool_activity(call: dict[str, Any]) -> str:
     activities = {
         "update_plan": "updating todos",
@@ -100,6 +134,10 @@ def log_event(source: str, event: str, data: Any = None) -> None:
     if data is not None:
         record["data"] = data
     print(
-        json.dumps(redact_sensitive(record), ensure_ascii=False, default=str),
+        json.dumps(
+            bound_log_value(redact_sensitive(record)),
+            ensure_ascii=False,
+            default=str,
+        ),
         flush=True,
     )

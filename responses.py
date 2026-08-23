@@ -531,8 +531,7 @@ async def _responses_create_stream_once(
                 {
                     "status":
                         response.status_code,
-                    "body":
-                        response.text[:1200],
+                    "body_chars": len(response.text),
                 },
             )
 

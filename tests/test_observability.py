@@ -38,6 +38,15 @@ class ObservabilityTests(unittest.TestCase):
         record = json.loads(output.call_args.args[0])
         self.assertEqual(record["data"]["nested"]["token"], "[REDACTED]")
 
+    def test_log_event_bounds_large_payloads(self) -> None:
+        with patch("builtins.print") as output:
+            log_event("test", "large", {"message": "x" * 10_000})
+
+        record = json.loads(output.call_args.args[0])
+        message = record["data"]["message"]
+        self.assertLess(len(message), 2_100)
+        self.assertIn("chars omitted", message)
+
 
 if __name__ == "__main__":
     unittest.main()

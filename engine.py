@@ -1,9 +1,77 @@
 """Shared agent execution utilities."""
+import asyncio
 import json
 from collections.abc import Awaitable, Callable
 from typing import Any
 
+from config import MAX_TOOL_OUTPUT
 from observability import log_event, tool_activity
+
+
+def interrupted_tool_result() -> dict[str, Any]:
+    """Return the durable result paired with an interrupted tool call."""
+    return {
+        "ok": False,
+        "status": "interrupted",
+        "error": (
+            "Tool execution was interrupted by the user. It may have "
+            "partially changed external state; inspect before retrying."
+        ),
+    }
+
+
+def function_call_output(
+    call: dict[str, Any],
+    result: dict[str, Any],
+) -> dict[str, Any]:
+    output = json.dumps(result, ensure_ascii=False)
+    if len(output) > MAX_TOOL_OUTPUT:
+        output = _bounded_result_envelope(result, output)
+    return {
+        "type": "function_call_output",
+        "call_id": call["call_id"],
+        "output": output,
+    }
+
+
+def _bounded_result_envelope(
+    result: dict[str, Any],
+    encoded: str,
+) -> str:
+    """Keep oversized tool output valid JSON and within the context cap."""
+    marker = "\n... [tool result truncated] ...\n"
+
+    def candidate(retained: int) -> str:
+        head = retained // 2
+        tail = retained - head
+        preview = (
+            encoded[:head]
+            + marker
+            + (encoded[-tail:] if tail else "")
+        )
+        return json.dumps(
+            {
+                "ok": bool(result.get("ok")),
+                "status": result.get("status"),
+                "truncated": True,
+                "original_chars": len(encoded),
+                "preview": preview,
+            },
+            ensure_ascii=False,
+        )
+
+    low = 0
+    high = len(encoded)
+    best = candidate(0)
+    while low <= high:
+        retained = (low + high) // 2
+        attempt = candidate(retained)
+        if len(attempt) <= MAX_TOOL_OUTPUT:
+            best = attempt
+            low = retained + 1
+        else:
+            high = retained - 1
+    return best
 
 CreateResponse = Callable[
     [list[dict[str, Any]]],
@@ -115,7 +183,16 @@ async def run_agent(
         log_event(
             source,
             "response",
-            {**metadata, "response": response},
+            {
+                **metadata,
+                "id": response.get("id"),
+                "status": response.get("status"),
+                "output_types": [
+                    str(item.get("type") or "unknown")
+                    for item in response_output(response)
+                ],
+                "usage": response.get("usage"),
+            },
         )
         if drain_inputs:
             applied = await drain_inputs(work, turn_inputs)
@@ -142,7 +219,7 @@ async def run_agent(
             log_event(
                 source,
                 "turn_completed",
-                {**metadata, "text": text},
+                {**metadata, "output_chars": len(text)},
             )
             return result
         if max_tool_rounds and tool_rounds >= max_tool_rounds:
@@ -169,10 +246,32 @@ async def run_agent(
                 {
                     **metadata,
                     "activity": tool_activity(call),
-                    "call": call,
+                    "name": call.get("name"),
+                    "call_id": call.get("call_id"),
                 },
             )
-            call_result = await execute_call(call)
+            try:
+                call_result = await execute_call(call)
+            except asyncio.CancelledError:
+                call_result = interrupted_tool_result()
+                event["status"] = "interrupted"
+                event["result"] = call_result
+                if checkpoint:
+                    checkpoint(tool_events)
+                output_item = function_call_output(call, call_result)
+                if record_items:
+                    record_items([output_item], "tool")
+                work.append(output_item)
+                log_event(
+                    source,
+                    "tool_interrupted",
+                    {
+                        **metadata,
+                        "name": call.get("name"),
+                        "call_id": call.get("call_id"),
+                    },
+                )
+                raise
             event["status"] = (
                 "completed" if call_result.get("ok") else "failed"
             )
@@ -185,17 +284,12 @@ async def run_agent(
                 {
                     **metadata,
                     "call_id": call.get("call_id"),
-                    "result": call_result,
+                    "ok": call_result.get("ok"),
+                    "status": call_result.get("status"),
+                    "has_error": bool(call_result.get("error")),
                 },
             )
-            output_item = {
-                "type": "function_call_output",
-                "call_id": call["call_id"],
-                "output": json.dumps(
-                    call_result,
-                    ensure_ascii=False,
-                ),
-            }
+            output_item = function_call_output(call, call_result)
             if record_items:
                 record_items([output_item], "tool")
             work.append(output_item)
