@@ -648,6 +648,35 @@ class GoalTests(unittest.IsolatedAsyncioTestCase):
         )
         cancel_shells.assert_awaited_once_with()
 
+    async def test_stop_reports_discarded_background_results(self) -> None:
+        from commands import command
+
+        sent: list[str] = []
+
+        async def capture(_chat_id, text, **_kw):
+            sent.append(text)
+
+        with (
+            patch("commands.pending_subagent_completions", return_value=1),
+            patch("commands.pending_shell_completions", return_value=2),
+            patch(
+                "commands.cancel_background_subagents",
+                AsyncMock(return_value=0),
+            ) as cancel_subagents,
+            patch(
+                "commands.cancel_shell_sessions",
+                AsyncMock(return_value=0),
+            ),
+            patch("commands.send", capture),
+        ):
+            await command(1, "/stop")
+
+        cancel_subagents.assert_awaited_once_with(discard_pending=True)
+        self.assertEqual(
+            sent,
+            ["Stopped.\nDiscarded pending background results: 3"],
+        )
+
     async def test_resume_restarts_goal_controller(
         self,
     ) -> None:
@@ -821,6 +850,34 @@ class GoalTests(unittest.IsolatedAsyncioTestCase):
             "background subagent",
             calls[0],
         )
+
+    async def test_failed_subagent_does_not_pause_parent_goal(self) -> None:
+        replace_goal("recover from child failure")
+        calls: list[str] = []
+
+        async def fake_turn(chat_id, text, *, internal=False, **_kw):
+            calls.append(text)
+            if len(calls) == 2:
+                complete_goal(current_goal()["id"])
+            return True
+
+        with (
+            patch.object(controller, "agent_turn", fake_turn),
+            patch.object(controller, "send", _noop),
+        ):
+            delivered = await controller.enqueue_internal_input(
+                1,
+                (
+                    "A background subagent has finished.\n\n"
+                    '{"status":"failed","error":"network unavailable"}'
+                ),
+            )
+
+        self.assertTrue(delivered)
+        self.assertEqual(current_goal()["status"], GOAL_COMPLETE)
+        self.assertEqual(len(calls), 2)
+        self.assertIn('"status":"failed"', calls[0])
+        self.assertEqual(calls[1], goal_continuation_input())
 
     def test_goal_prompt_counted_in_root_context_estimate(
         self,

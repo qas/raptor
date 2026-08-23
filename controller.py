@@ -28,6 +28,18 @@ from thread_state import thread_active
 WorkSource = Literal["user", "internal", "goal"]
 
 
+async def requeue_deferred_completions() -> int:
+    """Retry background completion delivery on explicit user activity."""
+    from shell_sessions import requeue_deferred_shell_completions
+    from subagents import requeue_deferred_subagent_completions
+
+    shell_count, subagent_count = await asyncio.gather(
+        requeue_deferred_shell_completions(),
+        requeue_deferred_subagent_completions(),
+    )
+    return shell_count + subagent_count
+
+
 async def _dequeue_steer() -> dict[str, Any] | None:
     while True:
         try:
@@ -200,6 +212,8 @@ async def run_root_session(
         else None
     )
     try:
+        if initial_input is not None and not internal:
+            await requeue_deferred_completions()
         await ensure_goal_pin(chat_id)
         while True:
             if next_input is None:

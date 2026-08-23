@@ -179,7 +179,7 @@ class BackgroundSubagentTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result["ok"])
         self.assertEqual(result["status"], "capacity_reached")
 
-    async def test_completion_delivery_exception_is_requeued(self) -> None:
+    async def test_completion_delivery_exception_is_deferred(self) -> None:
         record = {
             "id": "worker-1",
             "chat_id": "telegram:123",
@@ -196,11 +196,6 @@ class BackgroundSubagentTests(unittest.IsolatedAsyncioTestCase):
             patch.dict(sys.modules, {"controller": controller}),
             patch.object(subagents, "save_state"),
             patch.object(subagents, "log_event") as logged,
-            patch.object(
-                subagents,
-                "requeue_completion",
-                AsyncMock(return_value=None),
-            ),
         ):
             event_task = asyncio.create_task(subagents.completion_event_loop())
             try:
@@ -213,7 +208,47 @@ class BackgroundSubagentTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(record["completion_attempts"], 1)
         self.assertTrue(record["completion_pending"])
-        self.assertEqual(logged.call_args.args[1], "completion_delivery_error")
+        self.assertEqual(
+            [call.args[1] for call in logged.call_args_list],
+            ["completion_delivery_error", "completion_deferred"],
+        )
+
+    async def test_deferred_completion_requeues_on_user_activity(self) -> None:
+        record = {
+            "id": "worker-1",
+            "completion_pending": True,
+            "completion_attempts": 1,
+        }
+        session.subagent_records["worker-1"] = record
+
+        with patch.object(subagents, "save_state") as saved:
+            count = await subagents.requeue_deferred_subagent_completions()
+
+        self.assertEqual(count, 1)
+        self.assertEqual(record["completion_attempts"], 0)
+        self.assertEqual(
+            session.subagent_events.get_nowait()["id"],
+            "worker-1",
+        )
+        saved.assert_called_once()
+
+    async def test_explicit_stop_discards_deferred_completion(self) -> None:
+        record = {
+            "id": "worker-1",
+            "completion_pending": True,
+            "completion_attempts": 1,
+        }
+        session.subagent_records["worker-1"] = record
+
+        with patch.object(subagents, "save_state") as saved:
+            cancelled = await subagents.cancel_background_subagents(
+                discard_pending=True,
+            )
+
+        self.assertEqual(cancelled, 0)
+        self.assertFalse(record["completion_pending"])
+        self.assertEqual(record["completion_attempts"], 0)
+        saved.assert_called_once()
 
 
 async def _wait_until_called(mock: AsyncMock) -> None:

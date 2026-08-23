@@ -532,7 +532,7 @@ async def _responses_create_stream_once(
                     "status":
                         response.status_code,
                     "body":
-                        response.text,
+                        response.text[:1200],
                 },
             )
 

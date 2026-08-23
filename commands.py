@@ -34,6 +34,7 @@ from context import session_context_stats
 from controller import (
     cancel_active_goal_controller,
     ensure_root_session,
+    requeue_deferred_completions,
     start_manual_compaction,
     start_root_session,
 )
@@ -58,8 +59,12 @@ from chat_runtime import get_chat_provider, send
 from engine import response_calls, response_output, response_text
 from approval import execute_tool_with_approval
 from responses import list_models, stateless_response
-from subagents import cancel_background_subagents
-from shell_sessions import cancel_shell_sessions, running_shell_sessions
+from subagents import cancel_background_subagents, pending_subagent_completions
+from shell_sessions import (
+    cancel_shell_sessions,
+    pending_shell_completions,
+    running_shell_sessions,
+)
 from threads import (
     finish_thread,
     resume_main_goal,
@@ -277,8 +282,12 @@ async def command(
             except Exception as exc:
                 log_exception("agent", "stop_wait_error", exc)
 
-        cancelled_subagents = (
-            await cancel_background_subagents()
+        deferred_results = (
+            pending_subagent_completions()
+            + pending_shell_completions()
+        )
+        cancelled_subagents = await cancel_background_subagents(
+            discard_pending=True,
         )
         cancelled_shells = await cancel_shell_sessions()
 
@@ -286,6 +295,7 @@ async def command(
             stopped
             or cancelled_subagents
             or cancelled_shells
+            or deferred_results
             or paused
         ):
             message = "Stopped."
@@ -302,6 +312,11 @@ async def command(
                 message += (
                     "\nCancelled background shells: "
                     f"{cancelled_shells}"
+                )
+            if deferred_results:
+                message += (
+                    "\nDiscarded pending background results: "
+                    f"{deferred_results}"
                 )
             await send(
                 chat_id,
@@ -420,6 +435,8 @@ async def command(
                 f"pending approvals: {len(pending_approvals)}\n"
                 f"background subagents: {len(session.subagent_tasks)}\n"
                 f"background shells: {running_shell_sessions()}\n"
+                f"pending background results: "
+                f"{pending_subagent_completions() + pending_shell_completions()}\n"
                 f"subagent threads: {len(session.subagent_records)}\n"
                 f"interrupted agent: {interrupted_agent}\n"
                 f"interrupted subagents: {interrupted_subagents}\n"
@@ -517,6 +534,7 @@ async def command(
                 )
                 return True
             resume_goal()
+            await requeue_deferred_completions()
             await ensure_goal_pin(chat_id)
             if not (
                 session.active_task

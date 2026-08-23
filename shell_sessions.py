@@ -99,7 +99,6 @@ class ShellSession:
 
 _sessions: dict[str, ShellSession] = {}
 _completion_events: asyncio.Queue[str] = asyncio.Queue()
-_completion_retry_tasks: dict[str, asyncio.Task[None]] = {}
 _spawning_sessions = 0
 
 
@@ -468,6 +467,23 @@ def running_shell_sessions() -> int:
     return sum(item.status == "running" for item in _sessions.values())
 
 
+def pending_shell_completions() -> int:
+    return sum(item.completion_pending for item in _sessions.values())
+
+
+async def requeue_deferred_shell_completions() -> int:
+    """Retry deferred completion delivery after explicit user activity."""
+    items = [
+        item
+        for item in _sessions.values()
+        if item.completion_pending and item.completion_attempts > 0
+    ]
+    for item in items:
+        item.completion_attempts = 0
+        await _completion_events.put(item.id)
+    return len(items)
+
+
 def _new_session_id() -> str:
     while True:
         session_id = secrets.token_hex(4)
@@ -493,12 +509,6 @@ async def cancel_shell_sessions() -> int:
             *(item.monitor_task for item in active if item.monitor_task),
             return_exceptions=True,
         )
-    retry_tasks = tuple(_completion_retry_tasks.values())
-    _completion_retry_tasks.clear()
-    for task in retry_tasks:
-        task.cancel()
-    if retry_tasks:
-        await asyncio.gather(*retry_tasks, return_exceptions=True)
     return len(active)
 
 
@@ -518,27 +528,6 @@ def _completion_prompt(session: ShellSession) -> str:
         "as a new user request.\n\n"
         + json.dumps(payload, ensure_ascii=False, indent=2)
     )
-
-
-async def _requeue_completion(session_id: str, delay: float) -> None:
-    await asyncio.sleep(delay)
-    item = _sessions.get(session_id)
-    if item is not None and item.completion_pending:
-        await _completion_events.put(session_id)
-
-
-def _schedule_completion_retry(session_id: str, delay: float) -> None:
-    previous = _completion_retry_tasks.get(session_id)
-    if previous is not None and not previous.done():
-        previous.cancel()
-    task = asyncio.create_task(_requeue_completion(session_id, delay))
-    _completion_retry_tasks[session_id] = task
-
-    def remove(completed: asyncio.Task[None]) -> None:
-        if _completion_retry_tasks.get(session_id) is completed:
-            _completion_retry_tasks.pop(session_id, None)
-
-    task.add_done_callback(remove)
 
 
 async def shell_completion_event_loop() -> None:
@@ -582,9 +571,13 @@ async def shell_completion_event_loop() -> None:
                 item.completion_attempts = 0
             else:
                 item.completion_attempts += 1
-                _schedule_completion_retry(
-                    item.id,
-                    float(min(60, 2 ** min(item.completion_attempts, 6))),
+                log_event(
+                    "shell",
+                    "completion_deferred",
+                    {
+                        "session_id": item.id,
+                        "attempts": item.completion_attempts,
+                    },
                 )
         finally:
             _completion_events.task_done()

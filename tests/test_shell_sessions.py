@@ -144,18 +144,13 @@ class ShellSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(delivered.await_args.args[0], "telegram:123")
         self.assertIn("notified", delivered.await_args.args[1])
 
-    async def test_completion_delivery_exception_is_requeued(self) -> None:
+    async def test_completion_delivery_exception_is_deferred(self) -> None:
         delivered = AsyncMock(side_effect=RuntimeError("controller failed"))
         controller = types.ModuleType("controller")
         controller.enqueue_internal_input = delivered
         with (
             patch.dict(sys.modules, {"controller": controller}),
             patch.object(shell_sessions, "log_event") as logged,
-            patch.object(
-                shell_sessions,
-                "_requeue_completion",
-                AsyncMock(return_value=None),
-            ),
         ):
             event_task = asyncio.create_task(shell_completion_event_loop())
             try:
@@ -181,7 +176,32 @@ class ShellSessionTests(unittest.IsolatedAsyncioTestCase):
         item = shell_sessions._sessions[session_id]
         self.assertEqual(item.completion_attempts, 1)
         self.assertTrue(item.completion_pending)
-        self.assertEqual(logged.call_args.args[1], "completion_delivery_error")
+        self.assertEqual(
+            [call.args[1] for call in logged.call_args_list][-2:],
+            ["completion_delivery_error", "completion_deferred"],
+        )
+
+    async def test_deferred_completion_requeues_on_user_activity(self) -> None:
+        item = shell_sessions.ShellSession(
+            id="shell-1",
+            command="true",
+            chat_id="telegram:123",
+            parent_session_id=None,
+            process=AsyncMock(),
+            timeout=1,
+            completion_pending=True,
+            completion_attempts=1,
+        )
+        shell_sessions._sessions[item.id] = item
+
+        count = await shell_sessions.requeue_deferred_shell_completions()
+
+        self.assertEqual(count, 1)
+        self.assertEqual(item.completion_attempts, 0)
+        self.assertEqual(
+            shell_sessions._completion_events.get_nowait(),
+            item.id,
+        )
 
     def test_tool_schemas_expose_managed_session_controls(self) -> None:
         schemas = {item["name"]: item for item in TOOLS}

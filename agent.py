@@ -607,7 +607,7 @@ async def agent_turn(
             "http_error",
             {
                 "status": exc.response.status_code,
-                "body": exc.response.text,
+                "body": body,
             },
         )
         await send(

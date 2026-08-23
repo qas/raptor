@@ -51,9 +51,6 @@ from skills import skill_catalog_instructions
 from observability import log_event
 
 
-_completion_retry_tasks: dict[str, asyncio.Task[None]] = {}
-
-
 def _bounded_tool_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return events[-MAX_SUBAGENT_TOOL_EVENTS:]
 
@@ -1322,54 +1319,45 @@ def completion_prompt(
     )
 
 
-async def requeue_completion(
-    agent_id: str,
-    delay: float,
-) -> None:
-    await asyncio.sleep(
-        delay
+def pending_subagent_completions() -> int:
+    return sum(
+        bool(record.get("completion_pending"))
+        for record in session.subagent_records.values()
     )
-    record = (
-        session.subagent_records.get(
-            agent_id
-        )
-    )
-    if (
+
+
+async def requeue_deferred_subagent_completions() -> int:
+    """Retry deferred completion delivery after explicit user activity."""
+    records = [
         record
-        and record.get(
-            "completion_pending"
-        )
-    ):
-        await session.subagent_events.put(
-            dict(record)
-        )
-
-
-def schedule_completion_retry(agent_id: str, delay: float) -> None:
-    previous = _completion_retry_tasks.get(agent_id)
-    if previous is not None and not previous.done():
-        previous.cancel()
-    task = asyncio.create_task(requeue_completion(agent_id, delay))
-    _completion_retry_tasks[agent_id] = task
-
-    def remove(completed: asyncio.Task[None]) -> None:
-        if _completion_retry_tasks.get(agent_id) is completed:
-            _completion_retry_tasks.pop(agent_id, None)
-
-    task.add_done_callback(remove)
+        for record in session.subagent_records.values()
+        if record.get("completion_pending")
+        and int(record.get("completion_attempts", 0)) > 0
+    ]
+    for record in records:
+        record["completion_attempts"] = 0
+        await session.subagent_events.put(dict(record))
+    if records:
+        save_state()
+    return len(records)
 
 
 async def completion_event_loop() -> None:
     from controller import enqueue_internal_input
+    restored = False
     for record in (
         session.subagent_records.values()
     ):
         if record.get(
             "completion_pending"
         ):
+            record["completion_attempts"] = 0
+            restored = True
             await session.subagent_events.put(
                 dict(record)
             )
+    if restored:
+        save_state()
     while True:
         record = await session.subagent_events.get()
         try:
@@ -1432,15 +1420,19 @@ async def completion_event_loop() -> None:
                     "completion_attempts"
                 ] = attempts
                 save_state()
-                schedule_completion_retry(
-                    str(live_record["id"]),
-                    float(min(60, 2 ** min(attempts, 6))),
+                log_event(
+                    "subagent",
+                    "completion_deferred",
+                    {
+                        "agent_id": live_record.get("id"),
+                        "attempts": attempts,
+                    },
                 )
         finally:
             session.subagent_events.task_done()
 
 
-async def cancel_background_subagents() -> int:
+async def cancel_background_subagents(*, discard_pending: bool = False) -> int:
     tasks: list[asyncio.Task] = []
     for agent_id, task in list(
         session.subagent_tasks.items()
@@ -1464,10 +1456,13 @@ async def cancel_background_subagents() -> int:
             *tasks,
             return_exceptions=True,
         )
-    retry_tasks = tuple(_completion_retry_tasks.values())
-    _completion_retry_tasks.clear()
-    for task in retry_tasks:
-        task.cancel()
-    if retry_tasks:
-        await asyncio.gather(*retry_tasks, return_exceptions=True)
+    if discard_pending:
+        changed = False
+        for record in session.subagent_records.values():
+            if record.get("completion_pending"):
+                record["completion_pending"] = False
+                record["completion_attempts"] = 0
+                changed = True
+        if changed:
+            save_state()
     return len(tasks)
