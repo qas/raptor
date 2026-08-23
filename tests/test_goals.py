@@ -1613,7 +1613,7 @@ class GoalPinTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(
             self._last_pin_text,
-            "Goal active: Fix auth + verify tests",
+            "Goal: Fix auth + verify tests",
         )
 
     async def test_goal_pin_created_only_once_across_continuations(
@@ -1641,9 +1641,9 @@ class GoalPinTests(unittest.IsolatedAsyncioTestCase):
     def test_goal_pin_objective_is_truncated(self) -> None:
         goal = create_goal("x" * 200)
         text = goal_pin_text(goal)
-        self.assertTrue(text.startswith("Goal active: "))
+        self.assertTrue(text.startswith("Goal: "))
         self.assertTrue(text.endswith("..."))
-        self.assertLessEqual(len(text), len("Goal active: ") + 120)
+        self.assertLessEqual(len(text), len("Goal: ") + 120)
 
     def test_goal_pin_reflects_paused_status(self) -> None:
         goal = create_goal("wait for operator")

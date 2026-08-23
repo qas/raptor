@@ -307,6 +307,8 @@ def goal_pin_text(goal: dict[str, Any]) -> str:
     if len(objective) > 120:
         objective = objective[:117] + "..."
     status = str(goal.get("status") or "unknown")
+    if status == GOAL_ACTIVE:
+        return f"Goal: {objective}"
     return f"Goal {status}: {objective}"
 
 
