@@ -28,7 +28,6 @@ from controller import ensure_root_session, interrupt_root_turn
 from goals import goal_is_active, pause_goal, prepare_goal_on_startup
 from loop import COMMANDS, handle_event
 from responses import ensure_model
-from runtime import clear_runtime_if_ours, set_runtime
 from session import bootstrap_runtime_storage, rehydrate_pending_inputs, state
 from shell_sessions import cancel_shell_sessions, shell_completion_event_loop
 from skills import close_skill_discovery, start_skill_discovery
@@ -70,8 +69,6 @@ async def main() -> None:
         RAPTOR_HOME.mkdir(parents=True, exist_ok=True)
         CHAT_DIR.mkdir(parents=True, exist_ok=True)
         storage = bootstrap_runtime_storage()
-
-        set_runtime(daemon=session.DAEMON_MODE)
 
         session_id = state.get("current_session_id")
         conversation_id = provider.primary_conversation_id
@@ -194,7 +191,6 @@ async def main() -> None:
             await asyncio.gather(*event_tasks, return_exceptions=True)
 
         await close_skill_discovery()
-        clear_runtime_if_ours()
         await provider.close()
         set_chat_provider(None)
         await session.responses.aclose()

@@ -57,7 +57,10 @@ uv run raptor.py --daemon
 ```
 
 Raptor uses an atomic process-lifetime lock. A second instance cannot start
-against the same `RAPTOR_HOME`.
+against the same `RAPTOR_HOME`. Status and stop commands use that lock's owner
+PID, so they still work while the application is starting or when session
+metadata is unavailable. Run process commands with the same `RAPTOR_HOME` as
+the daemon (the launch workspace's `.raptor` directory by default).
 
 ## Commands
 
@@ -96,6 +99,8 @@ side effects are not reversible.
 | `raptor.py` | Ownership-first process entry point and CLI |
 | `application.py` | Long-running provider and agent application lifecycle |
 | `process_lock.py` | State-independent atomic process ownership |
+| `runtime.py` | Process metadata and daemon controls |
+| `runtime_paths.py` | Dependency-free runtime filesystem locations |
 | `agent.py` | Root turn execution and compaction integration |
 | `engine.py` | Tool-round engine and response parsing |
 | `controller.py` | Single-owner root scheduling and goal continuation |

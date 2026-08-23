@@ -1,6 +1,7 @@
 """Configuration and tool schemas."""
 import os
-from pathlib import Path
+
+from runtime_paths import AGENT_WORKDIR, CHAT_DIR, LOG_PATH, RAPTOR_HOME, STATE_PATH
 
 from todos import (
     MAX_TODO_EXPLANATION_CHARS,
@@ -123,31 +124,6 @@ MAX_BACKGROUND_SUBAGENTS = max(
     1,
     int(os.getenv("MAX_BACKGROUND_SUBAGENTS", "16")),
 )
-
-AGENT_WORKDIR = Path(
-    os.getenv(
-        "AGENT_WORKDIR",
-        ".",
-    )
-).expanduser().resolve()
-
-RAPTOR_HOME = Path(
-    os.getenv(
-        "RAPTOR_HOME",
-        str(AGENT_WORKDIR / ".raptor"),
-    )
-).expanduser().resolve()
-
-CHAT_DIR = RAPTOR_HOME / "chats"
-
-STATE_PATH = RAPTOR_HOME / "state.json"
-
-LOG_PATH = Path(
-    os.getenv(
-        "RAPTOR_LOG",
-        str(RAPTOR_HOME / "raptor.log"),
-    )
-).expanduser().resolve()
 
 MAX_TOOL_ROUNDS = max(
     0,

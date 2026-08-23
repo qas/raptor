@@ -40,7 +40,6 @@ class ApplicationLifecycleTests(unittest.IsolatedAsyncioTestCase):
             patch.object(application, "close_skill_discovery", close_skills),
             patch.object(application, "cancel_background_subagents", AsyncMock()),
             patch.object(application, "cancel_shell_sessions", AsyncMock()),
-            patch.object(application, "clear_runtime_if_ours"),
         ):
             with self.assertRaisesRegex(RuntimeError, "startup"):
                 await application.main()

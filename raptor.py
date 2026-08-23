@@ -12,41 +12,39 @@ import sys
 from process_lock import acquire_runtime_lock, release_runtime_lock
 
 
-_READ_ONLY_CLI_FLAGS = {"--help", "--status", "--stop-daemon", "-h"}
-
-
 def run() -> int:
-    """Parse the CLI and start Raptor with ownership established first."""
-    owns_runtime = not any(
-        argument in _READ_ONLY_CLI_FLAGS for argument in sys.argv[1:]
+    """Parse the CLI and establish ownership before loading the application."""
+    from runtime import (
+        clear_runtime_if_ours,
+        cli_runtime_status,
+        daemonize,
+        parse_args,
+        set_runtime,
+        stop_daemon,
     )
+
+    args = parse_args()
+    owns_runtime = not (args.status or args.stop_daemon)
     if owns_runtime and not acquire_runtime_lock():
         print("Raptor is already running", file=sys.stderr)
         return 1
-
     try:
-        from runtime import (
-            clear_stale_runtime,
-            cli_runtime_status,
-            daemonize,
-            parse_args,
-            stop_daemon_from_state,
-        )
-
-        args = parse_args()
-        clear_stale_runtime()
         if args.status:
             return cli_runtime_status()
         if args.stop_daemon:
-            return stop_daemon_from_state()
-
-        import application
-        import session
+            return stop_daemon()
 
         if args.daemon:
-            session.DAEMON_MODE = True
             daemonize()
-        asyncio.run(application.main())
+        set_runtime(daemon=args.daemon)
+        try:
+            import application
+            import session
+
+            session.DAEMON_MODE = args.daemon
+            asyncio.run(application.main())
+        finally:
+            clear_runtime_if_ours()
         return 0
     except (KeyboardInterrupt, asyncio.CancelledError):
         return 0
