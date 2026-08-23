@@ -1,4 +1,4 @@
-"""Concurrent Telegram and Responses API chat-provider multiplexer."""
+"""Concurrent chat-provider multiplexer."""
 import asyncio
 from dataclasses import replace
 from typing import Any

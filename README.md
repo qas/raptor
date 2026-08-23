@@ -363,3 +363,12 @@ uv run python -m unittest tests.test_chat_provider tests.test_multi_provider
 Changes should preserve the core invariants: one root controller, append-only
 conversation history, provider-affine delivery, bounded retained state, atomic
 process ownership, and explicit recovery after transient failure.
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the design, implementation, testing,
+and review requirements.
+
+## License
+
+Raptor is licensed under the [MIT License](LICENSE).

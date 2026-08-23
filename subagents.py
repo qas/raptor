@@ -588,7 +588,7 @@ async def run_subagent(
         )
 
     async def execute_call(call: dict[str, Any]) -> dict[str, Any]:
-        # Explicit session_id so chat_history never falls back to main.
+            # Keep chat_history scoped to this subagent transcript.
         tool_context = dict(record)
         tool_context["session_id"] = session_id
         tool_context["todo_state"] = record

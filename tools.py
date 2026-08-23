@@ -1,4 +1,4 @@
-"""Todo, filesystem, and shell tools."""
+"""Agent tool implementations and dispatch."""
 import json
 from pathlib import Path
 from typing import Any
@@ -497,7 +497,7 @@ def _fit_history_payload(payload: dict[str, Any]) -> dict[str, Any]:
     """Ensure the final serialized chat_history object fits MAX_TOOL_OUTPUT.
 
     Shrinks sessions/hits/records generically. Never returns a full list plus
-    a preview. Fallback content wrappers are resized until the final object
+    a preview. Oversized content wrappers are resized until the final object
     itself is within budget.
     """
     raw = json.dumps(payload, ensure_ascii=False)
@@ -775,4 +775,3 @@ async def execute_tool(
                 f"{exc}"
             ),
         }
-
