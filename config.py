@@ -1,4 +1,5 @@
 """Configuration and tool schemas."""
+import math
 import os
 
 from runtime_paths import AGENT_WORKDIR, CHAT_DIR, LOG_PATH, RAPTOR_HOME, STATE_PATH
@@ -8,6 +9,52 @@ from todos import (
     MAX_TODO_ITEMS,
     MAX_TODO_STEP_CHARS,
 )
+
+def _env_int(
+    name: str,
+    default: int,
+    *,
+    minimum: int | None = None,
+    maximum: int | None = None,
+) -> int:
+    try:
+        value = int(os.getenv(name, str(default)))
+    except ValueError as exc:
+        raise ValueError(f"{name} must be an integer") from exc
+    if minimum is not None and value < minimum:
+        raise ValueError(f"{name} must be at least {minimum}")
+    if maximum is not None and value > maximum:
+        raise ValueError(f"{name} must be at most {maximum}")
+    return value
+
+
+def _env_float(
+    name: str,
+    default: float,
+    *,
+    minimum: float | None = None,
+    maximum: float | None = None,
+) -> float:
+    try:
+        value = float(os.getenv(name, str(default)))
+    except ValueError as exc:
+        raise ValueError(f"{name} must be a number") from exc
+    if not math.isfinite(value):
+        raise ValueError(f"{name} must be finite")
+    if minimum is not None and value < minimum:
+        raise ValueError(f"{name} must be at least {minimum}")
+    if maximum is not None and value > maximum:
+        raise ValueError(f"{name} must be at most {maximum}")
+    return value
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name, "true" if default else "false").strip().lower()
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"{name} must be a boolean")
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -23,6 +70,8 @@ CHAT_PROVIDERS = tuple(
 )
 if not CHAT_PROVIDERS:
     raise ValueError("CHAT_PROVIDERS must contain at least one provider")
+if len(set(CHAT_PROVIDERS)) != len(CHAT_PROVIDERS):
+    raise ValueError("CHAT_PROVIDERS entries must be unique")
 
 # Inbound, OpenAI Responses-compatible chat provider.  This is deliberately
 # separate from RESPONSES_BASE_URL, which is the model backend the agent calls.
@@ -30,20 +79,26 @@ RESPONSES_SERVER_HOST = os.getenv(
     "RESPONSES_SERVER_HOST",
     "0.0.0.0",
 ).strip()
-RESPONSES_SERVER_PORT = int(os.getenv("RESPONSES_SERVER_PORT", "8787"))
+RESPONSES_SERVER_PORT = _env_int(
+    "RESPONSES_SERVER_PORT",
+    8787,
+    minimum=1,
+    maximum=65535,
+)
 RESPONSES_SERVER_API_KEY = os.getenv(
     "RESPONSES_SERVER_API_KEY",
     "strong-secret",
 )
-RESPONSES_SERVER_MAX_BODY = max(
-    1024,
-    int(os.getenv("RESPONSES_SERVER_MAX_BODY", "1048576")),
+RESPONSES_SERVER_MAX_BODY = _env_int(
+    "RESPONSES_SERVER_MAX_BODY",
+    1_048_576,
+    minimum=1024,
 )
 
 # Telegram adapter configuration. These are optional at framework import
 # time and validated only when the Telegram provider is initialized.
 TG_BOT_TOKEN = os.getenv("TG_BOT_TOKEN", "")
-TG_USER_ID = int(os.getenv("TG_USER_ID", "0"))
+TG_USER_ID = _env_int("TG_USER_ID", 0, minimum=0)
 
 RESPONSES_BASE_URL = os.getenv(
     "RESPONSES_BASE_URL",
@@ -58,13 +113,15 @@ RESPONSES_REASONING_EFFORT = (
 RESPONSES_REASONING_SUMMARY = (
     os.getenv("RESPONSES_REASONING_SUMMARY", "auto").strip() or None
 )
-RESPONSES_MAX_RETRIES = max(
-    0,
-    int(os.getenv("RESPONSES_MAX_RETRIES", "3")),
+RESPONSES_MAX_RETRIES = _env_int(
+    "RESPONSES_MAX_RETRIES",
+    3,
+    minimum=0,
 )
-RESPONSES_RETRY_BASE_SECONDS = max(
-    0.0,
-    float(os.getenv("RESPONSES_RETRY_BASE_SECONDS", "0.5")),
+RESPONSES_RETRY_BASE_SECONDS = _env_float(
+    "RESPONSES_RETRY_BASE_SECONDS",
+    0.5,
+    minimum=0.0,
 )
 
 SUBAGENT_RESPONSES_BASE_URL = os.getenv(
@@ -89,176 +146,132 @@ SUBAGENT_RESPONSES_REASONING_EFFORT = (
     ).strip()
     or None
 )
-SUBAGENT_RESPONSES_MAX_RETRIES = max(
+SUBAGENT_RESPONSES_MAX_RETRIES = _env_int(
+    "SUBAGENT_RESPONSES_MAX_RETRIES",
+    3,
+    minimum=0,
+)
+SUBAGENT_RESPONSES_RETRY_BASE_SECONDS = _env_float(
+    "SUBAGENT_RESPONSES_RETRY_BASE_SECONDS",
+    0.5,
+    minimum=0.0,
+)
+
+MAX_SUBAGENT_DEPTH = _env_int(
+    "MAX_SUBAGENT_DEPTH",
+    3,
+    minimum=1,
+)
+
+MAX_SUBAGENT_RECORDS = _env_int(
+    "MAX_SUBAGENT_RECORDS",
+    100,
+    minimum=1,
+)
+MAX_SUBAGENT_TOOL_EVENTS = _env_int(
+    "MAX_SUBAGENT_TOOL_EVENTS",
+    500,
+    minimum=1,
+)
+MAX_SUBAGENT_PENDING_INPUTS = _env_int(
+    "MAX_SUBAGENT_PENDING_INPUTS",
+    64,
+    minimum=1,
+)
+MAX_BACKGROUND_SUBAGENTS = _env_int(
+    "MAX_BACKGROUND_SUBAGENTS",
+    16,
+    minimum=1,
+)
+
+MAX_TOOL_ROUNDS = _env_int(
+    "MAX_TOOL_ROUNDS",
     0,
-    int(os.getenv("SUBAGENT_RESPONSES_MAX_RETRIES", "3")),
+    minimum=0,
 )
-SUBAGENT_RESPONSES_RETRY_BASE_SECONDS = max(
-    0.0,
-    float(os.getenv("SUBAGENT_RESPONSES_RETRY_BASE_SECONDS", "0.5")),
-)
-
-MAX_SUBAGENT_DEPTH = max(
-    1,
-    int(
-        os.getenv(
-            "MAX_SUBAGENT_DEPTH",
-            "3",
-        )
-    ),
+MAX_PENDING_STEERS = _env_int(
+    "MAX_PENDING_STEERS",
+    64,
+    minimum=1,
 )
 
-MAX_SUBAGENT_RECORDS = max(
-    1,
-    int(os.getenv("MAX_SUBAGENT_RECORDS", "100")),
-)
-MAX_SUBAGENT_TOOL_EVENTS = max(
-    1,
-    int(os.getenv("MAX_SUBAGENT_TOOL_EVENTS", "500")),
-)
-MAX_SUBAGENT_PENDING_INPUTS = max(
-    1,
-    int(os.getenv("MAX_SUBAGENT_PENDING_INPUTS", "64")),
-)
-MAX_BACKGROUND_SUBAGENTS = max(
-    1,
-    int(os.getenv("MAX_BACKGROUND_SUBAGENTS", "16")),
+SHELL_TIMEOUT = _env_int(
+    "SHELL_TIMEOUT",
+    120,
+    minimum=1,
 )
 
-MAX_TOOL_ROUNDS = max(
-    0,
-    int(
-        os.getenv(
-            "MAX_TOOL_ROUNDS",
-            "0",
-        )
-    ),
-)
-MAX_PENDING_STEERS = max(
-    1,
-    int(os.getenv("MAX_PENDING_STEERS", "64")),
+MAX_TOOL_OUTPUT = _env_int(
+    "MAX_TOOL_OUTPUT",
+    30_000,
+    minimum=1024,
 )
 
-SHELL_TIMEOUT = int(
-    os.getenv(
-        "SHELL_TIMEOUT",
-        "120",
-    )
-)
-
-MAX_TOOL_OUTPUT = max(
-    1024,
-    int(
-        os.getenv(
-            "MAX_TOOL_OUTPUT",
-            "30000",
-        )
-    ),
-)
-
-COMPACTION_OUTPUT_TOKENS = max(
-    256,
-    int(
-        os.getenv(
-            "COMPACTION_OUTPUT_TOKENS",
-            "4000",
-        )
-    ),
+COMPACTION_OUTPUT_TOKENS = _env_int(
+    "COMPACTION_OUTPUT_TOKENS",
+    4_000,
+    minimum=256,
 )
 
 # The Responses API counts hidden reasoning and visible checkpoint text against
 # the same generation limit.  Keep the durable checkpoint cap independent from
 # the model's generation allowance so a reasoning model cannot consume the
 # entire budget before emitting its summary.
-COMPACTION_GENERATION_TOKENS = max(
-    COMPACTION_OUTPUT_TOKENS,
-    int(
-        os.getenv(
-            "COMPACTION_GENERATION_TOKENS",
-            str(COMPACTION_OUTPUT_TOKENS + 4096),
-        )
-    ),
+COMPACTION_GENERATION_TOKENS = _env_int(
+    "COMPACTION_GENERATION_TOKENS",
+    COMPACTION_OUTPUT_TOKENS + 4096,
+    minimum=COMPACTION_OUTPUT_TOKENS,
 )
 
 COMPACTION_REASONING_EFFORT = (
     os.getenv("COMPACTION_REASONING_EFFORT", "low").strip() or None
 )
 
-MODEL_CONTEXT_TOKENS = max(
+MODEL_CONTEXT_TOKENS = _env_int(
+    "MODEL_CONTEXT_TOKENS",
     0,
-    int(
-        os.getenv(
-            "MODEL_CONTEXT_TOKENS",
-            "0",
-        )
-    ),
+    minimum=0,
 )
 
-SUBAGENT_MODEL_CONTEXT_TOKENS = max(
+SUBAGENT_MODEL_CONTEXT_TOKENS = _env_int(
+    "SUBAGENT_MODEL_CONTEXT_TOKENS",
     0,
-    int(
-        os.getenv(
-            "SUBAGENT_MODEL_CONTEXT_TOKENS",
-            "0",
-        )
-    ),
+    minimum=0,
 )
 
-COMPACT_KEEP_RECENT_TOKENS = max(
-    0,
-    int(
-        os.getenv(
-            "COMPACT_KEEP_RECENT_TOKENS",
-            "20000",
-        )
-    ),
+COMPACT_KEEP_RECENT_TOKENS = _env_int(
+    "COMPACT_KEEP_RECENT_TOKENS",
+    20_000,
+    minimum=0,
 )
 
 # Original user requests retained alongside a generated checkpoint.  These are
 # semantic anchors, not another model-written summary.
-COMPACTION_USER_ANCHOR_TOKENS = max(
-    0,
-    int(
-        os.getenv(
-            "COMPACTION_USER_ANCHOR_TOKENS",
-            "20000",
-        )
-    ),
+COMPACTION_USER_ANCHOR_TOKENS = _env_int(
+    "COMPACTION_USER_ANCHOR_TOKENS",
+    20_000,
+    minimum=0,
 )
 
 # Per-record char cap when rendering archive items into a checkpoint
 # request. Canonical JSONL is never truncated.
-COMPACTION_MAX_RECORD_CHARS = max(
-    1024,
-    int(
-        os.getenv(
-            "COMPACTION_MAX_RECORD_CHARS",
-            "12000",
-        )
-    ),
+COMPACTION_MAX_RECORD_CHARS = _env_int(
+    "COMPACTION_MAX_RECORD_CHARS",
+    12_000,
+    minimum=1024,
 )
 
-CONTEXT_COMPACT_RATIO = min(
-    0.95,
-    max(
-        0.50,
-        float(
-            os.getenv(
-                "CONTEXT_COMPACT_RATIO",
-                "0.82",
-            )
-        ),
-    ),
+CONTEXT_COMPACT_RATIO = _env_float(
+    "CONTEXT_COMPACT_RATIO",
+    0.82,
+    minimum=0.50,
+    maximum=0.95,
 )
 
-CONTEXT_SAFETY_TOKENS = max(
-    0,
-    int(
-        os.getenv(
-            "CONTEXT_SAFETY_TOKENS",
-            "4096",
-        )
-    ),
+CONTEXT_SAFETY_TOKENS = _env_int(
+    "CONTEXT_SAFETY_TOKENS",
+    4096,
+    minimum=0,
 )
 
 
@@ -309,31 +322,14 @@ def subagent_compaction_generation_budget() -> int:
     return _compaction_generation_budget(SUBAGENT_MODEL_CONTEXT_TOKENS)
 
 
-CHAT_STREAMING = (
-    os.getenv("CHAT_STREAMING", "1").lower()
-    not in {
-        "0",
-        "false",
-        "no",
-        "off",
-    }
-)
+CHAT_STREAMING = _env_bool("CHAT_STREAMING", True)
 
-TELEGRAM_MARKDOWN = (
-    os.getenv(
-        "TELEGRAM_MARKDOWN",
-        "1",
-    ).lower()
-    not in {
-        "0",
-        "false",
-        "no",
-        "off",
-    }
-)
+TELEGRAM_MARKDOWN = _env_bool("TELEGRAM_MARKDOWN", True)
 
-CHAT_STREAM_INTERVAL = float(
-    os.getenv("CHAT_STREAM_INTERVAL", "0.35")
+CHAT_STREAM_INTERVAL = _env_float(
+    "CHAT_STREAM_INTERVAL",
+    0.35,
+    minimum=0.01,
 )
 
 TG_API = (

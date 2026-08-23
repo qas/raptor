@@ -53,6 +53,42 @@ class ContextBudgetTests(unittest.TestCase):
             self.assertEqual(config.context_input_budget(), 82_000)
             self.assertEqual(config.subagent_context_input_budget(), 15_904)
 
+    def test_rejects_out_of_range_environment_values(self) -> None:
+        with patch.dict(
+            os.environ,
+            {"RESPONSES_MAX_RETRIES": "-1"},
+            clear=True,
+        ):
+            with self.assertRaisesRegex(
+                ValueError,
+                "RESPONSES_MAX_RETRIES must be at least 0",
+            ):
+                runpy.run_path(str(ROOT / "config.py"))
+
+    def test_rejects_unknown_boolean_environment_values(self) -> None:
+        with patch.dict(
+            os.environ,
+            {"CHAT_STREAMING": "sometimes"},
+            clear=True,
+        ):
+            with self.assertRaisesRegex(
+                ValueError,
+                "CHAT_STREAMING must be a boolean",
+            ):
+                runpy.run_path(str(ROOT / "config.py"))
+
+    def test_rejects_nonfinite_float_environment_values(self) -> None:
+        with patch.dict(
+            os.environ,
+            {"CHAT_STREAM_INTERVAL": "nan"},
+            clear=True,
+        ):
+            with self.assertRaisesRegex(
+                ValueError,
+                "CHAT_STREAM_INTERVAL must be finite",
+            ):
+                runpy.run_path(str(ROOT / "config.py"))
+
 
 class ReadmeEnvironmentTests(unittest.TestCase):
     def test_every_config_environment_variable_is_documented(self) -> None:
@@ -61,6 +97,12 @@ class ReadmeEnvironmentTests(unittest.TestCase):
         names = set(
             re.findall(
                 r'os\.getenv\(\s*["\']([A-Z0-9_]+)',
+                source,
+            )
+        )
+        names.update(
+            re.findall(
+                r'_env_(?:int|float|bool)\(\s*["\']([A-Z0-9_]+)',
                 source,
             )
         )

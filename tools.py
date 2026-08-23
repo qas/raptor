@@ -1,5 +1,6 @@
 """Agent tool implementations and dispatch."""
 import json
+import stat
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
@@ -15,6 +16,7 @@ from chat_store import (
 )
 from config import AGENT_WORKDIR, MAX_TOOL_OUTPUT, TOOLS
 from session import save_state, state
+from storage import write_text_atomic
 from todos import MAX_TODO_EXPLANATION_CHARS, validate_plan
 
 # ---------------------------------------------------------------------------
@@ -285,8 +287,11 @@ def write_file_tool(
         exist_ok=True,
     )
 
-    path.write_text(
-        content
+    mode = stat.S_IMODE(path.stat().st_mode) if path.exists() else None
+    write_text_atomic(
+        path,
+        content,
+        mode=mode,
     )
 
     return {
@@ -387,8 +392,10 @@ def edit_file_tool(
 
         replacements = 1
 
-    path.write_text(
-        text
+    write_text_atomic(
+        path,
+        text,
+        mode=stat.S_IMODE(path.stat().st_mode),
     )
 
     return {

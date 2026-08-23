@@ -48,6 +48,9 @@ curl http://127.0.0.1:8787/v1/responses \
   -d '{"input":"Hello"}'
 ```
 
+Model discovery is available at `GET /v1/models`; live status surfaces are
+available at `GET /v1/status`.
+
 Process commands:
 
 ```bash
@@ -287,7 +290,8 @@ stays in the provider-neutral core.
 ## Configuration
 
 Subagent backend settings are independent; they never inherit main-agent
-backend settings.
+backend settings. Invalid numbers, booleans, duplicate providers, and values
+outside the documented ranges stop startup with a configuration error.
 
 ### Runtime and providers
 
@@ -355,7 +359,7 @@ backend settings.
 |---|---:|---|
 | `MODEL_CONTEXT_TOKENS` | `0` | Main context window; `0` disables proactive checks |
 | `SUBAGENT_MODEL_CONTEXT_TOKENS` | `0` | Independent subagent context window |
-| `CONTEXT_COMPACT_RATIO` | `0.82` | Proactive compaction ratio, clamped to 0.50–0.95 |
+| `CONTEXT_COMPACT_RATIO` | `0.82` | Proactive compaction ratio; must be 0.50–0.95 |
 | `CONTEXT_SAFETY_TOKENS` | `4096` | Tokens reserved below each window |
 | `COMPACT_KEEP_RECENT_TOKENS` | `20000` | Native tail retained by normal compaction |
 | `COMPACTION_USER_ANCHOR_TOKENS` | `20000` | Original-user-request anchor budget |

@@ -1,6 +1,7 @@
 """Crash-safe local file replacement primitives."""
 
 import os
+import tempfile
 from pathlib import Path
 
 
@@ -21,14 +22,25 @@ def write_bytes_atomic(
 ) -> None:
     """Replace a file only after its new contents are durable."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary_path = path.with_suffix(path.suffix + ".tmp")
-    with temporary_path.open("wb") as handle:
-        handle.write(data)
-        handle.flush()
-        os.fsync(handle.fileno())
-    if mode is not None:
-        os.chmod(temporary_path, mode)
-    os.replace(temporary_path, path)
+    fd, temporary_name = tempfile.mkstemp(
+        dir=path.parent,
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+    )
+    temporary_path = Path(temporary_name)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        if mode is not None:
+            os.chmod(temporary_path, mode)
+        os.replace(temporary_path, path)
+    finally:
+        try:
+            temporary_path.unlink()
+        except FileNotFoundError:
+            pass
     fsync_directory(path.parent)
 
 
