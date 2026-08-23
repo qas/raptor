@@ -278,35 +278,69 @@ def latest_checkpoint(
     return latest
 
 
+def _session_summary(path: Path) -> dict[str, Any] | None:
+    start: dict[str, Any] | None = None
+    first: dict[str, Any] | None = None
+    last: dict[str, Any] | None = None
+    with path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(event, dict):
+                continue
+            if first is None:
+                first = event
+            if start is None and event.get("type") == "session_start":
+                start = event
+            last = event
+    if first is None or last is None:
+        return None
+    start = start or first
+    return {
+        "session_id": path.stem,
+        "kind": start.get("kind") or "main",
+        "parent_session_id": start.get("parent_session_id"),
+        "agent_id": start.get("agent_id"),
+        "started_at": start.get("ts"),
+        "last_seq": last.get("seq"),
+    }
+
+
 def list_sessions() -> list[dict[str, Any]]:
     ensure_chat_dirs()
     sessions: list[dict[str, Any]] = []
     for path in sorted(CHAT_DIR.glob("*.jsonl")):
-        session_id = path.stem
-        events = read_events(session_id)
-        if not events:
+        try:
+            validate_session_id(path.stem)
+        except ValueError:
             continue
-        start = next(
-            (
-                event
-                for event in events
-                if event.get("type") == "session_start"
-            ),
-            events[0],
-        )
-        sessions.append(
-            {
-                "session_id": session_id,
-                "kind": start.get("kind") or "main",
-                "parent_session_id": start.get(
-                    "parent_session_id"
-                ),
-                "agent_id": start.get("agent_id"),
-                "started_at": start.get("ts"),
-                "last_seq": events[-1].get("seq"),
-            }
-        )
+        summary = _session_summary(path)
+        if summary is not None:
+            sessions.append(summary)
     return sessions
+
+
+def session_contains_text(session_id: str, query: str) -> bool:
+    """Search one transcript without retaining it in memory."""
+    needle = query.casefold()
+    if not needle:
+        return True
+    path = chat_path(session_id)
+    if not path.is_file():
+        return False
+    with path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(event, dict):
+                continue
+            if needle in render_compaction_records([event]).casefold():
+                return True
+    return False
 
 
 def render_item_text(item: dict[str, Any]) -> str:

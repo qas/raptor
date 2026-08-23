@@ -170,11 +170,14 @@ SHELL_TIMEOUT = int(
     )
 )
 
-MAX_TOOL_OUTPUT = int(
-    os.getenv(
-        "MAX_TOOL_OUTPUT",
-        "30000",
-    )
+MAX_TOOL_OUTPUT = max(
+    1024,
+    int(
+        os.getenv(
+            "MAX_TOOL_OUTPUT",
+            "30000",
+        )
+    ),
 )
 
 COMPACTION_OUTPUT_TOKENS = max(
@@ -505,6 +508,7 @@ TOOLS = [
             "properties": {
                 "command": {
                     "type": "string",
+                    "maxLength": MAX_TOOL_OUTPUT,
                 },
                 "timeout": {
                     "type": "integer",
@@ -709,7 +713,7 @@ TOOLS = [
         "type": "function",
         "name": "update_goal",
         "description": (
-            "Update the durable root-session goal status. "
+            "Update the durable root-session goal objective or status. "
             "Use status=complete only after the full objective "
             "is achieved and verified. Use status=blocked when "
             "outside intervention is required. Always pass the "
@@ -720,6 +724,13 @@ TOOLS = [
             "properties": {
                 "goal_id": {
                     "type": "string",
+                },
+                "objective": {
+                    "type": "string",
+                    "description": (
+                        "A revised objective when the active goal's scope or "
+                        "wording genuinely changes."
+                    ),
                 },
                 "status": {
                     "type": "string",
@@ -737,7 +748,6 @@ TOOLS = [
             },
             "required": [
                 "goal_id",
-                "status",
             ],
             "additionalProperties": False,
         },
@@ -797,7 +807,7 @@ TOOLS = [
             "Cancel one running background resource by its exact identifier. "
             "Use kind=subagent with an agent_id returned by subagent, or "
             "kind=shell with a session_id returned by shell. This is targeted; "
-            "/stop remains the user-controlled global stop operation."
+            "/stop all is the user-controlled global stop operation."
         ),
         "parameters": {
             "type": "object",
@@ -828,8 +838,8 @@ TOOLS = [
             "List, start, or continue durable subagent threads using the "
             "configured subagent Responses host and model. Call without "
             "arguments to list threads, agent_id alone to inspect stored "
-            "tasks/tool results/status, task to start a new thread, or task "
-            "plus agent_id to continue one. If that thread is running, the "
+            "public status and final result, task to start a new thread, or "
+            "task plus agent_id to continue one. If that thread is running, the "
             "task steers it at the next safe model boundary. Use only when "
             "the user explicitly requests delegation."
         ),
@@ -838,6 +848,7 @@ TOOLS = [
             "properties": {
                 "task": {
                     "type": "string",
+                    "maxLength": MAX_TOOL_OUTPUT,
                 },
                 "agent_id": {
                     "type": "string",

@@ -1,13 +1,16 @@
 """Queued steering controls."""
 import asyncio
 import re
-import time
 
 from chat_provider import IncomingAction
 from chat_runtime import bound_delivery_context, get_chat_provider, send
 import session
 from presentation import clear_steering_indicator
-from controller import start_root_session
+from controller import (
+    ensure_root_session,
+    interrupt_root_turn,
+    start_root_session,
+)
 from observability import log_event, log_exception
 
 
@@ -41,6 +44,58 @@ async def delete_steered_message(entry: dict) -> None:
         )
     except Exception as exc:
         log_exception("steering", "message_delete_error", exc)
+
+
+async def _cancel_steers(*, preserve_forced: bool) -> int:
+    preserved_statuses = {"forcing", "force_pending"}
+    entries = list(session.pending_steers.values())
+    cancelled = [
+        entry
+        for entry in entries
+        if not (
+            preserve_forced
+            and entry.get("status") in preserved_statuses
+        )
+    ]
+    for entry in cancelled:
+        entry["status"] = "cancelled"
+        session.pending_steers.pop(str(entry.get("id") or ""), None)
+        await clear_steering_indicator(
+            entry["chat_id"],
+            entry.get("message_id"),
+            str(entry.get("id") or ""),
+        )
+    queued: list[dict] = []
+    while True:
+        try:
+            entry = session.steer_queue.get_nowait()
+        except asyncio.QueueEmpty:
+            break
+        session.steer_queue.task_done()
+        if (
+            preserve_forced
+            and entry.get("status") in preserved_statuses
+        ):
+            queued.append(entry)
+    for entry in queued:
+        await session.steer_queue.put(entry)
+    session.state["pending_inputs"] = [
+        str(entry.get("text") or "")
+        for entry in session.pending_steers.values()
+        if str(entry.get("text") or "")
+    ]
+    session.save_state()
+    return len(cancelled)
+
+
+async def cancel_pending_steers() -> int:
+    """Discard every queued steer and its presentation state."""
+    return await _cancel_steers(preserve_forced=False)
+
+
+async def cancel_unforced_steers() -> int:
+    """Discard queued steers while retaining an explicit forced steer."""
+    return await _cancel_steers(preserve_forced=True)
 
 
 def remove_persisted_steer(text: str) -> None:
@@ -134,33 +189,25 @@ async def handle_steering_action(
             "steer_id": steer_id,
         },
     )
-    active = session.active_task
-    if (
-        active
-        and not active.done()
-    ):
-        active.cancel()
-        try:
-            await active
-        except asyncio.CancelledError:
-            pass
-        except Exception as exc:
-            log_exception("steering", "force_wait_error", exc)
-    session.pending_steers.pop(
-        steer_id,
-        None,
-    )
-    await clear_steering_indicator(
-        entry["chat_id"],
-        entry.get("message_id"),
-        steer_id,
-    )
-    session.active_since = (
-        time.monotonic()
-    )
-    start_root_session(
-        entry["chat_id"],
-        str(entry["text"]),
-        delivery_context=entry.get("delivery_context"),
-    )
+    interrupted = await interrupt_root_turn()
+    if interrupted.error is not None:
+        log_exception("steering", "force_wait_error", interrupted.error)
+    if interrupted.completed:
+        entry["status"] = "applied"
+        session.pending_steers.pop(steer_id, None)
+        await clear_steering_indicator(
+            entry["chat_id"],
+            entry.get("message_id"),
+            steer_id,
+        )
+        start_root_session(
+            entry["chat_id"],
+            str(entry["text"]),
+            delivery_context=entry.get("delivery_context"),
+        )
+    else:
+        # Keep ownership singular while cancellation drains. The root's
+        # lost-wakeup guard applies this steer after the old owner exits.
+        entry["status"] = "force_pending"
+        ensure_root_session(entry["chat_id"], None)
     return True

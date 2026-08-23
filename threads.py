@@ -22,17 +22,11 @@ import session
 from observability import log_event, log_exception
 from thread_state import current_thread, thread_active, thread_owner
 from thread_status import ensure_thread_status
+from controller import session_transition_busy
 
 
 def thread_busy() -> bool:
-    active = session.active_task
-    return bool(
-        (active and not active.done())
-        or session.subagent_tasks
-        or session.pending_approvals
-        or session.pending_steers
-        or not session.internal_queue.empty()
-    )
+    return session_transition_busy()
 
 
 async def start_thread(conversation_id: ConversationId) -> dict[str, Any]:
@@ -40,7 +34,7 @@ async def start_thread(conversation_id: ConversationId) -> dict[str, Any]:
     if existing:
         return {"ok": False, "error": "A thread is already active."}
     if thread_busy():
-        return {"ok": False, "error": "Busy. Use /stop first."}
+        return {"ok": False, "error": "Busy. Use /stop all first."}
     parent_id = str(session.state.get("current_session_id") or "")
     if not session_exists(parent_id):
         return {"ok": False, "error": "No valid main session."}
@@ -62,9 +56,6 @@ async def start_thread(conversation_id: ConversationId) -> dict[str, Any]:
         "session_id": branch_id,
         "started_at": time.time(),
         "seed_items": len(seed),
-        "parent_interrupted_agent": copy.deepcopy(
-            session.state.get("interrupted_agent")
-        ),
         "parent_interrupted_subagents": copy.deepcopy(
             session.state.get("interrupted_subagents") or []
         ),
@@ -80,7 +71,6 @@ async def start_thread(conversation_id: ConversationId) -> dict[str, Any]:
     )
     session.state["thread"] = thread
     session.state["current_session_id"] = branch_id
-    session.state["interrupted_agent"] = None
     session.state["interrupted_subagents"] = []
     session.save_state()
     try:
@@ -88,9 +78,6 @@ async def start_thread(conversation_id: ConversationId) -> dict[str, Any]:
     except Exception as exc:
         session.state["thread"] = None
         session.state["current_session_id"] = parent_id
-        session.state["interrupted_agent"] = thread[
-            "parent_interrupted_agent"
-        ]
         session.state["interrupted_subagents"] = thread[
             "parent_interrupted_subagents"
         ]
@@ -118,7 +105,7 @@ async def finish_thread(
     if not thread or not owner:
         return {"ok": False, "error": "No thread is active."}
     if thread_busy():
-        return {"ok": False, "error": "Busy. Use /stop first."}
+        return {"ok": False, "error": "Busy. Use /stop all first."}
     parent_id = str(thread.get("parent_session_id") or "")
     branch_id = str(thread.get("session_id") or "")
     if not session_exists(parent_id) or not session_exists(branch_id):
@@ -152,9 +139,6 @@ async def finish_thread(
     )
     session.state["thread"] = None
     session.state["current_session_id"] = parent_id
-    session.state["interrupted_agent"] = copy.deepcopy(
-        thread.get("parent_interrupted_agent")
-    )
     session.state["interrupted_subagents"] = copy.deepcopy(
         thread.get("parent_interrupted_subagents") or []
     )

@@ -252,6 +252,38 @@ def _drain_pending(session: ShellSession) -> tuple[str, str, bool]:
     return stdout, stderr, truncated
 
 
+def _truncate_output(text: str, limit: int) -> tuple[str, bool]:
+    if len(text) <= limit:
+        return text, False
+    marker = "\n... [truncated] ...\n"
+    if limit <= len(marker):
+        return text[:limit], True
+    remaining = limit - len(marker)
+    head = remaining // 2
+    tail = remaining - head
+    return text[:head] + marker + text[-tail:], True
+
+
+def _fit_output_pair(stdout: str, stderr: str) -> tuple[str, str, bool]:
+    """Fit both streams within the single tool-output budget."""
+    if len(stdout) + len(stderr) <= MAX_TOOL_OUTPUT:
+        return stdout, stderr, False
+    stdout_limit = min(len(stdout), MAX_TOOL_OUTPUT // 2)
+    stderr_limit = min(len(stderr), MAX_TOOL_OUTPUT // 2)
+    remaining = MAX_TOOL_OUTPUT - stdout_limit - stderr_limit
+    stdout_extra = min(remaining, len(stdout) - stdout_limit)
+    stdout_limit += stdout_extra
+    remaining -= stdout_extra
+    stderr_limit += min(remaining, len(stderr) - stderr_limit)
+    fitted_stdout, stdout_truncated = _truncate_output(stdout, stdout_limit)
+    fitted_stderr, stderr_truncated = _truncate_output(stderr, stderr_limit)
+    return (
+        fitted_stdout,
+        fitted_stderr,
+        stdout_truncated or stderr_truncated,
+    )
+
+
 def _result(
     session: ShellSession,
     *,
@@ -263,6 +295,8 @@ def _result(
         stdout = session.stdout.render()
         stderr = session.stderr.render()
         truncated = bool(session.stdout.omitted or session.stderr.omitted)
+    stdout, stderr, pair_truncated = _fit_output_pair(stdout, stderr)
+    truncated = truncated or pair_truncated
     return {
         "ok": session.status in {"running", "completed"},
         "session_id": session.id,
@@ -302,6 +336,11 @@ async def run_shell(
     chat_id: ConversationId | None,
     parent_session_id: str | None,
 ) -> dict[str, Any]:
+    if len(command) > MAX_TOOL_OUTPUT:
+        return {
+            "ok": False,
+            "error": f"shell command exceeds {MAX_TOOL_OUTPUT} characters",
+        }
     timeout = min(600, max(1, int(timeout or SHELL_TIMEOUT)))
     yield_ms = min(
         MAX_YIELD_TIME_MS,
@@ -552,13 +591,15 @@ async def cancel_shell_session(session_id: str) -> dict[str, Any]:
 
 
 def _completion_prompt(session: ShellSession) -> str:
+    result = _result(session, drain=False)
     payload = {
         "session_id": session.id,
         "command": session.command,
         "status": session.status,
         "exit_code": session.exit_code,
-        "stdout": session.stdout.render(),
-        "stderr": session.stderr.render(),
+        "stdout": result["stdout"],
+        "stderr": result["stderr"],
+        "truncated": result["truncated"],
         "error": session.error,
     }
     return (
@@ -570,7 +611,8 @@ def _completion_prompt(session: ShellSession) -> str:
 
 
 async def shell_completion_event_loop() -> None:
-    from controller import enqueue_internal_input
+    from controller import enqueue_runtime_event
+    from runtime_events import RuntimeEventKind
     from session import state
 
     while True:
@@ -587,8 +629,9 @@ async def shell_completion_event_loop() -> None:
                 item.completion_pending = False
                 continue
             try:
-                delivered = await enqueue_internal_input(
+                delivered = await enqueue_runtime_event(
                     item.chat_id,
+                    RuntimeEventKind.SHELL_COMPLETED,
                     _completion_prompt(item),
                     is_active=lambda: item.completion_pending,
                 )

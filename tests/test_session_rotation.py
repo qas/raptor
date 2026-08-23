@@ -1,4 +1,5 @@
 """Session rotation (/new) tests."""
+import asyncio
 import copy
 import os
 import sys
@@ -18,6 +19,8 @@ if str(_ROOT) not in sys.path:
 
 import chat_store
 import session
+from session import pending_approvals
+from turn_runtime import turns
 from commands import command
 from goals import replace_goal
 from tools import chat_history_tool
@@ -48,8 +51,17 @@ class SessionRotationTests(unittest.IsolatedAsyncioTestCase):
             {"step": "old", "status": "pending"}
         ]
         session.subagent_records = session.state["subagents"]
-        session.active_task = None
+        turns.finish()
         session.subagent_tasks.clear()
+        session.pending_steers.clear()
+        pending_approvals.clear()
+        while True:
+            try:
+                session.runtime_event_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            else:
+                session.runtime_event_queue.task_done()
         chat_store.append_item(
             sid,
             {"role": "user", "content": "remember-me"},
@@ -110,13 +122,130 @@ class SessionRotationTests(unittest.IsolatedAsyncioTestCase):
             sent.append(text)
 
         with (
-            patch("commands.running_shell_sessions", return_value=1),
+            patch("shell_sessions.running_shell_sessions", return_value=1),
             patch("commands.send", capture),
         ):
             await command(1, "/new")
 
         self.assertEqual(session.state["current_session_id"], old)
-        self.assertEqual(sent, ["Busy. Use /stop first."])
+        self.assertEqual(sent, ["Busy. Use /stop all first."])
+
+    async def test_chats_lists_main_sessions_and_marks_current(self) -> None:
+        current = session.state["current_session_id"]
+        previous = chat_store.create_session(kind="main")
+        chat_store.append_item(
+            previous,
+            {"role": "user", "content": "find this launch note"},
+            source="user",
+        )
+        child = chat_store.create_session(
+            kind="subagent",
+            agent_id="child",
+            parent_session_id=current,
+        )
+        sent: list[str] = []
+
+        async def capture(_chat_id, text, **_kwargs):
+            sent.append(text)
+
+        with patch("commands.send", capture):
+            await command(1, "/chats")
+
+        self.assertIn(f"{current} ·", sent[0])
+        self.assertIn("(current)", sent[0])
+        self.assertIn(f"{previous} ·", sent[0])
+        self.assertNotIn(child, sent[0])
+
+    async def test_chats_keeps_an_old_resumed_session_visible(self) -> None:
+        current = session.state["current_session_id"]
+        for _index in range(25):
+            chat_store.create_session(kind="main")
+        sent: list[str] = []
+
+        async def capture(_chat_id, text, **_kwargs):
+            sent.append(text)
+
+        with patch("commands.send", capture):
+            await command(1, "/chats")
+
+        self.assertIn(f"{current} ·", sent[0])
+        self.assertIn(f"{current} ·", sent[0].splitlines()[1])
+
+    async def test_chats_searches_transcript_content(self) -> None:
+        matching = chat_store.create_session(kind="main")
+        chat_store.append_item(
+            matching,
+            {"role": "user", "content": "NeedleProject details"},
+            source="user",
+        )
+        other = chat_store.create_session(kind="main")
+        chat_store.append_item(
+            other,
+            {"role": "user", "content": "unrelated"},
+            source="user",
+        )
+        sent: list[str] = []
+
+        async def capture(_chat_id, text, **_kwargs):
+            sent.append(text)
+
+        with patch("commands.send", capture):
+            await command(1, "/chats needleproject")
+
+        self.assertIn(matching, sent[0])
+        self.assertNotIn(other, sent[0])
+
+    async def test_resume_switches_to_archived_main_session(self) -> None:
+        current = session.state["current_session_id"]
+        target = chat_store.create_session(kind="main")
+        archived_todos = [{"step": "continue this", "status": "pending"}]
+        chat_store.end_session(
+            target,
+            reason="new_session",
+            todos=archived_todos,
+        )
+        sent: list[str] = []
+
+        async def capture(_chat_id, text, **_kwargs):
+            sent.append(text)
+
+        with patch("commands.send", capture):
+            await command(1, f"/resume {target}")
+
+        self.assertEqual(session.state["current_session_id"], target)
+        self.assertEqual(session.state["todos"], archived_todos)
+        self.assertEqual(sent, [f"Resumed chat: {target}"])
+        current_end = [
+            event
+            for event in chat_store.read_events(current)
+            if event.get("type") == "session_end"
+        ]
+        self.assertEqual(current_end[-1]["reason"], "session_switched")
+        resumed = [
+            event
+            for event in chat_store.read_events(target)
+            if event.get("type") == "meta"
+            and event.get("name") == "session_resumed"
+        ]
+        self.assertEqual(resumed[-1]["data"]["from_session_id"], current)
+
+    async def test_resume_rejects_subagent_session(self) -> None:
+        current = session.state["current_session_id"]
+        child = chat_store.create_session(
+            kind="subagent",
+            agent_id="child",
+            parent_session_id=current,
+        )
+        sent: list[str] = []
+
+        async def capture(_chat_id, text, **_kwargs):
+            sent.append(text)
+
+        with patch("commands.send", capture):
+            await command(1, f"/resume {child}")
+
+        self.assertEqual(session.state["current_session_id"], current)
+        self.assertEqual(sent, [f"Chat not found: {child}"])
 
     def test_invalid_state_is_reported_instead_of_silently_replaced(self) -> None:
         state_path = Path(tempfile.mkdtemp()) / "state.json"

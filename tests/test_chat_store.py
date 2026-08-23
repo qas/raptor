@@ -150,6 +150,21 @@ class ChatStoreTests(unittest.TestCase):
         self.assertEqual(start["parent_session_id"], main)
         self.assertEqual(start["agent_id"], "abcd1234")
 
+    def test_session_listing_and_search_are_transcript_scoped(self) -> None:
+        sid = chat_store.create_session(kind="main")
+        chat_store.append_item(
+            sid,
+            {"role": "user", "content": "Project Firefly"},
+            source="user",
+        )
+        (self._chat_dir / "not-a-session.jsonl").write_text("{}\n")
+
+        sessions = chat_store.list_sessions()
+
+        self.assertEqual([row["session_id"] for row in sessions], [sid])
+        self.assertTrue(chat_store.session_contains_text(sid, "firefly"))
+        self.assertFalse(chat_store.session_contains_text(sid, "saturn"))
+
     def test_invalid_session_id_rejected(self) -> None:
         with self.assertRaises(ValueError):
             chat_store.chat_path("../escape")

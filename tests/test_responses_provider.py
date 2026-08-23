@@ -29,6 +29,7 @@ from config import (
     SUBAGENT_RESPONSES_REASONING_EFFORT,
 )
 import session
+from turn_runtime import TurnKind, turns
 
 
 class ResponsesInputTests(unittest.TestCase):
@@ -99,8 +100,7 @@ class ResponsesInputTests(unittest.TestCase):
 
 class ResponsesApiProviderTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
-        self.previous_active_task = session.active_task
-        session.active_task = None
+        turns.finish()
         self.provider = ResponsesApiProvider(
             host="127.0.0.1",
             port=0,
@@ -111,7 +111,7 @@ class ResponsesApiProviderTests(unittest.IsolatedAsyncioTestCase):
 
     async def asyncTearDown(self) -> None:
         await self.provider.close()
-        session.active_task = self.previous_active_task
+        turns.finish()
 
     async def _poll(self) -> PollResult:
         batch = await self.provider.poll(None, timeout=1)
@@ -248,8 +248,12 @@ class ResponsesApiProviderTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("one durable conversation", response.text)
 
     async def test_busy_noncommand_waits_for_steered_response(self) -> None:
-        blocker = asyncio.create_task(asyncio.Event().wait())
-        session.active_task = blocker
+        turns.start(
+            asyncio.Event().wait(),
+            kind=TurnKind.REGULAR,
+        )
+        blocker = turns.task
+        assert blocker is not None
         try:
             async with httpx.AsyncClient() as client:
                 request = asyncio.create_task(
@@ -285,7 +289,7 @@ class ResponsesApiProviderTests(unittest.IsolatedAsyncioTestCase):
             blocker.cancel()
             with self.assertRaises(asyncio.CancelledError):
                 await blocker
-            session.active_task = None
+            turns.finish(blocker)
 
     async def test_concurrent_requests_are_dispatched_in_order(
         self,

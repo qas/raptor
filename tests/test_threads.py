@@ -33,6 +33,7 @@ from threads import (
     thread_active,
 )
 from tools import chat_history_tool
+from turn_runtime import TurnKind, turns
 
 
 class ThreadTests(unittest.IsolatedAsyncioTestCase):
@@ -51,9 +52,7 @@ class ThreadTests(unittest.IsolatedAsyncioTestCase):
         self.parent = chat_store.create_session(kind="main")
         session.state["current_session_id"] = self.parent
         session.state["model"] = "model-a"
-        session.active_task = None
-        session.active_since = None
-        session.active_goal_id = None
+        turns.finish()
         session.subagent_tasks.clear()
         session.pending_approvals.clear()
         session.pending_steers.clear()
@@ -62,9 +61,9 @@ class ThreadTests(unittest.IsolatedAsyncioTestCase):
         session.pinned_status_conversation_id = None
         session.pinned_status_message_id = None
         session.pinned_status_owner = None
-        while not session.internal_queue.empty():
-            session.internal_queue.get_nowait()
-            session.internal_queue.task_done()
+        while not session.runtime_event_queue.empty():
+            session.runtime_event_queue.get_nowait()
+            session.runtime_event_queue.task_done()
         self.provider = FakeProvider()
         previous_provider = set_chat_provider(self.provider)
         self.addCleanup(set_chat_provider, previous_provider)
@@ -75,13 +74,10 @@ class ThreadTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_clear_restores_untouched_parent(self) -> None:
-        recovery = {"session_id": self.parent, "interrupted_at": 1}
-        session.state["interrupted_agent"] = copy.deepcopy(recovery)
         result = await start_thread("!room:example.org")
         self.assertTrue(result["ok"])
         branch = str(result["thread"]["session_id"])
         self.assertTrue(thread_active())
-        self.assertIsNone(session.state["interrupted_agent"])
         self.assertEqual(
             build_active_context(branch)[0]["content"],
             "before fork",
@@ -100,7 +96,6 @@ class ThreadTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(cleared["ok"])
         self.assertFalse(thread_active())
         self.assertEqual(session.state["current_session_id"], self.parent)
-        self.assertEqual(session.state["interrupted_agent"], recovery)
         parent_text = [
             item.get("content") for item in build_active_context(self.parent)
         ]
@@ -240,16 +235,25 @@ class ThreadTests(unittest.IsolatedAsyncioTestCase):
         async def wait_forever() -> None:
             await blocker.wait()
 
-        session.active_task = asyncio.create_task(wait_forever())
+        task = turns.start(wait_forever(), kind=TurnKind.REGULAR)
         try:
             result = await start_thread("!room:example.org")
             self.assertFalse(result["ok"])
             self.assertIn("Busy", result["error"])
         finally:
-            session.active_task.cancel()
+            task.cancel()
             with self.assertRaises(asyncio.CancelledError):
-                await session.active_task
-            session.active_task = None
+                await task
+            turns.finish(task)
+
+    async def test_thread_refuses_while_background_shell_is_running(
+        self,
+    ) -> None:
+        with patch("shell_sessions.running_shell_sessions", return_value=1):
+            result = await start_thread("!room:example.org")
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"], "Busy. Use /stop all first.")
 
     async def test_thread_commands_start_status_and_clear(self) -> None:
         from commands import command

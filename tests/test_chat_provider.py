@@ -31,6 +31,7 @@ from chat_runtime import (
     set_chat_provider,
 )
 import session
+from turn_runtime import TurnKind, turns
 
 
 class FakeProvider:
@@ -172,7 +173,14 @@ class ChatProviderContractTests(unittest.IsolatedAsyncioTestCase):
         session.goal_pin_goal_id = None
         session.pending_approvals.clear()
         session.pending_steers.clear()
-        session.active_task = None
+        while True:
+            try:
+                session.steer_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            else:
+                session.steer_queue.task_done()
+        turns.finish()
 
     def tearDown(self) -> None:
         set_chat_provider(self.previous_provider)
@@ -286,6 +294,103 @@ class ChatProviderContractTests(unittest.IsolatedAsyncioTestCase):
             self.provider.calls,
         )
 
+    async def test_slow_forced_steer_waits_for_root_ownership(self) -> None:
+        from controller import _dequeue_steer
+        from steering import handle_steering_action
+
+        entry = {
+            "id": "abcd",
+            "chat_id": "!room:example.org",
+            "text": "apply after cancellation",
+            "message_id": "$steering-controls",
+            "status": "queued",
+        }
+        session.pending_steers["abcd"] = entry
+        await session.steer_queue.put(entry)
+        event = IncomingAction(
+            action_id="$apply-action",
+            conversation_id="!room:example.org",
+            sender_id="@operator:example.org",
+            message_id="$steering-controls",
+            data="steer:abcd:apply",
+        )
+
+        with (
+            patch(
+                "steering.interrupt_root_turn",
+                AsyncMock(
+                    return_value=types.SimpleNamespace(
+                        completed=False,
+                        error=None,
+                    )
+                ),
+            ),
+            patch("steering.ensure_root_session") as ensure,
+        ):
+            handled = await handle_steering_action(event)
+
+        self.assertTrue(handled)
+        self.assertEqual(entry["status"], "force_pending")
+        ensure.assert_called_once_with("!room:example.org", None)
+
+        selected = await _dequeue_steer()
+        self.assertIs(selected, entry)
+        self.assertEqual(entry["status"], "applied")
+        self.assertNotIn("abcd", session.pending_steers)
+
+    async def test_global_stop_discards_queued_steering(self) -> None:
+        from steering import cancel_pending_steers
+
+        session.state["pending_inputs"] = ["queued"]
+        session.pending_steers["abcd"] = {
+            "id": "abcd",
+            "chat_id": "!room:example.org",
+            "text": "queued",
+            "message_id": "$steering-controls",
+            "status": "queued",
+        }
+        await session.steer_queue.put(session.pending_steers["abcd"])
+
+        with patch("steering.session.save_state"):
+            cancelled = await cancel_pending_steers()
+
+        self.assertEqual(cancelled, 1)
+        self.assertEqual(session.pending_steers, {})
+        self.assertEqual(session.state["pending_inputs"], [])
+        self.assertTrue(session.steer_queue.empty())
+
+    async def test_interruption_cleanup_preserves_only_forced_steer(self) -> None:
+        from steering import cancel_unforced_steers
+
+        queued = {
+            "id": "queued",
+            "chat_id": "!room:example.org",
+            "text": "discard me",
+            "message_id": "$queued-controls",
+            "status": "queued",
+        }
+        forced = {
+            "id": "forced",
+            "chat_id": "!room:example.org",
+            "text": "keep me",
+            "message_id": "$forced-controls",
+            "status": "force_pending",
+        }
+        session.pending_steers.update(
+            {"queued": queued, "forced": forced}
+        )
+        await session.steer_queue.put(queued)
+        await session.steer_queue.put(forced)
+
+        with patch("steering.session.save_state"):
+            cancelled = await cancel_unforced_steers()
+
+        self.assertEqual(cancelled, 1)
+        self.assertEqual(session.pending_steers, {"forced": forced})
+        self.assertEqual(session.state["pending_inputs"], ["keep me"])
+        self.assertIs(await session.steer_queue.get(), forced)
+        session.steer_queue.task_done()
+
     def test_fake_provider_satisfies_runtime_contract(self) -> None:
         self.assertIsInstance(self.provider, ChatProvider)
 
@@ -365,8 +470,12 @@ class ChatProviderContractTests(unittest.IsolatedAsyncioTestCase):
     ) -> None:
         from loop import handle_event
 
-        blocker = asyncio.create_task(asyncio.Event().wait())
-        session.active_task = blocker
+        turns.start(
+            asyncio.Event().wait(),
+            kind=TurnKind.REGULAR,
+        )
+        blocker = turns.task
+        assert blocker is not None
         self.provider.reject_busy = True
         event = IncomingMessage(
             conversation_id="!room:example.org",
@@ -390,15 +499,19 @@ class ChatProviderContractTests(unittest.IsolatedAsyncioTestCase):
             blocker.cancel()
             with self.assertRaises(asyncio.CancelledError):
                 await blocker
-            session.active_task = None
+            turns.finish(blocker)
 
     async def test_busy_chat_input_is_queued_and_transport_acknowledged(
         self,
     ) -> None:
         from loop import handle_event
 
-        blocker = asyncio.create_task(asyncio.Event().wait())
-        session.active_task = blocker
+        turns.start(
+            asyncio.Event().wait(),
+            kind=TurnKind.REGULAR,
+        )
+        blocker = turns.task
+        assert blocker is not None
         previous_session_id = session.state.get("current_session_id")
         session.state["current_session_id"] = None
         event = IncomingMessage(
@@ -419,7 +532,7 @@ class ChatProviderContractTests(unittest.IsolatedAsyncioTestCase):
             blocker.cancel()
             with self.assertRaises(asyncio.CancelledError):
                 await blocker
-            session.active_task = None
+            turns.finish(blocker)
             session.state["current_session_id"] = previous_session_id
             while not session.steer_queue.empty():
                 session.steer_queue.get_nowait()
@@ -431,8 +544,12 @@ class ChatProviderContractTests(unittest.IsolatedAsyncioTestCase):
     ) -> None:
         from loop import handle_event
 
-        blocker = asyncio.create_task(asyncio.Event().wait())
-        session.active_task = blocker
+        turns.start(
+            asyncio.Event().wait(),
+            kind=TurnKind.REGULAR,
+        )
+        blocker = turns.task
+        assert blocker is not None
         session.pending_steers["existing"] = {"status": "queued"}
         event = IncomingMessage(
             conversation_id="!room:example.org",
@@ -459,7 +576,7 @@ class ChatProviderContractTests(unittest.IsolatedAsyncioTestCase):
             blocker.cancel()
             with self.assertRaises(asyncio.CancelledError):
                 await blocker
-            session.active_task = None
+            turns.finish(blocker)
             session.pending_steers.clear()
 
     async def test_ask_prompt_is_not_copied_into_event_log(self) -> None:

@@ -30,6 +30,31 @@ class BackgroundSubagentTests(unittest.IsolatedAsyncioTestCase):
             ):
                 subagents.subagent_model()
 
+    async def test_status_projection_excludes_private_child_context(self) -> None:
+        session.subagent_records["worker-1"] = {
+            "id": "worker-1",
+            "status": "completed",
+            "task": "inspect",
+            "result": "done",
+            "tool_events": [{"secret": "private"}],
+            "pending_inputs": ["private steer"],
+            "todos": [{"step": "private plan"}],
+            "recovery_context": {"secret": "private"},
+        }
+
+        result = await subagents.subagent_tool(
+            {"agent_id": "worker-1"},
+            chat_id="telegram:123",
+            execution_context={"depth": 0, "subagents_allowed": True},
+        )
+
+        projected = result["subagent"]
+        self.assertEqual(projected["result"], "done")
+        self.assertNotIn("tool_events", projected)
+        self.assertNotIn("pending_inputs", projected)
+        self.assertNotIn("todos", projected)
+        self.assertNotIn("recovery_context", projected)
+
     async def test_targeted_cancel_stops_one_background_subagent(self) -> None:
         started = asyncio.Event()
 
@@ -89,46 +114,30 @@ class BackgroundSubagentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(record["status"], "completed")
         self.assertEqual(record["result"], "finished")
 
-    async def test_subagent_compaction_uses_subagent_budgets(self) -> None:
-        ensure = AsyncMock(return_value=[])
-        record = {"id": "worker-1", "session_id": "subagent-session"}
-        with (
-            patch.object(
-                subagents,
-                "subagent_context_input_budget",
-                return_value=500,
-            ),
-            patch.object(
-                subagents,
-                "subagent_compaction_generation_budget",
-                return_value=128,
-            ),
-            patch.object(
-                subagents,
-                "build_active_context",
-                return_value=[{"role": "user", "content": "large"}],
-            ),
-            patch.object(
-                subagents,
-                "estimate_subagent_request_tokens",
-                return_value=600,
-            ),
-            patch.object(subagents, "ensure_context_under_budget", ensure),
-        ):
-            await subagents.maybe_compact_subagent(
-                record,
-                allow_subagents=False,
-                depth=1,
-            )
-
-        self.assertEqual(ensure.await_args.kwargs["input_budget"], 500)
-        self.assertEqual(ensure.await_args.kwargs["generation_budget"], 128)
-
     def test_tool_event_recovery_history_is_bounded(self) -> None:
-        events = [{"id": index} for index in range(5)]
+        events = [
+            {
+                "call": {
+                    "name": "read_file",
+                    "call_id": f"call-{index}",
+                },
+                "status": "completed",
+                "result": {
+                    "ok": True,
+                    "content": "private" * 10_000,
+                },
+            }
+            for index in range(5)
+        ]
         with patch.object(subagents, "MAX_SUBAGENT_TOOL_EVENTS", 3):
             retained = subagents._bounded_tool_events(events)
-        self.assertEqual(retained, events[-3:])
+        self.assertEqual(len(retained), 3)
+        self.assertEqual(retained[0]["call"]["call_id"], "call-2")
+        self.assertEqual(
+            retained[0]["result"],
+            {"ok": True, "status": None, "has_error": False},
+        )
+        self.assertNotIn("private", str(retained))
 
     async def test_running_subagent_pending_input_queue_is_bounded(self) -> None:
         record = {
@@ -150,6 +159,17 @@ class BackgroundSubagentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["status"], "queue_full")
         self.assertEqual(record["pending_inputs"], ["already queued"])
         self.assertEqual(record["task_count"], 1)
+
+    async def test_subagent_task_text_is_bounded(self) -> None:
+        with patch.object(subagents, "MAX_TOOL_OUTPUT", 10):
+            result = await subagents.subagent_tool(
+                {"task": "x" * 11},
+                chat_id="telegram:123",
+                execution_context={"depth": 0},
+            )
+
+        self.assertFalse(result["ok"])
+        self.assertIn("exceeds 10 characters", result["error"])
 
     def test_continuation_uses_bounded_task_counter_not_task_history(self) -> None:
         record = {
@@ -225,7 +245,7 @@ class BackgroundSubagentTests(unittest.IsolatedAsyncioTestCase):
         session.subagent_records["worker-1"] = record
         delivered = AsyncMock(side_effect=RuntimeError("controller failed"))
         controller = types.ModuleType("controller")
-        controller.enqueue_internal_input = delivered
+        controller.enqueue_runtime_event = delivered
 
         with (
             patch.dict(sys.modules, {"controller": controller}),

@@ -7,6 +7,7 @@ import signal
 import httpx
 
 import session
+from agent import repair_interrupted_root_turn
 from chat_runtime import load_chat_providers, send, set_chat_provider
 from chat_store import chat_path, ensure_chat_dirs
 from config import (
@@ -23,8 +24,8 @@ from config import (
     context_input_budget,
     subagent_context_input_budget,
 )
-from controller import ensure_root_session
-from goals import goal_is_active, prepare_goal_on_startup
+from controller import ensure_root_session, interrupt_root_turn
+from goals import goal_is_active, pause_goal, prepare_goal_on_startup
 from loop import COMMANDS, handle_event
 from responses import ensure_model
 from runtime import clear_runtime_if_ours, set_runtime
@@ -70,8 +71,6 @@ async def main() -> None:
         CHAT_DIR.mkdir(parents=True, exist_ok=True)
         storage = bootstrap_runtime_storage()
 
-        subagent_event_task = asyncio.create_task(completion_event_loop())
-        shell_event_task = asyncio.create_task(shell_completion_event_loop())
         set_runtime(daemon=session.DAEMON_MODE)
 
         session_id = state.get("current_session_id")
@@ -119,7 +118,10 @@ async def main() -> None:
             },
         )
 
-        goal_notice = prepare_goal_on_startup()
+        root_interrupted = repair_interrupted_root_turn()
+        goal_notice = prepare_goal_on_startup(
+            root_interrupted=root_interrupted,
+        )
         if goal_notice:
             try:
                 await send(conversation_id, goal_notice)
@@ -144,6 +146,8 @@ async def main() -> None:
                         "message": str(exc),
                     },
                 )
+        subagent_event_task = asyncio.create_task(completion_event_loop())
+        shell_event_task = asyncio.create_task(shell_completion_event_loop())
         if (goal_is_active() and not thread_active()) or rehydrated:
             ensure_root_session(conversation_id, None)
 
@@ -169,8 +173,9 @@ async def main() -> None:
                 await asyncio.sleep(2)
 
     finally:
-        if session.active_task and not session.active_task.done():
-            session.active_task.cancel()
+        if goal_is_active() and not thread_active():
+            pause_goal()
+        await interrupt_root_turn()
 
         if subagent_event_task is not None:
             subagent_event_task.cancel()

@@ -151,7 +151,7 @@ class ShellSessionTests(unittest.IsolatedAsyncioTestCase):
     async def test_detached_completion_enters_internal_event_path(self) -> None:
         delivered = AsyncMock(return_value=True)
         controller = types.ModuleType("controller")
-        controller.enqueue_internal_input = delivered
+        controller.enqueue_runtime_event = delivered
         with patch.dict(sys.modules, {"controller": controller}):
             event_task = asyncio.create_task(shell_completion_event_loop())
             try:
@@ -175,12 +175,12 @@ class ShellSessionTests(unittest.IsolatedAsyncioTestCase):
 
         delivered.assert_awaited_once()
         self.assertEqual(delivered.await_args.args[0], "telegram:123")
-        self.assertIn("notified", delivered.await_args.args[1])
+        self.assertIn("notified", delivered.await_args.args[2])
 
     async def test_completion_delivery_exception_is_deferred(self) -> None:
         delivered = AsyncMock(side_effect=RuntimeError("controller failed"))
         controller = types.ModuleType("controller")
-        controller.enqueue_internal_input = delivered
+        controller.enqueue_runtime_event = delivered
         with (
             patch.dict(sys.modules, {"controller": controller}),
             patch.object(shell_sessions, "log_event") as logged,
@@ -299,6 +299,18 @@ class HeadTailBufferTests(unittest.TestCase):
             buffer.render(include_marker=False),
             source[:500] + source[-500:],
         )
+
+    def test_stdout_and_stderr_share_one_output_budget(self) -> None:
+        with patch.object(shell_sessions, "MAX_TOOL_OUTPUT", 100):
+            stdout, stderr, truncated = shell_sessions._fit_output_pair(
+                "a" * 100,
+                "b" * 100,
+            )
+
+        self.assertTrue(truncated)
+        self.assertLessEqual(len(stdout) + len(stderr), 100)
+        self.assertIn("truncated", stdout)
+        self.assertIn("truncated", stderr)
 
 
 async def _wait_until_called(mock: AsyncMock) -> None:

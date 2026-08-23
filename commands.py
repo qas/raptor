@@ -1,9 +1,8 @@
 """Provider-neutral text commands."""
-import asyncio
 import copy
-import json
 import os
-import time
+from datetime import datetime, timezone
+from typing import Any
 
 from chat_provider import ConversationId
 
@@ -11,6 +10,9 @@ from chat_store import (
     append_meta,
     create_session,
     end_session,
+    list_sessions,
+    read_events,
+    session_contains_text,
     session_exists,
 )
 from config import (
@@ -32,9 +34,12 @@ from observability import log_exception
 from agent import context_tokens
 from context import session_context_stats
 from controller import (
-    cancel_active_goal_controller,
+    discard_runtime_events,
     ensure_root_session,
+    interrupt_active_goal_controller,
+    interrupt_root_turn,
     requeue_deferred_completions,
+    session_transition_busy,
     start_manual_compaction,
     start_root_session,
 )
@@ -56,7 +61,12 @@ from goals import (
 )
 from runtime import runtime_uptime
 from chat_runtime import get_chat_provider, send
-from engine import response_calls, response_output, response_text
+from engine import (
+    function_call_output,
+    response_calls,
+    response_output,
+    response_text,
+)
 from approval import execute_tool_with_approval
 from responses import list_models, stateless_response
 from subagents import cancel_background_subagents, pending_subagent_completions
@@ -65,12 +75,15 @@ from shell_sessions import (
     pending_shell_completions,
     running_shell_sessions,
 )
+from steering import cancel_pending_steers
 from threads import (
     finish_thread,
     resume_main_goal,
     start_thread,
 )
 from thread_state import current_thread, thread_active
+from turn_runtime import turns
+from todos import normalize_persisted_plan
 
 # ---------------------------------------------------------------------------
 # Chat commands
@@ -104,6 +117,62 @@ def format_todos() -> str:
     )
 
 
+def _main_chat_sessions(
+    query: str = "",
+    *,
+    current_id: str = "",
+) -> list[dict[str, Any]]:
+    needle = query.casefold()
+    rows = sorted(
+        (
+            row
+            for row in list_sessions()
+            if row.get("kind") == "main"
+        ),
+        key=lambda row: float(row.get("started_at") or 0),
+        reverse=True,
+    )
+    if not needle and current_id:
+        rows.sort(
+            key=lambda row: row.get("session_id") != current_id
+        )
+    matches: list[dict[str, Any]] = []
+    for row in rows:
+        if needle and not session_contains_text(
+            str(row["session_id"]),
+            needle,
+        ):
+            continue
+        matches.append(row)
+        if len(matches) >= 20:
+            break
+    return matches
+
+
+def _format_chat_sessions(
+    rows: list[dict[str, Any]],
+    current_id: str,
+) -> str:
+    if not rows:
+        return "No matching chats."
+    lines = []
+    for row in rows:
+        started = datetime.fromtimestamp(
+            float(row.get("started_at") or 0),
+            tz=timezone.utc,
+        ).strftime("%Y-%m-%d %H:%M UTC")
+        marker = " (current)" if row["session_id"] == current_id else ""
+        lines.append(f"{row['session_id']} · {started}{marker}")
+    return "Chats:\n" + "\n".join(lines)
+
+
+def _archived_todos(session_id: str) -> list[dict[str, Any]]:
+    for event in reversed(read_events(session_id)):
+        if event.get("type") == "session_end":
+            return normalize_persisted_plan(event.get("todos"))
+    return []
+
+
 async def command(
     chat_id: ConversationId,
     text: str,
@@ -130,8 +199,11 @@ async def command(
             chat_id,
             (
                 "/new - start a new session (archive previous)\n"
+                "/chats [term] - list or search prior sessions\n"
+                "/resume <session-id> - resume a prior session\n"
                 "/status - show status\n"
-                "/stop - abort current run\n"
+                "/stop - interrupt the current root turn\n"
+                "/stop all - also stop background agents and shells\n"
                 "/compact - compact context\n"
                 "/ask <message> - isolated tool-capable query\n"
                 "/thread - fork into a temporary conversation\n"
@@ -186,16 +258,7 @@ async def command(
                         call,
                         execution_context=execution_context,
                     )
-                    work.append(
-                        {
-                            "type": "function_call_output",
-                            "call_id": call["call_id"],
-                            "output": json.dumps(
-                                result,
-                                ensure_ascii=False,
-                            ),
-                        }
-                    )
+                    work.append(function_call_output(call, result))
         except Exception as exc:
             await send(
                 chat_id,
@@ -260,49 +323,51 @@ async def command(
         return True
 
     if cmd == "/stop":
+        stop_all = arg.lower() == "all"
+        if arg and not stop_all:
+            await send(chat_id, "Usage: /stop [all]")
+            return True
         paused = False
         if goal_is_active() and not thread_active():
             _goal, changed = pause_goal()
             paused = changed
             if paused:
                 await remove_goal_pin(chat_id)
-        stopped = False
-        if (
-            session.active_task
-            and not session.active_task.done()
-        ):
-            session.active_task.cancel()
-            stopped = True
+        interrupt = await interrupt_root_turn()
+        if interrupt.error is not None:
+            log_exception("agent", "stop_wait_error", interrupt.error)
 
-            try:
-                await session.active_task
-
-            except asyncio.CancelledError:
-                pass
-            except Exception as exc:
-                log_exception("agent", "stop_wait_error", exc)
-
-        deferred_results = (
-            pending_subagent_completions()
-            + pending_shell_completions()
-        )
-        cancelled_subagents = await cancel_background_subagents(
-            discard_pending=True,
-        )
-        cancelled_shells = await cancel_shell_sessions()
+        deferred_results = 0
+        cancelled_subagents = 0
+        cancelled_shells = 0
+        cancelled_steers = 0
+        if stop_all:
+            cancelled_steers = await cancel_pending_steers()
+            discard_runtime_events()
+            deferred_results = (
+                pending_subagent_completions()
+                + pending_shell_completions()
+            )
+            cancelled_subagents = await cancel_background_subagents(
+                discard_pending=True,
+            )
+            cancelled_shells = await cancel_shell_sessions()
 
         if (
-            stopped
+            interrupt.interrupted
             or cancelled_subagents
             or cancelled_shells
+            or cancelled_steers
             or deferred_results
             or paused
         ):
-            message = "Stopped."
+            message = (
+                "Stop requested; cleanup is still finishing."
+                if interrupt.interrupted and not interrupt.completed
+                else "Stopped."
+            )
             if paused:
-                message = (
-                    "Stopped. Active goal paused."
-                )
+                message += " Active goal paused."
             if cancelled_subagents:
                 message += (
                     "\nCancelled background subagents: "
@@ -313,6 +378,8 @@ async def command(
                     "\nCancelled background shells: "
                     f"{cancelled_shells}"
                 )
+            if cancelled_steers:
+                message += f"\nDiscarded queued steers: {cancelled_steers}"
             if deferred_results:
                 message += (
                     "\nDiscarded pending background results: "
@@ -346,22 +413,8 @@ async def command(
                 "down/unreachable"
             )
 
-        running = bool(
-            session.active_task
-            and not session.active_task.done()
-        )
-
-        task_age = (
-            int(
-                time.monotonic()
-                - session.active_since
-            )
-            if (
-                running
-                and session.active_since
-            )
-            else 0
-        )
+        running = turns.is_running()
+        task_age = turns.elapsed_seconds()
 
         budget = context_input_budget()
         subagent_budget = subagent_context_input_budget()
@@ -413,7 +466,6 @@ async def command(
         subagent_reasoning_effort = (
             SUBAGENT_RESPONSES_REASONING_EFFORT or "(model default)"
         )
-        interrupted_agent = "yes" if state.get("interrupted_agent") else "no"
         interrupted_subagents = len(state.get("interrupted_subagents", []))
         await send(
             chat_id,
@@ -438,7 +490,6 @@ async def command(
                 f"pending background results: "
                 f"{pending_subagent_completions() + pending_shell_completions()}\n"
                 f"subagent threads: {len(session.subagent_records)}\n"
-                f"interrupted agent: {interrupted_agent}\n"
                 f"interrupted subagents: {interrupted_subagents}\n"
                 f"{format_goal_status()}\n"
                 f"session: {session_id}\n"
@@ -500,16 +551,9 @@ async def command(
                 )
                 return True
             await remove_goal_pin(chat_id)
-            cancelled = cancel_active_goal_controller(
+            await interrupt_active_goal_controller(
                 str(goal.get("id") or "")
             )
-            if cancelled is not None:
-                try:
-                    await cancelled
-                except asyncio.CancelledError:
-                    pass
-                except Exception as exc:
-                    log_exception("goal", "pause_wait_error", exc)
             await send(
                 chat_id,
                 "Goal paused.",
@@ -536,10 +580,7 @@ async def command(
             resume_goal()
             await requeue_deferred_completions()
             await ensure_goal_pin(chat_id)
-            if not (
-                session.active_task
-                and not session.active_task.done()
-            ):
+            if not turns.is_running():
                 start_root_session(chat_id, None)
             await send(
                 chat_id,
@@ -566,16 +607,9 @@ async def command(
             goal_id = str(goal.get("id") or "")
             clear_goal()
             await remove_goal_pin(chat_id)
-            cancelled = cancel_active_goal_controller(
+            await interrupt_active_goal_controller(
                 goal_id
             )
-            if cancelled is not None:
-                try:
-                    await cancelled
-                except asyncio.CancelledError:
-                    pass
-                except Exception as exc:
-                    log_exception("goal", "clear_wait_error", exc)
             await send(chat_id, "Goal cleared.")
             return True
         existing = current_goal()
@@ -608,13 +642,64 @@ async def command(
             chat_id,
             f"Goal started: {goal['objective']}",
         )
-        if not (
-            session.active_task
-            and not session.active_task.done()
-        ):
+        if not turns.is_running():
             start_root_session(chat_id, None)
         else:
             ensure_root_session(chat_id, None)
+        return True
+
+    if cmd == "/chats":
+        current_id = str(state.get("current_session_id") or "")
+        await send(
+            chat_id,
+            _format_chat_sessions(
+                _main_chat_sessions(arg, current_id=current_id),
+                current_id,
+            ),
+        )
+        return True
+
+    if cmd == "/resume":
+        if not arg:
+            await send(chat_id, "Usage: /resume <session-id>")
+            return True
+        if thread_active():
+            await send(chat_id, "Clear or merge the active thread first.")
+            return True
+        if session_transition_busy():
+            await send(chat_id, "Busy. Use /stop all first.")
+            return True
+        target = next(
+            (
+                row
+                for row in list_sessions()
+                if row.get("kind") == "main"
+                and row.get("session_id") == arg
+            ),
+            None,
+        )
+        if target is None:
+            await send(chat_id, f"Chat not found: {arg}")
+            return True
+        current_id = str(state.get("current_session_id") or "")
+        if arg == current_id:
+            await send(chat_id, f"Already using chat: {arg}")
+            return True
+        if current_id and session_exists(current_id):
+            end_session(
+                current_id,
+                reason="session_switched",
+                todos=list(state.get("todos") or []),
+            )
+        state["current_session_id"] = arg
+        state["todos"] = _archived_todos(arg)
+        state["pending_inputs"] = []
+        state["active_root_turn"] = None
+        state["interrupted_subagents"] = []
+        append_meta(arg, "session_resumed", {"from_session_id": current_id})
+        save_state()
+        await ensure_goal_pin(chat_id)
+        await send(chat_id, f"Resumed chat: {arg}")
         return True
 
     if cmd == "/new":
@@ -624,17 +709,10 @@ async def command(
                 "Clear or merge the active thread first.",
             )
             return True
-        if (
-            (
-                session.active_task
-                and not session.active_task.done()
-            )
-            or session.subagent_tasks
-            or running_shell_sessions()
-        ):
+        if session_transition_busy():
             await send(
                 chat_id,
-                "Busy. Use /stop first.",
+                "Busy. Use /stop all first.",
             )
             return True
         old_session_id = state.get("current_session_id")
@@ -660,7 +738,6 @@ async def command(
         state["current_session_id"] = new_session_id
         state["todos"] = []
         state["pending_inputs"] = []
-        state["interrupted_agent"] = None
         state["interrupted_subagents"] = []
         session.subagent_records = state["subagents"]
         save_state()
@@ -675,10 +752,7 @@ async def command(
         return True
 
     if cmd == "/compact":
-        if (
-            session.active_task
-            and not session.active_task.done()
-        ):
+        if turns.is_running():
             await send(
                 chat_id,
                 "Busy. Use /stop first.",
@@ -732,10 +806,7 @@ async def command(
         return True
 
     if cmd == "/model":
-        if (
-            session.active_task
-            and not session.active_task.done()
-        ):
+        if turns.is_running():
             await send(
                 chat_id,
                 "Busy. Use /stop first.",

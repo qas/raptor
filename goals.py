@@ -306,7 +306,8 @@ def goal_pin_text(goal: dict[str, Any]) -> str:
     objective = str(goal.get("objective") or "")
     if len(objective) > 120:
         objective = objective[:117] + "..."
-    return f"Goal active: {objective}"
+    status = str(goal.get("status") or "unknown")
+    return f"Goal {status}: {objective}"
 
 
 def _higher_priority_pin_active(
@@ -453,7 +454,7 @@ async def sync_goal_pin(
         await remove_goal_pin(chat_id)
 
 
-def prepare_goal_on_startup() -> str | None:
+def prepare_goal_on_startup(*, root_interrupted: bool = False) -> str | None:
     """Preserve goal identity; pause active goals after unclean interruption."""
     goal = current_goal()
     if not goal:
@@ -465,10 +466,7 @@ def prepare_goal_on_startup() -> str | None:
         return None
     if thread_active():
         return None
-    unclean = bool(
-        state.get("interrupted_agent")
-        or state.get("interrupted_subagents")
-    )
+    unclean = root_interrupted or bool(state.get("interrupted_subagents"))
     if status == GOAL_ACTIVE and unclean:
         goal["status"] = GOAL_PAUSED
         _touch(goal)
@@ -515,21 +513,29 @@ def update_goal_tool(args: dict[str, Any]) -> dict[str, Any]:
         }
     goal_id = str(args.get("goal_id") or "").strip()
     status = str(args.get("status") or "").strip()
+    objective = " ".join(str(args.get("objective") or "").split())
     reason = str(args.get("reason") or "").strip()
     if not goal_id:
         return {
             "ok": False,
             "error": "goal_id is required",
         }
-    if status not in {
-        GOAL_COMPLETE,
-        GOAL_BLOCKED,
-    }:
+    if not status and not objective:
+        return {
+            "ok": False,
+            "error": "objective or status is required",
+        }
+    if status and status not in {GOAL_COMPLETE, GOAL_BLOCKED}:
         return {
             "ok": False,
             "error": (
                 'status must be "complete" or "blocked"'
             ),
+        }
+    if status == GOAL_BLOCKED and not reason:
+        return {
+            "ok": False,
+            "error": "reason is required when blocking a goal",
         }
     goal = current_goal()
     if not goal or str(goal.get("id")) != goal_id:
@@ -540,18 +546,25 @@ def update_goal_tool(args: dict[str, Any]) -> dict[str, Any]:
                 "stale goal id; goal was replaced"
             ),
         }
+    if objective:
+        if len(objective) > MAX_GOAL_CHARS:
+            return {
+                "ok": False,
+                "error": (
+                    f"goal objective exceeds {MAX_GOAL_CHARS} characters"
+                ),
+            }
+        goal["objective"] = objective
+        _touch(goal)
+        save_state()
+        _log("goal_updated", goal)
+    if not status:
+        return {"ok": True, "goal": get_goal_tool_result()["goal"]}
     if status == GOAL_COMPLETE:
         complete_goal(goal_id)
         return {
             "ok": True,
             "goal": get_goal_tool_result()["goal"],
-        }
-    if not reason:
-        return {
-            "ok": False,
-            "error": (
-                "reason is required when blocking a goal"
-            ),
         }
     block_goal(goal_id, reason)
     return {

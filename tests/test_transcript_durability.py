@@ -1,4 +1,5 @@
 """Transcript durability during agent turns."""
+import asyncio
 import copy
 import os
 import sys
@@ -19,7 +20,9 @@ if str(_ROOT) not in sys.path:
 
 import agent as agent_mod
 import chat_store
+import controller
 import session
+from turn_runtime import turns
 import subagents
 
 
@@ -42,8 +45,7 @@ class TranscriptDurabilityTests(unittest.IsolatedAsyncioTestCase):
         session.state.update(copy.deepcopy(session.DEFAULT_STATE))
         sid = chat_store.create_session(kind="main")
         session.state["current_session_id"] = sid
-        session.active_task = None
-        session.active_since = None
+        turns.finish()
         session.pending_steers.clear()
         while True:
             try:
@@ -129,6 +131,34 @@ class TranscriptDurabilityTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("function_call_output", types)
         self.assertIn("message", types)
 
+    async def test_root_turn_marker_spans_exact_task_lifetime(self) -> None:
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def fake_turn(*_args, **_kwargs):
+            started.set()
+            await release.wait()
+            return True
+
+        with (
+            patch.object(controller, "agent_turn", fake_turn),
+            patch.object(controller, "ensure_goal_pin", _noop),
+            patch.object(controller, "sync_goal_pin", _noop),
+            patch.object(controller, "save_state"),
+        ):
+            task = controller.start_root_session(1, "work")
+            await started.wait()
+            marker = session.state["active_root_turn"]
+            self.assertEqual(marker["id"], turns.snapshot.id)
+            self.assertEqual(
+                marker["session_id"],
+                session.state["current_session_id"],
+            )
+            release.set()
+            await task
+
+        self.assertIsNone(session.state["active_root_turn"])
+
     async def test_failed_telegram_send_keeps_assistant_transcript(
         self,
     ) -> None:
@@ -175,14 +205,6 @@ class TranscriptDurabilityTests(unittest.IsolatedAsyncioTestCase):
         self,
     ) -> None:
         huge_output = "SECRET-RAW-TOOL-OUTPUT" * 20_000
-        session.state["interrupted_agent"] = {
-            "session_id": "root-session",
-            "interrupted_at": 123.0,
-            "tool_events": [{"output": huge_output}],
-            "resumed_from": {
-                "tool_events": [{"output": huge_output}],
-            },
-        }
         session.state["interrupted_subagents"] = [
             {
                 "id": "sub-1",
@@ -225,10 +247,36 @@ class TranscriptDurabilityTests(unittest.IsolatedAsyncioTestCase):
         instructions = seen["instructions"]
         self.assertNotIn("SECRET-RAW-TOOL-OUTPUT", instructions)
         self.assertIn('"tool_event_count": 1', instructions)
-        self.assertIn('"session_id": "root-session"', instructions)
         self.assertIn('"session_id": "sub-session"', instructions)
 
-    def test_reinterruption_keeps_resumed_from_bounded(self) -> None:
+    def test_unclean_root_turn_closes_unmatched_tool_call(self) -> None:
+        sid = str(session.state["current_session_id"])
+        chat_store.append_item(
+            sid,
+            {
+                "type": "function_call",
+                "name": "shell",
+                "call_id": "call-1",
+                "arguments": '{"command":"work"}',
+            },
+            source="assistant",
+        )
+        session.state["active_root_turn"] = {
+            "id": "turn-1",
+            "session_id": sid,
+        }
+
+        repaired = agent_mod.repair_interrupted_root_turn()
+
+        self.assertTrue(repaired)
+        self.assertIsNone(session.state["active_root_turn"])
+        items = [event["item"] for event in chat_store.item_events(sid)]
+        self.assertEqual(items[-2]["type"], "function_call_output")
+        self.assertEqual(items[-2]["call_id"], "call-1")
+        self.assertEqual(items[-1]["role"], "developer")
+        self.assertIn("turn_aborted", items[-1]["content"])
+
+    def test_subagent_checkpoint_reference_is_bounded(self) -> None:
         huge_output = "x" * 500_000
         previous = {
             "session_id": "old-session",
@@ -239,7 +287,7 @@ class TranscriptDurabilityTests(unittest.IsolatedAsyncioTestCase):
             },
         }
 
-        ref = agent_mod._recovery_checkpoint_ref(previous)
+        ref = agent_mod._subagent_checkpoint_ref(previous)
 
         self.assertEqual(
             ref,

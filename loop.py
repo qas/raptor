@@ -1,6 +1,5 @@
 """Provider-neutral incoming chat-event dispatcher."""
 import secrets
-import time
 
 from approval import handle_approval_action, supersede_pending_approvals
 from chat_provider import ChatEvent, IncomingAction, IncomingMessage
@@ -15,9 +14,12 @@ from steering import handle_steering_action
 from threads import handle_thread_action
 import session
 from observability import log_agent_activity, log_event, log_exception
+from turn_runtime import turns
 
 COMMANDS: tuple[tuple[str, str], ...] = (
     ("new", "New session"),
+    ("chats", "List or search sessions"),
+    ("resume", "Resume a prior session"),
     ("ask", "Ask without session context"),
     ("thread", "Temporary conversation branch"),
     ("status", "Show status"),
@@ -62,11 +64,9 @@ async def handle_event(event: ChatEvent) -> None:
     received_data = {
         "conversation_id": conversation_id,
         "message_id": event.message_id,
+        "command": command_name if command_name.startswith("/") else None,
+        "text_chars": len(text),
     }
-    if command_name == "/ask":
-        received_data["command"] = "/ask"
-    else:
-        received_data["text"] = text
     log_event(provider.name, "received", received_data)
 
     if text.startswith("/"):
@@ -76,7 +76,7 @@ async def handle_event(event: ChatEvent) -> None:
         if isinstance(command_result, str):
             text = command_result
 
-    if session.active_task and not session.active_task.done():
+    if turns.is_running():
         if await provider.reject_busy_message(conversation_id):
             log_agent_activity("rejected concurrent request")
             return
@@ -123,7 +123,6 @@ async def handle_event(event: ChatEvent) -> None:
         log_agent_activity("queued steering input")
         return
 
-    session.active_since = time.monotonic()
     start_root_session(
         conversation_id,
         text,

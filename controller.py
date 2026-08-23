@@ -1,6 +1,6 @@
 """Root session controller — sole owner of root turn scheduling."""
 import asyncio
-import time
+from collections.abc import Callable
 from typing import Any, Literal
 
 from chat_provider import ConversationId
@@ -23,9 +23,32 @@ from session import save_state
 from chat_runtime import bound_delivery_context, send
 from presentation import clear_steering_indicator
 from observability import log_event
+from runtime_events import RuntimeEvent, RuntimeEventKind
 from thread_state import thread_active
+from turn_runtime import InterruptResult, TurnKind, TurnSnapshot, turns
 
-WorkSource = Literal["user", "internal", "goal"]
+WorkSource = Literal["user", "runtime", "goal", "internal"]
+WorkEntry = RuntimeEvent | dict[str, Any]
+
+
+def session_transition_busy() -> bool:
+    """Return whether changing the active transcript could orphan work."""
+    from shell_sessions import (
+        pending_shell_completions,
+        running_shell_sessions,
+    )
+    from subagents import pending_subagent_completions
+
+    return bool(
+        turns.is_running()
+        or session.subagent_tasks
+        or running_shell_sessions()
+        or session.pending_approvals
+        or session.pending_steers
+        or not session.runtime_event_queue.empty()
+        or pending_subagent_completions()
+        or pending_shell_completions()
+    )
 
 
 async def requeue_deferred_completions() -> int:
@@ -47,7 +70,7 @@ async def _dequeue_steer() -> dict[str, Any] | None:
         except asyncio.QueueEmpty:
             return None
         session.steer_queue.task_done()
-        if entry.get("status") != "queued":
+        if entry.get("status") not in {"queued", "force_pending"}:
             if entry.get("status") != "forcing":
                 await clear_steering_indicator(
                     entry["chat_id"],
@@ -65,33 +88,44 @@ async def _dequeue_steer() -> dict[str, Any] | None:
         return entry
 
 
-def _dequeue_internal() -> dict[str, Any] | None:
+def _dequeue_runtime_event() -> RuntimeEvent | None:
     while True:
         try:
-            entry = session.internal_queue.get_nowait()
+            event = session.runtime_event_queue.get_nowait()
         except asyncio.QueueEmpty:
             return None
-        session.internal_queue.task_done()
-        is_active = entry.get("is_active")
-        if callable(is_active) and not is_active():
-            done = entry.get("done")
-            if isinstance(done, asyncio.Future) and not done.done():
-                done.set_result(False)
+        session.runtime_event_queue.task_done()
+        if event.is_active is not None and not event.is_active():
+            if not event.done.done():
+                event.done.set_result(False)
             continue
-        return entry
+        return event
 
 
 def _pending_controller_work() -> bool:
     if goal_is_active() and not thread_active():
         return True
-    if session.internal_queue.qsize() > 0:
-        return True
-    if session.steer_queue.qsize() > 0:
+    if session.runtime_event_queue.qsize() > 0:
         return True
     for entry in session.pending_steers.values():
-        if entry.get("status") == "queued":
+        if entry.get("status") in {"queued", "force_pending"}:
             return True
     return False
+
+
+def discard_runtime_events() -> int:
+    """Discard queued background notifications and release their producers."""
+    discarded = 0
+    while True:
+        try:
+            event = session.runtime_event_queue.get_nowait()
+        except asyncio.QueueEmpty:
+            break
+        session.runtime_event_queue.task_done()
+        if not event.done.done():
+            event.done.set_result(False)
+        discarded += 1
+    return discarded
 
 
 async def _select_next_work(
@@ -99,17 +133,17 @@ async def _select_next_work(
 ) -> tuple[
     str | None,
     WorkSource | None,
-    dict[str, Any] | None,
+    WorkEntry | None,
 ]:
     steer = await _dequeue_steer()
     if steer is not None:
         return str(steer["text"]), "user", steer
-    internal = _dequeue_internal()
-    if internal is not None:
+    runtime_event = _dequeue_runtime_event()
+    if runtime_event is not None:
         return (
-            str(internal["text"]),
-            "internal",
-            internal,
+            runtime_event.prompt(),
+            "runtime",
+            runtime_event,
         )
     if goal_is_active() and not thread_active():
         goal_id = current_goal_id()
@@ -168,24 +202,23 @@ async def _announce_goal_terminal(
     save_state()
 
 
-def _finish_internal(
-    entry: dict[str, Any] | None,
+def _finish_runtime_event(
+    event: RuntimeEvent | None,
     delivered: bool,
 ) -> None:
-    if not entry:
+    if event is None:
         return
-    done = entry.get("done")
-    if isinstance(done, asyncio.Future) and not done.done():
-        done.set_result(delivered)
+    if not event.done.done():
+        event.done.set_result(delivered)
 
 
 def _mark_goal_continuation(
     source: WorkSource | None,
 ) -> None:
     if source == "goal":
-        session.active_goal_id = current_goal_id()
+        turns.set_goal_id(current_goal_id())
     else:
-        session.active_goal_id = None
+        turns.set_goal_id(None)
 
 
 async def run_root_session(
@@ -205,7 +238,7 @@ async def run_root_session(
         if initial_input is not None
         else None
     )
-    work_entry: dict[str, Any] | None = None
+    work_entry: RuntimeEvent | dict[str, Any] | None = None
     captured_goal_id = (
         current_goal_id()
         if goal_is_active() and not thread_active()
@@ -226,10 +259,11 @@ async def run_root_session(
                 )
                 if next_input is None:
                     break
-            if work_entry is not None:
-                entry_chat_id = work_entry.get("chat_id")
-                if entry_chat_id is not None:
-                    chat_id = entry_chat_id
+            if isinstance(work_entry, RuntimeEvent):
+                chat_id = work_entry.conversation_id
+                delivery_context = work_entry.delivery_context
+            elif isinstance(work_entry, dict):
+                chat_id = work_entry.get("chat_id", chat_id)
                 delivery_context = work_entry.get("delivery_context")
             _mark_goal_continuation(next_source)
             if next_source == "goal":
@@ -247,10 +281,17 @@ async def run_root_session(
                         allow_goal_creation=allow_goal_creation,
                     )
             except asyncio.CancelledError:
-                _finish_internal(work_entry, False)
+                _finish_runtime_event(
+                    work_entry
+                    if isinstance(work_entry, RuntimeEvent)
+                    else None,
+                    False,
+                )
                 raise
-            _finish_internal(
-                work_entry,
+            _finish_runtime_event(
+                work_entry
+                if isinstance(work_entry, RuntimeEvent)
+                else None,
                 delivered is True,
             )
             work_entry = None
@@ -260,7 +301,7 @@ async def run_root_session(
                     if isinstance(delivered, RetryableTurnFailure)
                     else "a temporary agent failure"
                 )
-                if goal_is_active() and not thread_active():
+                if next_source == "goal" and goal_is_active():
                     _goal, changed = pause_goal()
                     if changed:
                         await send(
@@ -272,8 +313,8 @@ async def run_root_session(
                 break
             if (
                 delivered is False
+                and next_source == "goal"
                 and goal_is_active()
-                and not thread_active()
             ):
                 goal_id = current_goal_id()
                 if goal_id:
@@ -300,15 +341,25 @@ async def run_root_session(
             ):
                 break
     except Exception:
-        _finish_internal(work_entry, False)
+        _finish_runtime_event(
+            work_entry if isinstance(work_entry, RuntimeEvent) else None,
+            False,
+        )
         raise
     finally:
-        session.active_goal_id = None
-        if session.active_task is asyncio.current_task():
-            session.active_task = None
-            session.active_since = None
+        turns.set_goal_id(None)
+        snapshot = turns.snapshot
+        if turns.finish(asyncio.current_task()):
+            marker = session.state.get("active_root_turn")
+            if (
+                isinstance(marker, dict)
+                and snapshot is not None
+                and marker.get("id") == snapshot.id
+            ):
+                session.state["active_root_turn"] = None
+                save_state()
             # Lost-wakeup guard: work may have arrived after the idle
-            # decision and before active_task was cleared.
+            # decision and before turn ownership was released.
             if _pending_controller_work():
                 start_root_session(chat_id, None)
 
@@ -319,18 +370,28 @@ def start_root_session(
     *,
     internal: bool = False,
     delivery_context: Any | None = None,
-) -> asyncio.Task:
-    session.active_since = time.monotonic()
-    task = asyncio.create_task(
+) -> asyncio.Task[None]:
+    def persist_turn(snapshot: TurnSnapshot) -> None:
+        session.state["active_root_turn"] = {
+            "id": snapshot.id,
+            "session_id": session.state.get("current_session_id"),
+        }
+        try:
+            save_state()
+        except Exception:
+            session.state["active_root_turn"] = None
+            raise
+
+    return turns.start(
         run_root_session(
             chat_id,
             text,
             internal=internal,
             delivery_context=delivery_context,
-        )
+        ),
+        kind=TurnKind.REGULAR,
+        before_start=persist_turn,
     )
-    session.active_task = task
-    return task
 
 
 def ensure_root_session(
@@ -340,9 +401,8 @@ def ensure_root_session(
     internal: bool = False,
     delivery_context: Any | None = None,
 ) -> asyncio.Task | None:
-    active = session.active_task
-    if active and not active.done():
-        return active
+    if turns.is_running():
+        return turns.task
     return start_root_session(
         chat_id,
         text,
@@ -359,59 +419,64 @@ async def _run_manual_compaction(chat_id: ConversationId) -> None:
         cancelled = True
         raise
     finally:
-        if session.active_task is asyncio.current_task():
-            session.active_task = None
-            session.active_since = None
+        current_task = asyncio.current_task()
+        if turns.task is current_task:
             if cancelled:
-                while True:
-                    entry = await _dequeue_steer()
-                    if entry is None:
-                        break
-                    entry["status"] = "cancelled"
-            elif _pending_controller_work():
+                from steering import cancel_unforced_steers
+
+                await cancel_unforced_steers()
+            if (
+                turns.finish(current_task)
+                and _pending_controller_work()
+            ):
                 ensure_root_session(chat_id)
 
 
 def start_manual_compaction(chat_id: ConversationId) -> asyncio.Task[None]:
     """Start manual compaction under the root task-ownership boundary."""
-    session.active_since = time.monotonic()
-    task = asyncio.create_task(_run_manual_compaction(chat_id))
-    session.active_task = task
-    return task
+    return turns.start(
+        _run_manual_compaction(chat_id),
+        kind=TurnKind.MANUAL_COMPACTION,
+    )
 
 
-def cancel_active_goal_controller(
+async def interrupt_root_turn(
+    *,
+    expected_turn_id: str | None = None,
+) -> InterruptResult:
+    """Interrupt the active root turn without touching background resources."""
+    return await turns.interrupt(expected_turn_id=expected_turn_id)
+
+
+async def interrupt_active_goal_controller(
     goal_id: str | None,
-) -> asyncio.Task | None:
+) -> bool:
     """Cancel the root controller only if it is on this goal's continuation."""
     if not goal_id:
-        return None
-    if session.active_goal_id != str(goal_id):
-        return None
-    active = session.active_task
-    if not active or active.done():
-        return None
-    active.cancel()
-    return active
+        return False
+    if turns.goal_id != str(goal_id):
+        return False
+    result = await interrupt_root_turn()
+    return result.interrupted
 
 
-async def enqueue_internal_input(
+async def enqueue_runtime_event(
     chat_id: ConversationId,
+    kind: RuntimeEventKind,
     text: str,
     *,
-    is_active: Any | None = None,
+    is_active: Callable[[], bool] | None = None,
 ) -> bool:
     done: asyncio.Future[bool] = (
         asyncio.get_running_loop().create_future()
     )
-    entry = {
-        "chat_id": chat_id,
-        "text": text,
-        "internal": True,
-        "done": done,
-        "is_active": is_active,
-        "delivery_context": None,
-    }
-    await session.internal_queue.put(entry)
+    event = RuntimeEvent(
+        conversation_id=chat_id,
+        kind=kind,
+        content=text,
+        done=done,
+        is_active=is_active,
+    )
+    await session.runtime_event_queue.put(event)
     ensure_root_session(chat_id, None)
     return bool(await done)

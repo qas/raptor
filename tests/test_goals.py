@@ -51,10 +51,22 @@ from goals import (
     todo_store_for_execution,
     update_goal_tool,
 )
+from runtime_events import RuntimeEvent, RuntimeEventKind
+from turn_runtime import TurnKind, turns
 
 
 async def _noop(*_a, **_k):
     return None
+
+
+def _runtime_event(text: str, *, is_active=None) -> RuntimeEvent:
+    return RuntimeEvent(
+        conversation_id=1,
+        kind=RuntimeEventKind.SUBAGENT_COMPLETED,
+        content=text,
+        done=asyncio.get_running_loop().create_future(),
+        is_active=is_active,
+    )
 
 
 class GoalTestProvider:
@@ -101,9 +113,7 @@ class GoalTests(unittest.IsolatedAsyncioTestCase):
         session.subagent_records.update(
             session.state["subagents"]
         )
-        session.active_task = None
-        session.active_since = None
-        session.active_goal_id = None
+        turns.finish()
         session.goal_pin_message_id = None
         session.goal_pin_goal_id = None
         session.pinned_status_conversation_id = None
@@ -119,8 +129,8 @@ class GoalTests(unittest.IsolatedAsyncioTestCase):
                 break
         while True:
             try:
-                session.internal_queue.get_nowait()
-                session.internal_queue.task_done()
+                session.runtime_event_queue.get_nowait()
+                session.runtime_event_queue.task_done()
             except asyncio.QueueEmpty:
                 break
         session.pending_steers.clear()
@@ -334,6 +344,30 @@ class GoalTests(unittest.IsolatedAsyncioTestCase):
             GOAL_COMPLETE,
         )
         self.assertFalse(goal_is_active())
+
+    def test_model_can_update_goal_objective_in_place(self) -> None:
+        replace_goal("initial objective")
+        goal_id = current_goal()["id"]
+
+        result = update_goal_tool(
+            {
+                "goal_id": goal_id,
+                "objective": "  revised   objective  ",
+            }
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(current_goal()["id"], goal_id)
+        self.assertEqual(current_goal()["status"], GOAL_ACTIVE)
+        self.assertEqual(current_goal()["objective"], "revised objective")
+
+    def test_model_goal_update_requires_a_change(self) -> None:
+        replace_goal("initial objective")
+
+        result = update_goal_tool({"goal_id": current_goal()["id"]})
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"], "objective or status is required")
 
     def test_model_can_block_goal(self) -> None:
         replace_goal("needs help")
@@ -593,12 +627,14 @@ class GoalTests(unittest.IsolatedAsyncioTestCase):
         async def fake_turn(chat_id, text, *, internal=False, **_kw):
             calls.append(text)
             if len(calls) == 1:
-                await session.internal_queue.put(
-                    {
-                        "chat_id": chat_id,
-                        "text": "subagent done",
-                        "internal": True,
-                    }
+                done = asyncio.get_running_loop().create_future()
+                await session.runtime_event_queue.put(
+                    RuntimeEvent(
+                        conversation_id=chat_id,
+                        kind=RuntimeEventKind.SUBAGENT_COMPLETED,
+                        content="subagent done",
+                        done=done,
+                    )
                 )
             if len(calls) >= 2:
                 complete_goal(current_goal()["id"])
@@ -620,7 +656,7 @@ class GoalTests(unittest.IsolatedAsyncioTestCase):
                 1,
                 "start",
             )
-        self.assertEqual(calls[1], "subagent done")
+        self.assertIn("subagent done", calls[1])
 
     async def test_stop_pauses_active_goal(self) -> None:
         replace_goal("stop me")
@@ -641,12 +677,30 @@ class GoalTests(unittest.IsolatedAsyncioTestCase):
                 "commands.send",
                 _noop,
             ):
-                await command(1, "/stop")
+                await command(1, "/stop all")
         self.assertEqual(
             current_goal()["status"],
             GOAL_PAUSED,
         )
         cancel_shells.assert_awaited_once_with()
+
+    async def test_stop_preserves_background_resources(self) -> None:
+        from commands import command
+
+        cancel_subagents = AsyncMock(return_value=1)
+        cancel_shells = AsyncMock(return_value=1)
+        with (
+            patch(
+                "commands.cancel_background_subagents",
+                cancel_subagents,
+            ),
+            patch("commands.cancel_shell_sessions", cancel_shells),
+            patch("commands.send", _noop),
+        ):
+            await command(1, "/stop")
+
+        cancel_subagents.assert_not_awaited()
+        cancel_shells.assert_not_awaited()
 
     async def test_stop_reports_discarded_background_results(self) -> None:
         from commands import command
@@ -669,7 +723,7 @@ class GoalTests(unittest.IsolatedAsyncioTestCase):
             ),
             patch("commands.send", capture),
         ):
-            await command(1, "/stop")
+            await command(1, "/stop all")
 
         cancel_subagents.assert_awaited_once_with(discard_pending=True)
         self.assertEqual(
@@ -693,8 +747,7 @@ class GoalTests(unittest.IsolatedAsyncioTestCase):
                 def done(self):
                     return True
 
-            session.active_task = Done()
-            return session.active_task
+            return Done()
 
         from commands import command
 
@@ -719,31 +772,17 @@ class GoalTests(unittest.IsolatedAsyncioTestCase):
         replace_goal("clear me")
         goal_id = current_goal()["id"]
 
-        class FakeTask:
-            def __init__(self) -> None:
-                self.cancelled = 0
-
-            def done(self) -> bool:
-                return False
-
-            def cancel(self, *_a, **_k) -> bool:
-                self.cancelled += 1
-                return True
-
-            def __await__(self):
-                async def _done():
-                    return None
-                return _done().__await__()
-
-        task = FakeTask()
-        session.active_task = task  # type: ignore[assignment]
-        session.active_goal_id = goal_id
+        task = turns.start(
+            asyncio.Event().wait(),
+            kind=TurnKind.REGULAR,
+            goal_id=goal_id,
+        )
         from commands import command
 
         with patch("commands.send", _noop):
             await command(1, "/goal clear")
         self.assertIsNone(current_goal())
-        self.assertEqual(task.cancelled, 1)
+        self.assertTrue(task.cancelled())
 
     async def test_only_one_root_controller_runs(self) -> None:
         replace_goal("one controller")
@@ -841,8 +880,9 @@ class GoalTests(unittest.IsolatedAsyncioTestCase):
                 _noop,
             ),
         ):
-            delivered = await controller.enqueue_internal_input(
+            delivered = await controller.enqueue_runtime_event(
                 1,
+                RuntimeEventKind.SUBAGENT_COMPLETED,
                 "A background subagent has finished.",
             )
         self.assertTrue(delivered)
@@ -866,8 +906,9 @@ class GoalTests(unittest.IsolatedAsyncioTestCase):
             patch.object(controller, "agent_turn", fake_turn),
             patch.object(controller, "send", _noop),
         ):
-            delivered = await controller.enqueue_internal_input(
+            delivered = await controller.enqueue_runtime_event(
                 1,
+                RuntimeEventKind.SUBAGENT_COMPLETED,
                 (
                     "A background subagent has finished.\n\n"
                     '{"status":"failed","error":"network unavailable"}'
@@ -975,7 +1016,7 @@ class GoalTests(unittest.IsolatedAsyncioTestCase):
         ):
             await controller.run_root_session(
                 1,
-                "start",
+                None,
             )
         self.assertEqual(
             current_goal()["status"],
@@ -998,11 +1039,50 @@ class GoalTests(unittest.IsolatedAsyncioTestCase):
             patch.object(controller, "agent_turn", fake_turn),
             patch.object(controller, "send", capture),
         ):
-            await controller.run_root_session(1, "start")
+            await controller.run_root_session(1, None)
 
         self.assertEqual(current_goal()["status"], GOAL_PAUSED)
         self.assertNotEqual(current_goal()["status"], GOAL_BLOCKED)
-        self.assertTrue(any("temporary Responses backend" in text for text in sent))
+        self.assertTrue(
+            any("temporary Responses backend" in text for text in sent)
+        )
+
+    async def test_runtime_failure_does_not_block_parent_goal(self) -> None:
+        replace_goal("continue after notification failure")
+        calls: list[str] = []
+
+        async def fake_turn(chat_id, text, *, internal=False, **_kw):
+            calls.append(text)
+            if len(calls) == 1:
+                return False
+            complete_goal(current_goal()["id"])
+            return True
+
+        with (
+            patch.object(controller, "agent_turn", fake_turn),
+            patch.object(controller, "send", _noop),
+        ):
+            delivered = await controller.enqueue_runtime_event(
+                1,
+                RuntimeEventKind.SUBAGENT_COMPLETED,
+                "A background subagent has finished.",
+            )
+
+        self.assertFalse(delivered)
+        self.assertEqual(current_goal()["status"], GOAL_COMPLETE)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[1], goal_continuation_input())
+
+    async def test_runtime_event_prompt_has_one_total_context_cap(self) -> None:
+        from config import MAX_TOOL_OUTPUT
+
+        event = _runtime_event("head" + "x" * MAX_TOOL_OUTPUT + "tail")
+        prompt = event.prompt()
+
+        self.assertLessEqual(len(prompt), MAX_TOOL_OUTPUT)
+        self.assertIn("head", prompt)
+        self.assertIn("tail", prompt)
+        self.assertIn("runtime event truncated", prompt)
 
     async def test_context_overflow_recovery_does_not_block_goal(
         self,
@@ -1059,10 +1139,7 @@ class GoalTests(unittest.IsolatedAsyncioTestCase):
 
     def test_unclean_restart_pauses_active_goal(self) -> None:
         replace_goal("pause on unclean")
-        session.state["interrupted_agent"] = {
-            "id": "x",
-        }
-        notice = prepare_goal_on_startup()
+        notice = prepare_goal_on_startup(root_interrupted=True)
         self.assertIsNotNone(notice)
         self.assertEqual(
             current_goal()["status"],
@@ -1092,12 +1169,8 @@ class GoalTests(unittest.IsolatedAsyncioTestCase):
             if result[0] is None and not injected["done"]:
                 # Work arrives after idle decision, before finally clears.
                 injected["done"] = True
-                await session.internal_queue.put(
-                    {
-                        "chat_id": 1,
-                        "text": "late-internal",
-                        "internal": True,
-                    }
+                await session.runtime_event_queue.put(
+                    _runtime_event("late-internal")
                 )
             return result
 
@@ -1125,12 +1198,12 @@ class GoalTests(unittest.IsolatedAsyncioTestCase):
             await task
             # Successor started in finally may still be running.
             while True:
-                nxt = session.active_task
+                nxt = turns.task
                 if not nxt or nxt.done():
                     break
                 await nxt
         self.assertIn("start", calls)
-        self.assertIn("late-internal", calls)
+        self.assertTrue(any("late-internal" in call for call in calls))
 
     def test_clean_startup_resumes_active_goal(self) -> None:
         replace_goal("resume on clean start")
@@ -1158,51 +1231,36 @@ class GoalTests(unittest.IsolatedAsyncioTestCase):
                 controller.ensure_root_session(1, None)
         self.assertEqual(started, [(1, None)])
 
-    async def test_internal_queue_task_done_balanced(
+    async def test_runtime_event_queue_task_done_balanced(
         self,
     ) -> None:
-        await session.internal_queue.put(
-            {
-                "chat_id": 1,
-                "text": "balanced",
-                "internal": True,
-            }
-        )
-        entry = controller._dequeue_internal()
-        self.assertEqual(
-            entry["text"],
-            "balanced",
-        )
+        await session.runtime_event_queue.put(_runtime_event("balanced"))
+        event = controller._dequeue_runtime_event()
+        self.assertEqual(event.content, "balanced")
         await asyncio.wait_for(
-            session.internal_queue.join(),
+            session.runtime_event_queue.join(),
             timeout=0.2,
         )
 
     async def test_inactive_internal_entry_is_discarded(self) -> None:
         done = asyncio.get_running_loop().create_future()
-        await session.internal_queue.put(
-            {
-                "chat_id": 1,
-                "text": "stale",
-                "internal": True,
-                "is_active": lambda: False,
-                "done": done,
-            }
+        await session.runtime_event_queue.put(
+            RuntimeEvent(
+                conversation_id=1,
+                kind=RuntimeEventKind.SUBAGENT_COMPLETED,
+                content="stale",
+                done=done,
+                is_active=lambda: False,
+            )
         )
-        await session.internal_queue.put(
-            {
-                "chat_id": 1,
-                "text": "current",
-                "internal": True,
-            }
-        )
+        await session.runtime_event_queue.put(_runtime_event("current"))
 
-        entry = controller._dequeue_internal()
+        event = controller._dequeue_runtime_event()
 
-        self.assertEqual(entry["text"], "current")
+        self.assertEqual(event.content, "current")
         self.assertFalse(await done)
         await asyncio.wait_for(
-            session.internal_queue.join(),
+            session.runtime_event_queue.join(),
             timeout=0.2,
         )
 
@@ -1211,34 +1269,23 @@ class GoalTests(unittest.IsolatedAsyncioTestCase):
     ) -> None:
         replace_goal("keep user turn")
 
-        class FakeTask:
-            def __init__(self) -> None:
-                self.cancelled = 0
-
-            def done(self) -> bool:
-                return False
-
-            def cancel(self, *_a, **_k) -> bool:
-                self.cancelled += 1
-                return True
-
-            def __await__(self):
-                async def _done():
-                    return None
-                return _done().__await__()
-
-        task = FakeTask()
-        session.active_task = task  # type: ignore[assignment]
-        session.active_goal_id = None
+        task = turns.start(
+            asyncio.Event().wait(),
+            kind=TurnKind.REGULAR,
+        )
         from commands import command
 
         with patch("commands.send", _noop):
             await command(1, "/goal pause")
-        self.assertEqual(task.cancelled, 0)
+        self.assertFalse(task.cancelled())
         self.assertEqual(
             current_goal()["status"],
             GOAL_PAUSED,
         )
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+        turns.finish(task)
 
     async def test_pause_cancels_matching_goal_continuation(
         self,
@@ -1246,30 +1293,16 @@ class GoalTests(unittest.IsolatedAsyncioTestCase):
         replace_goal("cancel continuation")
         goal_id = current_goal()["id"]
 
-        class FakeTask:
-            def __init__(self) -> None:
-                self.cancelled = 0
-
-            def done(self) -> bool:
-                return False
-
-            def cancel(self, *_a, **_k) -> bool:
-                self.cancelled += 1
-                return True
-
-            def __await__(self):
-                async def _done():
-                    return None
-                return _done().__await__()
-
-        task = FakeTask()
-        session.active_task = task  # type: ignore[assignment]
-        session.active_goal_id = goal_id
+        task = turns.start(
+            asyncio.Event().wait(),
+            kind=TurnKind.REGULAR,
+            goal_id=goal_id,
+        )
         from commands import command
 
         with patch("commands.send", _noop):
             await command(1, "/goal pause")
-        self.assertEqual(task.cancelled, 1)
+        self.assertTrue(task.cancelled())
         self.assertEqual(
             current_goal()["status"],
             GOAL_PAUSED,
@@ -1312,7 +1345,7 @@ class GoalTests(unittest.IsolatedAsyncioTestCase):
             internal=False,
             **_kw,
         ):
-            seen.append(session.active_goal_id)
+            seen.append(turns.goal_id)
             complete_goal(current_goal()["id"])
             return True
 
@@ -1328,11 +1361,12 @@ class GoalTests(unittest.IsolatedAsyncioTestCase):
                 _noop,
             ),
         ):
-            await controller.run_root_session(
+            task = controller.start_root_session(
                 1,
                 twin,
                 internal=False,
             )
+            await task
         self.assertEqual(seen, [None])
 
     async def test_identical_internal_text_is_not_goal_continuation(
@@ -1349,7 +1383,7 @@ class GoalTests(unittest.IsolatedAsyncioTestCase):
             internal=False,
             **_kw,
         ):
-            seen.append(session.active_goal_id)
+            seen.append(turns.goal_id)
             complete_goal(current_goal()["id"])
             return True
 
@@ -1365,11 +1399,12 @@ class GoalTests(unittest.IsolatedAsyncioTestCase):
                 _noop,
             ),
         ):
-            await controller.run_root_session(
+            task = controller.start_root_session(
                 1,
                 twin,
                 internal=True,
             )
+            await task
         self.assertEqual(seen, [None])
 
     async def test_dequeued_internal_twin_text_is_not_goal(
@@ -1386,17 +1421,11 @@ class GoalTests(unittest.IsolatedAsyncioTestCase):
             internal=False,
             **_kw,
         ):
-            seen.append(session.active_goal_id)
+            seen.append(turns.goal_id)
             complete_goal(current_goal()["id"])
             return True
 
-        await session.internal_queue.put(
-            {
-                "chat_id": 1,
-                "text": twin,
-                "internal": True,
-            }
-        )
+        await session.runtime_event_queue.put(_runtime_event(twin))
         with (
             patch.object(
                 controller,
@@ -1409,10 +1438,8 @@ class GoalTests(unittest.IsolatedAsyncioTestCase):
                 _noop,
             ),
         ):
-            await controller.run_root_session(
-                1,
-                None,
-            )
+            task = controller.start_root_session(1, None)
+            await task
         self.assertEqual(seen, [None])
 
     async def test_select_next_work_returns_explicit_source(
@@ -1420,20 +1447,14 @@ class GoalTests(unittest.IsolatedAsyncioTestCase):
     ) -> None:
         replace_goal("source labels")
         twin = goal_continuation_input()
-        await session.internal_queue.put(
-            {
-                "chat_id": 1,
-                "text": twin,
-                "internal": True,
-            }
-        )
+        await session.runtime_event_queue.put(_runtime_event(twin))
         text, source, entry = (
             await controller._select_next_work(
                 None
             )
         )
-        self.assertEqual(text, twin)
-        self.assertEqual(source, "internal")
+        self.assertIn(twin, text)
+        self.assertEqual(source, "runtime")
         self.assertIsNotNone(entry)
         text, source, entry = (
             await controller._select_next_work(
@@ -1447,7 +1468,7 @@ class GoalTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(source, "goal")
         self.assertIsNone(entry)
 
-    async def test_goal_source_sets_active_goal_id(
+    async def test_goal_source_sets_turn_goal_ownership(
         self,
     ) -> None:
         replace_goal("real continuation")
@@ -1461,7 +1482,7 @@ class GoalTests(unittest.IsolatedAsyncioTestCase):
             internal=False,
             **_kw,
         ):
-            seen.append(session.active_goal_id)
+            seen.append(turns.goal_id)
             complete_goal(goal_id)
             return True
 
@@ -1477,10 +1498,8 @@ class GoalTests(unittest.IsolatedAsyncioTestCase):
                 _noop,
             ),
         ):
-            await controller.run_root_session(
-                1,
-                None,
-            )
+            task = controller.start_root_session(1, None)
+            await task
         self.assertEqual(seen, [goal_id])
 
 
@@ -1500,9 +1519,7 @@ class GoalPinTests(unittest.IsolatedAsyncioTestCase):
         session.subagent_records.update(
             session.state["subagents"]
         )
-        session.active_task = None
-        session.active_since = None
-        session.active_goal_id = None
+        turns.finish()
         session.goal_pin_message_id = None
         session.goal_pin_goal_id = None
         session.pinned_status_conversation_id = None
@@ -1519,8 +1536,8 @@ class GoalPinTests(unittest.IsolatedAsyncioTestCase):
                 break
         while True:
             try:
-                session.internal_queue.get_nowait()
-                session.internal_queue.task_done()
+                session.runtime_event_queue.get_nowait()
+                session.runtime_event_queue.task_done()
             except asyncio.QueueEmpty:
                 break
         from chat_store import create_session
@@ -1604,6 +1621,15 @@ class GoalPinTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(text.endswith("..."))
         self.assertLessEqual(len(text), len("Goal active: ") + 120)
 
+    def test_goal_pin_reflects_paused_status(self) -> None:
+        goal = create_goal("wait for operator")
+        goal["status"] = GOAL_PAUSED
+
+        self.assertEqual(
+            goal_pin_text(goal),
+            "Goal paused: wait for operator",
+        )
+
     async def test_goal_complete_removes_pin(self) -> None:
         replace_goal("complete me")
         await ensure_goal_pin(1)
@@ -1667,8 +1693,7 @@ class GoalPinTests(unittest.IsolatedAsyncioTestCase):
             class Done:
                 def done(self):
                     return True
-            session.active_task = Done()
-            return session.active_task
+            return Done()
 
         with (
             patch(
@@ -1702,7 +1727,7 @@ class GoalPinTests(unittest.IsolatedAsyncioTestCase):
         self,
     ) -> None:
         replace_goal("unclean")
-        session.state["interrupted_agent"] = {"id": "x"}
+        session.state["interrupted_subagents"] = [{"id": "x"}]
         notice = prepare_goal_on_startup()
         self.assertIsNotNone(notice)
         await ensure_goal_pin(1)
@@ -2032,9 +2057,7 @@ class SetGoalToolTests(unittest.IsolatedAsyncioTestCase):
         session.subagent_records.update(
             session.state["subagents"]
         )
-        session.active_task = None
-        session.active_since = None
-        session.active_goal_id = None
+        turns.finish()
         session.goal_pin_message_id = None
         session.goal_pin_goal_id = None
         session.pinned_status_conversation_id = None
@@ -2051,8 +2074,8 @@ class SetGoalToolTests(unittest.IsolatedAsyncioTestCase):
                 break
         while True:
             try:
-                session.internal_queue.get_nowait()
-                session.internal_queue.task_done()
+                session.runtime_event_queue.get_nowait()
+                session.runtime_event_queue.task_done()
             except asyncio.QueueEmpty:
                 break
         from chat_store import create_session
@@ -2285,8 +2308,9 @@ class SetGoalToolTests(unittest.IsolatedAsyncioTestCase):
                 _noop,
             ),
         ):
-            await controller.enqueue_internal_input(
+            await controller.enqueue_runtime_event(
                 1,
+                RuntimeEventKind.SUBAGENT_COMPLETED,
                 "A background subagent has finished.",
             )
         self.assertFalse(seen["allow"])

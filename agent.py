@@ -1,14 +1,13 @@
 """Agent turn and context compaction entry points."""
 import asyncio
 import json
-import time
 from dataclasses import dataclass
 from typing import Any
 
 import httpx
 from chat_provider import ConversationId
 
-from chat_store import append_item, append_meta
+from chat_store import append_item, append_meta, session_exists
 from config import (
     COMPACTION_REASONING_EFFORT,
     MAX_TOOL_ROUNDS,
@@ -22,7 +21,7 @@ from context import (
     request_with_checkpoint_retry,
     session_context_stats,
 )
-from engine import run_agent
+from engine import function_call_output, interrupted_tool_result, run_agent
 from goals import (
     combine_instructions,
     goal_instructions,
@@ -51,6 +50,57 @@ from responses import (
     responses_create_stream,
 )
 from skills import skill_catalog_instructions
+
+
+TURN_ABORTED_GUIDANCE = (
+    "The user intentionally interrupted the previous turn. Any unfinished "
+    "tool may have partially changed external state; inspect before retrying. "
+    "Managed background resources may still be running."
+)
+
+
+def record_turn_interrupted(session_id: str) -> None:
+    """Persist a model-visible interruption boundary before releasing a turn."""
+    append_item(
+        session_id,
+        {
+            "role": "developer",
+            "content": (
+                "<turn_aborted>\n"
+                + TURN_ABORTED_GUIDANCE
+                + "\n</turn_aborted>"
+            ),
+        },
+        source="runtime",
+    )
+    append_meta(session_id, "turn_interrupted", {})
+
+
+def repair_interrupted_root_turn() -> bool:
+    """Close an unclean root turn's durable transcript on process startup."""
+    marker = state.get("active_root_turn")
+    if not isinstance(marker, dict):
+        return False
+    session_id = str(marker.get("session_id") or "")
+    if session_id and session_exists(session_id):
+        unmatched: dict[str, dict[str, Any]] = {}
+        for item in build_active_context(session_id):
+            item_type = item.get("type")
+            call_id = str(item.get("call_id") or "")
+            if item_type == "function_call" and call_id:
+                unmatched[call_id] = item
+            elif item_type == "function_call_output" and call_id:
+                unmatched.pop(call_id, None)
+        for call in unmatched.values():
+            append_item(
+                session_id,
+                function_call_output(call, interrupted_tool_result()),
+                source="tool",
+            )
+        record_turn_interrupted(session_id)
+    state["active_root_turn"] = None
+    save_state()
+    return True
 
 
 @dataclass(frozen=True)
@@ -85,7 +135,7 @@ def estimate_compaction_request(
     )
 
 
-def _recovery_checkpoint_ref(
+def _subagent_checkpoint_ref(
     checkpoint: Any,
     *,
     include_id: bool = False,
@@ -113,16 +163,14 @@ def _recovery_checkpoint_ref(
 
 
 def _recovery_prompt_payload(
-    resumed_agent: Any,
     resumed_subagents: list[Any],
 ) -> dict[str, Any]:
     return {
-        "agent": _recovery_checkpoint_ref(resumed_agent),
         "subagents": [
             ref
             for checkpoint in resumed_subagents
             if (
-                ref := _recovery_checkpoint_ref(
+                ref := _subagent_checkpoint_ref(
                     checkpoint,
                     include_id=True,
                 )
@@ -240,9 +288,8 @@ async def agent_turn(
     typing_task = asyncio.create_task(typing_loop(chat_id))
     session_id = current_session_id()
     continue_pending = True
-    tool_events: list[dict[str, Any]] = []
+    response_delivered = False
     delivery_tokens: list[Any] = []
-    resumed_agent = state.get("interrupted_agent")
     resumed_subagents = list(
         state.get("interrupted_subagents", [])
     )
@@ -254,13 +301,13 @@ async def agent_turn(
         and turn_source == "user"
     )
     user_item = {
-        "role": "user",
+        "role": "user" if turn_source == "user" else "developer",
         "content": user_text,
     }
     append_item(
         session_id,
         user_item,
-        source="internal" if turn_source != "user" else "user",
+        source=turn_source,
     )
     work = build_active_context(session_id)
 
@@ -339,7 +386,7 @@ async def agent_turn(
         extra_instructions = ""
         if internal:
             extra_instructions = (
-                "The current user-role input is an internal agent event, "
+                "The current developer-role input is a runtime event, "
                 "not a new message authored by the user. Process it and "
                 "communicate only the relevant outcome to the user."
             )
@@ -348,15 +395,14 @@ async def agent_turn(
             goal_instructions(),
             await skill_catalog_instructions(),
         )
-        if resumed_agent or resumed_subagents:
+        if resumed_subagents:
             recovery = (
-                "Recovery context from work interrupted by /stop follows. "
+                "Recovery context from interrupted subagents follows. "
                 "Continue safely from the current filesystem state. Do not "
                 "assume an in-flight side effect either completed or failed; "
                 "inspect before repeating it.\n\n"
                 + json.dumps(
                     _recovery_prompt_payload(
-                        resumed_agent,
                         resumed_subagents,
                     ),
                     ensure_ascii=False,
@@ -370,7 +416,6 @@ async def agent_turn(
                 "agent",
                 "checkpoint_loaded",
                 {
-                    "agent": bool(resumed_agent),
                     "subagents": len(resumed_subagents),
                 },
             )
@@ -534,9 +579,6 @@ async def agent_turn(
             )
             return rebuilt
 
-        def checkpoint(events: list[dict[str, Any]]) -> None:
-            tool_events[:] = events
-
         result = await run_agent(
             work=work,
             create_response=create_response,
@@ -544,7 +586,6 @@ async def agent_turn(
             source="agent",
             max_tool_rounds=MAX_TOOL_ROUNDS,
             drain_inputs=apply_pending_steers,
-            checkpoint=checkpoint,
             compact_context=compact_work,
             record_items=record_items,
         )
@@ -559,8 +600,6 @@ async def agent_turn(
                     "message": str(send_exc),
                 },
             )
-            if state.get("interrupted_agent") == resumed_agent:
-                state["interrupted_agent"] = None
             resumed_ids = {
                 str(item.get("id")) for item in resumed_subagents
             }
@@ -571,8 +610,7 @@ async def agent_turn(
             ]
             save_state()
             return RetryableTurnFailure("response delivery failed")
-        if state.get("interrupted_agent") == resumed_agent:
-            state["interrupted_agent"] = None
+        response_delivered = True
         resumed_ids = {
             str(item.get("id")) for item in resumed_subagents
         }
@@ -586,17 +624,8 @@ async def agent_turn(
         return True
     except asyncio.CancelledError:
         continue_pending = False
-        checkpoint_payload = {
-            "session_id": session_id,
-            "interrupted_at": time.time(),
-            "tool_events": tool_events,
-            "resumed_from": _recovery_checkpoint_ref(
-                resumed_agent,
-            ),
-        }
-        state["interrupted_agent"] = checkpoint_payload
-        save_state()
-        log_event("agent", "checkpoint_saved", checkpoint_payload)
+        if not response_delivered:
+            record_turn_interrupted(session_id)
         log_agent_activity("request cancelled")
         raise
     except httpx.HTTPStatusError as exc:
@@ -607,7 +636,7 @@ async def agent_turn(
             "http_error",
             {
                 "status": exc.response.status_code,
-                "body": body,
+                "body_chars": len(exc.response.text),
             },
         )
         await send(
@@ -667,33 +696,8 @@ async def agent_turn(
                 await steer_queue.put(entry)
                 break
         else:
-            while True:
-                try:
-                    entry = steer_queue.get_nowait()
-                except asyncio.QueueEmpty:
-                    break
-                steer_queue.task_done()
-                if entry.get("status") == "forcing":
-                    continue
-                entry["status"] = "cancelled"
-                session.pending_steers.pop(str(entry["id"]), None)
-                delivery_context = entry.get("delivery_context")
-                if delivery_context is not None:
-                    token = activate_delivery_context(
-                        entry["chat_id"],
-                        delivery_context,
-                    )
-                    try:
-                        await send(
-                            entry["chat_id"],
-                            "Steering cancelled because the run stopped.",
-                        )
-                    finally:
-                        restore_delivery_context(token)
-                await clear_steering_indicator(
-                    entry["chat_id"],
-                    entry.get("message_id"),
-                    str(entry.get("id") or ""),
-                )
+            from steering import cancel_unforced_steers
+
+            await cancel_unforced_steers()
         for token in reversed(delivery_tokens):
             restore_delivery_context(token)

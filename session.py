@@ -21,6 +21,7 @@ from config import (
     RESPONSES_MODEL,
     STATE_PATH,
 )
+from runtime_events import RuntimeEvent
 from todos import normalize_persisted_plan
 from storage import write_text_atomic
 
@@ -30,7 +31,7 @@ DEFAULT_STATE: dict[str, Any] = {
     "todos": [],
     "approval_mode": "off",
     "pending_inputs": [],
-    "interrupted_agent": None,
+    "active_root_turn": None,
     "interrupted_subagents": [],
     "subagents": {},
     "runtime": {},
@@ -155,16 +156,12 @@ def load_state() -> dict[str, Any]:
         parent_id = str(thread.get("parent_session_id") or "")
         branch_id = str(thread.get("session_id") or "")
         if not session_exists(parent_id) or not session_exists(branch_id):
-            parent_interrupted_agent = thread.get(
-                "parent_interrupted_agent"
-            )
             parent_interrupted_subagents = thread.get(
                 "parent_interrupted_subagents"
             )
             result["thread"] = None
             if session_exists(parent_id):
                 result["current_session_id"] = parent_id
-                result["interrupted_agent"] = parent_interrupted_agent
                 result["interrupted_subagents"] = (
                     parent_interrupted_subagents
                     if isinstance(parent_interrupted_subagents, list)
@@ -229,11 +226,6 @@ def load_state() -> dict[str, Any]:
 
 state = load_state()
 
-active_task: asyncio.Task | None = None
-active_since: float | None = None
-# Set while the root controller is executing a goal-continuation turn.
-# /goal pause and /goal clear cancel only when this matches the goal id.
-active_goal_id: str | None = None
 # Chat presentation only — never persisted in durable state.
 goal_pin_message_id: int | str | None = None
 goal_pin_goal_id: str | None = None
@@ -249,7 +241,7 @@ goal_creation_authorized: bool = False
 steer_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
 pending_steers: dict[str, dict[str, Any]] = {}
 
-internal_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+runtime_event_queue: asyncio.Queue[RuntimeEvent] = asyncio.Queue()
 
 subagent_events: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
 subagent_tasks: dict[str, asyncio.Task] = {}
