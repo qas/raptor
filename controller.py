@@ -78,13 +78,21 @@ async def _dequeue_steer() -> dict[str, Any] | None:
                     str(entry.get("id") or ""),
                 )
             continue
+        previous_status = str(entry["status"])
+        steer_id = str(entry["id"])
         entry["status"] = "applied"
-        session.pending_steers.pop(str(entry["id"]), None)
-        await clear_steering_indicator(
-            entry["chat_id"],
-            entry.get("message_id"),
-            str(entry.get("id") or ""),
-        )
+        session.pending_steers.pop(steer_id, None)
+        try:
+            await clear_steering_indicator(
+                entry["chat_id"],
+                entry.get("message_id"),
+                steer_id,
+            )
+        except asyncio.CancelledError:
+            entry["status"] = previous_status
+            session.pending_steers[steer_id] = entry
+            session.steer_queue.put_nowait(entry)
+            raise
         return entry
 
 

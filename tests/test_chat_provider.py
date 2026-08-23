@@ -338,6 +338,34 @@ class ChatProviderContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(entry["status"], "applied")
         self.assertNotIn("abcd", session.pending_steers)
 
+    async def test_cancelled_steer_claim_returns_to_queue(self) -> None:
+        from controller import _dequeue_steer
+
+        entry = {
+            "id": "abcd",
+            "chat_id": "!room:example.org",
+            "text": "keep this request",
+            "message_id": "$steering-controls",
+            "status": "queued",
+        }
+        session.pending_steers["abcd"] = entry
+        await session.steer_queue.put(entry)
+
+        async def cancel_cleanup(*_args, **_kwargs):
+            raise asyncio.CancelledError
+
+        with patch(
+            "controller.clear_steering_indicator",
+            cancel_cleanup,
+        ):
+            with self.assertRaises(asyncio.CancelledError):
+                await _dequeue_steer()
+
+        self.assertEqual(entry["status"], "queued")
+        self.assertIs(session.pending_steers["abcd"], entry)
+        self.assertIs(session.steer_queue.get_nowait(), entry)
+        session.steer_queue.task_done()
+
     async def test_global_stop_discards_queued_steering(self) -> None:
         from steering import cancel_pending_steers
 

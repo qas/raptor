@@ -2011,6 +2011,38 @@ class PinnedStatusSlotTests(unittest.IsolatedAsyncioTestCase):
             },
         )
 
+    async def test_approval_cleanup_failure_does_not_block_decision(
+        self,
+    ) -> None:
+        from approval import handle_approval_action
+        from chat_provider import IncomingAction
+        from chat_runtime import get_chat_provider
+
+        approval_id = "abc123"
+        future = asyncio.get_running_loop().create_future()
+        session.pending_approvals[approval_id] = {
+            "id": approval_id,
+            "chat_id": 1,
+            "future": future,
+            "ui_finalized": False,
+        }
+        action = IncomingAction(
+            action_id="action-1",
+            conversation_id=1,
+            sender_id=get_chat_provider().authorized_user_id,
+            message_id=321,
+            data=f"approval:{approval_id}:approve",
+        )
+
+        with patch(
+            "approval.sync_goal_pin",
+            AsyncMock(side_effect=RuntimeError("presentation unavailable")),
+        ):
+            handled = await handle_approval_action(action)
+
+        self.assertTrue(handled)
+        self.assertEqual(future.result(), "approve")
+
     async def test_stale_owner_cannot_clear_newer_slot_occupant(
         self,
     ) -> None:

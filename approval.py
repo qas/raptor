@@ -90,10 +90,15 @@ async def finalize_approval_message(
     if chat_id is None:
         return
 
-    await sync_goal_pin(
-        chat_id,
-        released_owner="approval:" + approval_id,
-    )
+    try:
+        await sync_goal_pin(
+            chat_id,
+            released_owner="approval:" + approval_id,
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        log_exception("approval", "status_cleanup_error", exc)
 
 
 async def request_tool_approval(
@@ -141,6 +146,12 @@ async def request_tool_approval(
         )
         entry["message_id"] = message_id
         await suspend_goal_pin(chat_id)
+    except asyncio.CancelledError:
+        pending_approvals.pop(approval_id, None)
+        if not future.done():
+            future.cancel()
+        await finalize_approval_message(entry, "cancelled")
+        raise
     except Exception:
         pending_approvals.pop(approval_id, None)
         await sync_goal_pin(chat_id)
@@ -344,6 +355,10 @@ async def handle_approval_action(action: IncomingAction) -> bool:
         "Approved" if decision == "approve" else "Denied",
     )
 
+    future.set_result(
+        decision
+    )
+
     await finalize_approval_message(
         entry,
         (
@@ -353,7 +368,4 @@ async def handle_approval_action(action: IncomingAction) -> bool:
         ),
     )
 
-    future.set_result(
-        decision
-    )
     return True
