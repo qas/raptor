@@ -108,5 +108,16 @@ Provide a concise description of the problem and solution, list the tests you
 ran, and call out any storage, configuration, protocol, security, or operational
 impact. Keep the change reviewable as one complete vertical slice.
 
+Use Conventional Commits for commit messages, without scopes:
+
+```text
+feat: add background shell sessions
+fix: preserve cancellation during retries
+docs: clarify provider configuration
+```
+
+Choose the type that describes the user-visible purpose of the change. Keep
+commits focused, independently understandable, and free of unrelated cleanup.
+
 By contributing, you agree that your contribution is licensed under the MIT
 License included with this project.
