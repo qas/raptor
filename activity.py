@@ -6,12 +6,15 @@ from typing import Any, Protocol, runtime_checkable
 
 from chat_provider import ConversationId
 from chat_runtime import get_chat_provider
+from config import MAX_TOOL_OUTPUT
 from observability import log_exception
 import session
 
 
 ACTIVITY_UPDATE_INTERVAL_SECONDS = 1.5
 MAX_ACTIVITY_FIELD_CHARS = 600
+MAX_ACTIVITY_MESSAGE_CHARS = MAX_TOOL_OUTPUT
+MAX_ACTIVITY_STREAM_CHARS = MAX_TOOL_OUTPUT
 
 
 def _bounded_activity_field(value: Any) -> str:
@@ -23,9 +26,13 @@ def _bounded_activity_field(value: Any) -> str:
 
 def _bounded_activity_stream(value: Any) -> str:
     text = str(value or "")
-    if len(text) <= MAX_ACTIVITY_FIELD_CHARS:
+    if len(text) <= MAX_ACTIVITY_STREAM_CHARS:
         return text
-    return "..." + text[-(MAX_ACTIVITY_FIELD_CHARS - 3):]
+    return "..." + text[-(MAX_ACTIVITY_STREAM_CHARS - 3):]
+
+
+def _bounded_activity_message(value: Any) -> str:
+    return str(value or "")[:MAX_ACTIVITY_MESSAGE_CHARS]
 
 
 @dataclass(frozen=True)
@@ -43,12 +50,13 @@ class ActivitySnapshot:
 
 @runtime_checkable
 class ActivitySurfaceProvider(Protocol):
-    """Optional provider extension for ephemeral activity surfaces."""
+    """Optional provider extension for isolated background-agent output."""
 
     async def open_activity_surface(
         self,
         conversation_id: ConversationId,
         snapshot: ActivitySnapshot,
+        existing_surface_id: str | None = None,
     ) -> str | None: ...
 
     async def update_activity_surface(
@@ -212,13 +220,13 @@ def _snapshot(
     result = str(record.get("result") or record.get("error") or "")
     return ActivitySnapshot(
         activity_id=_bounded_activity_field(record.get("id")),
-        title=_bounded_activity_field(
+        title=_bounded_activity_message(
             record.get("last_task") or record.get("task") or "Subagent"
         ),
         status=_bounded_activity_field(status),
         detail=_bounded_activity_field(detail),
         result=(
-            _bounded_activity_field(result)
+            _bounded_activity_message(result)
             if status != "running"
             else ""
         ),
@@ -231,10 +239,12 @@ async def open_subagent_activity(record: dict[str, Any]) -> None:
     if not isinstance(provider, ActivitySurfaceProvider):
         return
     snapshot = _snapshot(record, detail="Starting")
+    existing_surface_id = str(record.get("activity_surface_id") or "") or None
     try:
         surface_id = await provider.open_activity_surface(
             record["chat_id"],
             snapshot,
+            existing_surface_id,
         )
     except Exception as exc:
         log_exception(

@@ -165,6 +165,7 @@ class FakeProvider:
 
 class ChatProviderContractTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
+        session.set_default_chat("room-1")
         self.provider = FakeProvider()
         self.previous_provider = set_chat_provider(self.provider)
         session.current_runtime().pinned_status_conversation_id = None
@@ -698,7 +699,9 @@ class TelegramNormalizationTests(unittest.TestCase):
         import telegram
 
         provider = telegram.TelegramProvider()
-        provider._chats[1].activity_topic_ids.add(42)
+        provider._chats[1].activity_topics[42] = (
+            telegram._TelegramActivityTopic()
+        )
         event = provider.normalize_update(
             {
                 "message": {
@@ -720,7 +723,9 @@ class TelegramNormalizationTests(unittest.TestCase):
 
         with patch.object(telegram, "TG_CHAT_IDS", (1, 2)):
             provider = telegram.TelegramProvider()
-        provider._chats[1].activity_topic_ids.add(42)
+        provider._chats[1].activity_topics[42] = (
+            telegram._TelegramActivityTopic()
+        )
 
         first_chat = provider.normalize_update(
             {
@@ -775,6 +780,7 @@ class TelegramMultiChatTests(unittest.IsolatedAsyncioTestCase):
                 {
                     "status": "administrator",
                     "can_manage_topics": True,
+                    "can_delete_messages": True,
                 },
                 True,
             ]
@@ -811,6 +817,31 @@ class TelegramMultiChatTests(unittest.IsolatedAsyncioTestCase):
             ],
         )
 
+    async def test_initialize_requires_read_only_topic_permissions(
+        self,
+    ) -> None:
+        import telegram
+
+        call = AsyncMock(
+            side_effect=[
+                True,
+                {"type": "supergroup", "is_forum": True},
+                {"id": 99},
+                {
+                    "status": "administrator",
+                    "can_manage_topics": True,
+                    "can_delete_messages": False,
+                },
+            ]
+        )
+        with (
+            patch.object(telegram, "TG_CHAT_IDS", (-1002,)),
+            patch.object(telegram, "_client", AsyncMock()),
+            patch.object(telegram, "tg_call", call),
+            self.assertRaisesRegex(RuntimeError, "Delete Messages"),
+        ):
+            await telegram.TelegramProvider().initialize(())
+
     async def test_drafts_are_routed_only_to_private_chats(self) -> None:
         import telegram
 
@@ -834,39 +865,126 @@ class TelegramMultiChatTests(unittest.IsolatedAsyncioTestCase):
             provider = telegram.TelegramProvider()
         provider._chats[-1001].is_forum = True
         provider._chats[-1002].is_forum = True
-        provider._chats[-1001].activity_topic_ids.add(42)
-        provider._chats[-1002].activity_topic_ids.add(42)
+        provider._chats[-1001].activity_topics[42] = (
+            telegram._TelegramActivityTopic()
+        )
+        provider._chats[-1002].activity_topics[42] = (
+            telegram._TelegramActivityTopic()
+        )
         snapshot = ActivitySnapshot(
             activity_id="worker",
             title="Inspect target",
             status="completed",
+            result="done",
         )
 
-        with (
-            patch.object(telegram, "_edit_rich_message", AsyncMock()),
-            patch.object(telegram, "_delete_forum_topic", AsyncMock()),
-        ):
+        delivery = AsyncMock()
+        with patch.object(telegram, "send", delivery):
             await provider.close_activity_surface(
                 "-1001/10",
                 "42/77",
                 snapshot,
             )
 
-        self.assertNotIn(42, provider._chats[-1001].activity_topic_ids)
-        self.assertIn(42, provider._chats[-1002].activity_topic_ids)
+        delivery.assert_awaited_once_with("-1001/42", "done")
+        self.assertIn(42, provider._chats[-1001].activity_topics)
+        self.assertIn(42, provider._chats[-1002].activity_topics)
 
 
 class TelegramTransportTests(unittest.IsolatedAsyncioTestCase):
-    async def test_activity_topic_is_created_and_deleted(self) -> None:
+    async def test_poll_deletes_and_discards_activity_topic_input(
+        self,
+    ) -> None:
+        import telegram
+
+        provider = telegram.TelegramProvider()
+        provider._chats[1].activity_topics[42] = (
+            telegram._TelegramActivityTopic()
+        )
+        call = AsyncMock(
+            side_effect=[
+                [
+                    {
+                        "update_id": 12,
+                        "message": {
+                            "message_id": 10,
+                            "message_thread_id": 42,
+                            "is_topic_message": True,
+                            "from": {"id": 1, "is_bot": False},
+                            "chat": {"id": 1, "type": "supergroup"},
+                            "text": "remove me",
+                        },
+                    }
+                ],
+                True,
+            ]
+        )
+
+        with patch.object(telegram, "tg_call", call):
+            result = await provider.poll(None, timeout=30)
+
+        self.assertEqual(result.events, ())
+        self.assertEqual(result.cursor, 13)
+        self.assertEqual(
+            [entry.args for entry in call.await_args_list],
+            [
+                (
+                    "getUpdates",
+                    {
+                        "timeout": 30,
+                        "allowed_updates": ["message", "callback_query"],
+                    },
+                ),
+                ("deleteMessage", {"chat_id": 1, "message_id": 10}),
+            ],
+        )
+
+    async def test_poll_propagates_transient_activity_input_delete_failure(
+        self,
+    ) -> None:
+        import telegram
+
+        provider = telegram.TelegramProvider()
+        provider._chats[1].activity_topics[42] = (
+            telegram._TelegramActivityTopic()
+        )
+        update = {
+            "update_id": 12,
+            "message": {
+                "message_id": 10,
+                "message_thread_id": 42,
+                "is_topic_message": True,
+                "from": {"id": 1, "is_bot": False},
+                "chat": {"id": 1, "type": "supergroup"},
+                "text": "remove me",
+            },
+        }
+        error = telegram.TelegramApiError(
+            "deleteMessage",
+            status_code=500,
+            error_code=500,
+            description="Internal Server Error",
+        )
+
+        with (
+            patch.object(
+                telegram,
+                "tg_call",
+                AsyncMock(side_effect=[[update], error]),
+            ),
+            self.assertRaises(telegram.TelegramApiError),
+        ):
+            await provider.poll(None, timeout=30)
+
+    async def test_activity_topic_keeps_plain_task_and_result(self) -> None:
         import telegram
         from activity import ActivitySnapshot
 
         provider = telegram.TelegramProvider()
         provider._chats[1].is_forum = True
-        call = AsyncMock(
-            side_effect=[{"message_thread_id": 42}, True]
-        )
-        rich = AsyncMock(return_value={"message_id": 77})
+        call = AsyncMock(return_value={"message_thread_id": 42})
+        task_delivery = AsyncMock(return_value=77)
+        delivery = AsyncMock()
         snapshot = ActivitySnapshot(
             activity_id="worker",
             title="Inspect target",
@@ -874,7 +992,8 @@ class TelegramTransportTests(unittest.IsolatedAsyncioTestCase):
         )
         with (
             patch.object(telegram, "tg_call", call),
-            patch.object(telegram, "send_rich", rich),
+            patch.object(telegram, "_send_messages", task_delivery),
+            patch.object(telegram, "send", delivery),
         ):
             surface_id = await provider.open_activity_surface("1/10", snapshot)
             await provider.close_activity_surface(
@@ -889,31 +1008,142 @@ class TelegramTransportTests(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertEqual(surface_id, "42/77")
-        self.assertEqual(call.await_args_list[0].args[0], "createForumTopic")
+        call.assert_awaited_once()
+        self.assertEqual(call.await_args.args[0], "createForumTopic")
         self.assertEqual(
-            call.await_args_list[0].args[1]["name"],
+            call.await_args.args[1]["name"],
             "Subagent: worker",
         )
-        self.assertIn("Subagent: worker", rich.await_args_list[0].args[2])
-        self.assertEqual(call.await_args_list[1].args[0], "deleteForumTopic")
-        self.assertNotIn(42, provider._chats[1].activity_topic_ids)
+        self.assertEqual(
+            task_delivery.await_args.args,
+            ("1/42", "Inspect target"),
+        )
+        delivery.assert_awaited_once_with("1/42", "done")
+        self.assertIn(42, provider._chats[1].activity_topics)
 
-    def test_activity_text_includes_reasoning_and_reply(self) -> None:
+    async def test_activity_stream_uses_plain_reasoning_and_reply_messages(
+        self,
+    ) -> None:
         import telegram
         from activity import ActivitySnapshot
 
-        text = telegram._activity_text(
-            ActivitySnapshot(
-                activity_id="worker",
-                title="Inspect target",
-                status="running",
-                reasoning_summary="Checking files",
-                reply="I found the issue",
-            )
+        provider = telegram.TelegramProvider()
+        provider._chats[1].is_forum = True
+        provider._chats[1].activity_topics[42] = (
+            telegram._TelegramActivityTopic()
+        )
+        rich = AsyncMock(
+            side_effect=[{"message_id": 70}, {"message_id": 71}]
+        )
+        snapshot = ActivitySnapshot(
+            activity_id="worker",
+            title="Inspect target",
+            status="running",
+            reasoning_summary="Checking files",
+            reply="I found the issue",
         )
 
-        self.assertIn("Reasoning\nChecking files", text)
-        self.assertIn("Reply\nI found the issue", text)
+        with patch.object(telegram, "send_rich", rich):
+            await provider.update_activity_surface("1/10", "42/77", snapshot)
+            await provider.update_activity_surface(
+                "1/10",
+                "42/77",
+                ActivitySnapshot(
+                    activity_id="worker",
+                    title="Inspect target",
+                    status="running",
+                    detail="Running a tool",
+                    reasoning_summary="Checking files",
+                    reply="I found the issue",
+                ),
+            )
+
+        self.assertEqual(
+            [entry.args[2] for entry in rich.await_args_list],
+            ["Checking files", "I found the issue"],
+        )
+        cleanup = AsyncMock()
+        delivery = AsyncMock()
+        with (
+            patch.object(provider, "delete_message", cleanup),
+            patch.object(telegram, "send", delivery),
+        ):
+            await provider.close_activity_surface(
+                "1/10",
+                "42/77",
+                ActivitySnapshot(
+                    activity_id="worker",
+                    title="Inspect target",
+                    status="completed",
+                    result="I found the complete issue",
+                ),
+            )
+
+        cleanup.assert_awaited_once_with(1, 71)
+        delivery.assert_awaited_once_with(
+            "1/42",
+            "I found the complete issue",
+        )
+        self.assertIn(42, provider._chats[1].activity_topics)
+
+    async def test_existing_subagent_topic_is_reused(self) -> None:
+        import telegram
+        from activity import ActivitySnapshot
+
+        provider = telegram.TelegramProvider()
+        provider._chats[1].is_forum = True
+        delivery = AsyncMock()
+        snapshot = ActivitySnapshot(
+            activity_id="worker",
+            title="Continue the review",
+            status="running",
+        )
+
+        with (
+            patch.object(telegram, "send", delivery),
+            patch.object(telegram, "tg_call", AsyncMock()) as call,
+        ):
+            surface_id = await provider.open_activity_surface(
+                "1/10",
+                snapshot,
+                "42/77",
+            )
+
+        self.assertEqual(surface_id, "42/77")
+        delivery.assert_awaited_once_with("1/42", "Continue the review")
+        call.assert_not_awaited()
+        self.assertIn(42, provider._chats[1].activity_topics)
+
+    async def test_activity_update_propagates_real_edit_errors(self) -> None:
+        import telegram
+        from activity import ActivitySnapshot
+
+        provider = telegram.TelegramProvider()
+        provider._chats[1].activity_topics[42] = (
+            telegram._TelegramActivityTopic(reply_message_id=77)
+        )
+        error = telegram.TelegramApiError(
+            "editMessageText",
+            status_code=400,
+            error_code=400,
+            description="Bad Request: message to edit not found",
+        )
+        snapshot = ActivitySnapshot(
+            activity_id="worker",
+            title="Inspect target",
+            status="running",
+            reply="Updated finding",
+        )
+
+        with (
+            patch.object(
+                telegram,
+                "_edit_rich_message",
+                AsyncMock(side_effect=error),
+            ),
+            self.assertRaises(telegram.TelegramApiError),
+        ):
+            await provider.update_activity_surface("1/10", "42/77", snapshot)
 
     async def test_unchanged_message_edit_is_a_successful_noop(self) -> None:
         import telegram
@@ -933,32 +1163,6 @@ class TelegramTransportTests(unittest.IsolatedAsyncioTestCase):
             await telegram.TelegramProvider().edit_message(1, 7, "unchanged")
 
         rich.assert_awaited_once()
-
-    async def test_activity_update_propagates_real_edit_errors(self) -> None:
-        import telegram
-        from activity import ActivitySnapshot
-
-        error = telegram.TelegramApiError(
-            "editMessageText",
-            status_code=400,
-            error_code=400,
-            description="Bad Request: message to edit not found",
-        )
-        snapshot = ActivitySnapshot(
-            activity_id="worker",
-            title="Inspect target",
-            status="running",
-        )
-
-        with (
-            patch.object(telegram, "send_rich", AsyncMock(side_effect=error)),
-            self.assertRaises(telegram.TelegramApiError),
-        ):
-            await telegram.TelegramProvider().update_activity_surface(
-                "1/10",
-                "42/77",
-                snapshot,
-            )
 
     async def test_chat_requests_are_spaced(self) -> None:
         import telegram

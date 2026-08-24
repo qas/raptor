@@ -365,14 +365,25 @@ class MultiProvider:
         self,
         conversation_id: ConversationId,
         snapshot: ActivitySnapshot,
+        existing_surface_id: str | None = None,
     ) -> str | None:
         provider, raw_id = self._route_conversation(conversation_id)
         if not isinstance(provider, ActivitySurfaceProvider):
             return None
-        surface_id = await provider.open_activity_surface(raw_id, snapshot)
-        if not surface_id:
+        nested_id: str | None = None
+        if existing_surface_id is not None:
+            nested_id = self._route_activity_surface(
+                conversation_id,
+                existing_surface_id,
+            )[2]
+        opened_id = await provider.open_activity_surface(
+            raw_id,
+            snapshot,
+            nested_id,
+        )
+        if not opened_id:
             return None
-        return f"{provider.name}:{surface_id}"
+        return f"{provider.name}:{opened_id}"
 
     def _route_activity_surface(
         self,

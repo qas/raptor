@@ -616,7 +616,7 @@ async def run_subagent(
         )
 
     async def execute_call(call: dict[str, Any]) -> dict[str, Any]:
-            # Keep chat_history scoped to this subagent transcript.
+        # Keep chat_history scoped to this subagent transcript.
         tool_context = dict(record)
         tool_context["session_id"] = session_id
         tool_context["todo_state"] = record
@@ -943,7 +943,6 @@ def continue_record(
     record[
         "completion_attempts"
     ] = 0
-    record["activity_surface_id"] = None
     record["activity_surface_closed"] = True
     save_state()
 

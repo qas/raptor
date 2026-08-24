@@ -406,6 +406,7 @@ class BackgroundSubagentTests(unittest.IsolatedAsyncioTestCase):
             "session_id": "subagent-session",
             "status": "completed",
             "task_count": 4,
+            "activity_surface_id": "telegram:42/77",
         }
         with (
             patch.object(subagents, "append_item"),
@@ -421,6 +422,10 @@ class BackgroundSubagentTests(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertEqual(record["task_count"], 5)
+        self.assertEqual(
+            record["activity_surface_id"],
+            "telegram:42/77",
+        )
         self.assertNotIn("tasks", record)
 
     def test_record_retention_excludes_protected_records_from_limit(self) -> None:

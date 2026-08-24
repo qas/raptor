@@ -30,6 +30,7 @@ _client: httpx.AsyncClient | None = None
 
 _CHAT_REQUEST_INTERVAL = 1.1
 _GLOBAL_REQUEST_INTERVAL = 1.0 / 28.0
+_MESSAGE_PREVIEW_LIMIT = 3900
 _PACED_CHAT_METHODS = frozenset(
     {
         "deletemessage",
@@ -113,25 +114,6 @@ def _parse_activity_surface_id(value: str) -> tuple[int, int]:
     if topic_id <= 1 or message_id <= 0:
         raise ValueError("invalid Telegram activity surface")
     return topic_id, message_id
-
-
-def _activity_text(snapshot: ActivitySnapshot) -> str:
-    lines = [
-        f"Subagent: {snapshot.activity_id}",
-        "",
-        f"Task: {snapshot.title}",
-        f"Status: {snapshot.status}",
-    ]
-    if snapshot.detail:
-        lines.extend(("", snapshot.detail))
-    if snapshot.reasoning_summary:
-        lines.extend(("", "Reasoning", snapshot.reasoning_summary))
-    if snapshot.reply:
-        lines.extend(("", "Reply", snapshot.reply))
-    elif snapshot.result:
-        lines.extend(("", "Result", snapshot.result))
-    lines.extend(("", "Read-only. Steer from the parent chat."))
-    return "\n".join(lines)
 
 
 async def _delete_forum_topic(chat_id: int, topic_id: int) -> None:
@@ -708,10 +690,38 @@ async def _edit_rich_message(
         raise
 
 
-async def send(
+async def _upsert_topic_message(
+    chat_id: int,
+    topic_id: int,
+    message_id: int | None,
+    text: str,
+) -> int:
+    preview = (
+        text[-_MESSAGE_PREVIEW_LIMIT:]
+        if len(text) > _MESSAGE_PREVIEW_LIMIT
+        else text
+    )
+    if message_id is not None:
+        await _edit_rich_message(
+            {"chat_id": chat_id, "message_id": message_id},
+            preview,
+        )
+        return message_id
+    result = await send_rich(
+        "sendMessage",
+        {"chat_id": chat_id, "message_thread_id": topic_id},
+        preview,
+    )
+    created_id = result.get("message_id") if isinstance(result, dict) else None
+    if not isinstance(created_id, int):
+        raise RuntimeError("Telegram returned no message_id")
+    return created_id
+
+
+async def _send_messages(
     conversation_id: ConversationId,
     text: str,
-) -> None:
+) -> int:
     chat_id, _thread_id = _telegram_destination(conversation_id)
     log_event(
         "telegram",
@@ -721,14 +731,30 @@ async def send(
             "text_chars": len(text),
         },
     )
-    for part in split_message(
-        text
-    ):
-        await send_rich(
+    first_message_id: int | None = None
+    for part in split_message(text):
+        result = await send_rich(
             "sendMessage",
             _telegram_payload(conversation_id),
             part,
         )
+        message_id = (
+            result.get("message_id") if isinstance(result, dict) else None
+        )
+        if not isinstance(message_id, int):
+            raise RuntimeError("Telegram returned no message_id")
+        if first_message_id is None:
+            first_message_id = message_id
+    if first_message_id is None:
+        raise RuntimeError("Telegram message must not be empty")
+    return first_message_id
+
+
+async def send(
+    conversation_id: ConversationId,
+    text: str,
+) -> None:
+    await _send_messages(conversation_id, text)
 
 
 async def send_draft(
@@ -737,8 +763,8 @@ async def send_draft(
     text: str,
 ) -> None:
     preview = (
-        text[-3900:]
-        if len(text) > 3900
+        text[-_MESSAGE_PREVIEW_LIMIT:]
+        if len(text) > _MESSAGE_PREVIEW_LIMIT
         else text
     )
 
@@ -771,10 +797,20 @@ def _reply_markup(controls: Controls) -> dict[str, Any] | None:
 
 
 @dataclass
+class _TelegramActivityTopic:
+    reasoning_message_id: int | None = None
+    reasoning_text: str = ""
+    reply_message_id: int | None = None
+    reply_text: str = ""
+
+
+@dataclass
 class _TelegramChat:
     chat_type: str = ""
     is_forum: bool = False
-    activity_topic_ids: set[int] = field(default_factory=set)
+    activity_topics: dict[int, _TelegramActivityTopic] = field(
+        default_factory=dict
+    )
 
 
 class TelegramProvider:
@@ -806,7 +842,7 @@ class TelegramProvider:
         chat = self._chats.get(chat_id) if isinstance(chat_id, int) else None
         if chat is None:
             return False
-        return thread_id not in chat.activity_topic_ids
+        return thread_id not in chat.activity_topics
 
     async def initialize(
         self,
@@ -872,12 +908,18 @@ class TelegramProvider:
                     isinstance(member, dict)
                     and member.get("can_manage_topics")
                 )
+                can_delete_messages = bool(
+                    isinstance(member, dict)
+                    and member.get("can_delete_messages")
+                )
                 if status != "creator" and not (
-                    status == "administrator" and can_manage_topics
+                    status == "administrator"
+                    and can_manage_topics
+                    and can_delete_messages
                 ):
                     raise RuntimeError(
-                        "Telegram forum mode requires Manage Topics "
-                        f"permission in chat {chat_id}"
+                        "Telegram forum mode requires Manage Topics and "
+                        f"Delete Messages permissions in chat {chat_id}"
                     )
         await tg_call(
             "setMyCommands",
@@ -962,10 +1004,49 @@ class TelegramProvider:
             update_id = update.get("update_id")
             if isinstance(update_id, int):
                 next_cursor = update_id + 1
+            if await self._delete_activity_topic_input(update):
+                continue
             event = self.normalize_update(update)
             if event is not None:
                 events.append(event)
         return PollResult(tuple(events), next_cursor)
+
+    async def _delete_activity_topic_input(
+        self,
+        update: dict[str, Any],
+    ) -> bool:
+        message = update.get("message")
+        if not isinstance(message, dict):
+            return False
+        sender = message.get("from")
+        if not isinstance(sender, dict) or sender.get("is_bot"):
+            return False
+        chat_value = message.get("chat")
+        chat_id = chat_value.get("id") if isinstance(chat_value, dict) else None
+        message_id = message.get("message_id")
+        topic_id = _message_thread_id(message)
+        chat = self._chats.get(chat_id) if isinstance(chat_id, int) else None
+        if (
+            chat is None
+            or topic_id not in chat.activity_topics
+            or not isinstance(message_id, int)
+        ):
+            return False
+        try:
+            await tg_call(
+                "deleteMessage",
+                {"chat_id": chat_id, "message_id": message_id},
+            )
+        except TelegramApiError as exc:
+            if not exc.is_bad_request:
+                raise
+            log_exception(
+                "telegram",
+                "activity_input_delete_error",
+                exc,
+                {"chat_id": chat_id, "message_id": message_id},
+            )
+        return True
 
     async def send_text(self, conversation_id, text: str) -> None:
         await send(conversation_id, text)
@@ -1096,11 +1177,22 @@ class TelegramProvider:
         self,
         conversation_id: ConversationId,
         snapshot: ActivitySnapshot,
+        existing_surface_id: str | None = None,
     ) -> str | None:
         chat_id, _parent_thread_id = _telegram_destination(conversation_id)
         chat = self._chats.get(chat_id)
         if chat is None or not chat.is_forum:
             return None
+        if existing_surface_id is not None:
+            topic_id, _task_message_id = _parse_activity_surface_id(
+                existing_surface_id
+            )
+            chat.activity_topics[topic_id] = _TelegramActivityTopic()
+            await send(
+                _telegram_conversation_id(chat_id, topic_id),
+                snapshot.title,
+            )
+            return existing_surface_id
         topic_name = f"Subagent: {snapshot.activity_id}"
         topic = await tg_call(
             "createForumTopic",
@@ -1111,21 +1203,16 @@ class TelegramProvider:
         )
         if not isinstance(topic_id, int) or topic_id <= 1:
             raise RuntimeError("Telegram returned no forum topic ID")
-        chat.activity_topic_ids.add(topic_id)
+        chat.activity_topics[topic_id] = _TelegramActivityTopic()
+        topic_conversation = _telegram_conversation_id(chat_id, topic_id)
         try:
-            result = await send_rich(
-                "sendMessage",
-                {"chat_id": chat_id, "message_thread_id": topic_id},
-                _activity_text(snapshot),
+            task_message_id = await _send_messages(
+                topic_conversation,
+                snapshot.title,
             )
-            message_id = (
-                result.get("message_id") if isinstance(result, dict) else None
-            )
-            if not isinstance(message_id, int):
-                raise RuntimeError("Telegram returned no activity message ID")
-            return _activity_surface_id(topic_id, message_id)
+            return _activity_surface_id(topic_id, task_message_id)
         except asyncio.CancelledError:
-            chat.activity_topic_ids.discard(topic_id)
+            chat.activity_topics.pop(topic_id, None)
             try:
                 await _delete_forum_topic(chat_id, topic_id)
             except Exception as exc:
@@ -1137,7 +1224,7 @@ class TelegramProvider:
                 )
             raise
         except Exception:
-            chat.activity_topic_ids.discard(topic_id)
+            chat.activity_topics.pop(topic_id, None)
             try:
                 await _delete_forum_topic(chat_id, topic_id)
             except Exception as exc:
@@ -1156,11 +1243,54 @@ class TelegramProvider:
         snapshot: ActivitySnapshot,
     ) -> None:
         chat_id, _parent_thread_id = _telegram_destination(conversation_id)
-        _topic_id, message_id = _parse_activity_surface_id(surface_id)
-        await _edit_rich_message(
-            {"chat_id": chat_id, "message_id": message_id},
-            _activity_text(snapshot),
+        topic_id, _task_message_id = _parse_activity_surface_id(surface_id)
+        chat = self._chats.get(chat_id)
+        if chat is None:
+            raise ValueError("activity surface belongs to another Telegram chat")
+        topic = chat.activity_topics.setdefault(
+            topic_id,
+            _TelegramActivityTopic(),
         )
+        await self._update_activity_topic_output(
+            chat_id,
+            topic_id,
+            topic,
+            snapshot,
+            include_reply=True,
+        )
+
+    async def _update_activity_topic_output(
+        self,
+        chat_id: int,
+        topic_id: int,
+        topic: _TelegramActivityTopic,
+        snapshot: ActivitySnapshot,
+        *,
+        include_reply: bool,
+    ) -> None:
+        if (
+            snapshot.reasoning_summary
+            and snapshot.reasoning_summary != topic.reasoning_text
+        ):
+            topic.reasoning_message_id = await _upsert_topic_message(
+                chat_id,
+                topic_id,
+                topic.reasoning_message_id,
+                snapshot.reasoning_summary,
+            )
+            topic.reasoning_text = snapshot.reasoning_summary
+        if (
+            include_reply
+            and snapshot.reply
+            and snapshot.reply != topic.reply_text
+        ):
+            topic.reply_message_id = await _upsert_topic_message(
+                chat_id,
+                topic_id,
+                topic.reply_message_id,
+                snapshot.reply,
+            )
+            topic.reply_text = snapshot.reply
 
     async def close_activity_surface(
         self,
@@ -1169,25 +1299,40 @@ class TelegramProvider:
         snapshot: ActivitySnapshot,
     ) -> None:
         chat_id, _parent_thread_id = _telegram_destination(conversation_id)
-        topic_id, message_id = _parse_activity_surface_id(surface_id)
-        try:
-            await _edit_rich_message(
-                {"chat_id": chat_id, "message_id": message_id},
-                _activity_text(snapshot),
-            )
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            log_exception(
-                "telegram",
-                "activity_final_update_error",
-                exc,
-                {"chat_id": chat_id, "topic_id": topic_id},
-            )
-        await _delete_forum_topic(chat_id, topic_id)
+        topic_id, _task_message_id = _parse_activity_surface_id(surface_id)
         chat = self._chats.get(chat_id)
-        if chat is not None:
-            chat.activity_topic_ids.discard(topic_id)
+        if chat is None:
+            raise ValueError("activity surface belongs to another Telegram chat")
+        topic = chat.activity_topics.setdefault(
+            topic_id,
+            _TelegramActivityTopic(),
+        )
+        await self._update_activity_topic_output(
+            chat_id,
+            topic_id,
+            topic,
+            snapshot,
+            include_reply=False,
+        )
+        if topic.reply_message_id is not None:
+            try:
+                await self.delete_message(chat_id, topic.reply_message_id)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                log_exception(
+                    "telegram",
+                    "activity_preview_cleanup_error",
+                    exc,
+                    {"chat_id": chat_id, "topic_id": topic_id},
+                )
+            topic.reply_message_id = None
+            topic.reply_text = ""
+        if snapshot.result:
+            await send(
+                _telegram_conversation_id(chat_id, topic_id),
+                snapshot.result,
+            )
 
     def restore_activity_surface(
         self,
@@ -1200,8 +1345,8 @@ class TelegramProvider:
             raise ValueError(
                 "activity surface belongs to an unconfigured Telegram forum"
             )
-        topic_id, _message_id = _parse_activity_surface_id(surface_id)
-        chat.activity_topic_ids.add(topic_id)
+        topic_id, _task_message_id = _parse_activity_surface_id(surface_id)
+        chat.activity_topics.setdefault(topic_id, _TelegramActivityTopic())
 
     async def answer_action(
         self,

@@ -27,6 +27,7 @@ class RecordingActivityProvider:
         self,
         _conversation_id,
         snapshot,
+        _existing_surface_id=None,
     ) -> str:
         self.opened.append(snapshot)
         return "surface"
@@ -89,19 +90,23 @@ class ActivityProjectionTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(provider.updates, [changed])
 
-    async def test_public_activity_fields_are_bounded(self) -> None:
+    async def test_metadata_and_messages_use_their_respective_bounds(
+        self,
+    ) -> None:
         provider = RecordingActivityProvider()
+        message = "x" * (activity.MAX_ACTIVITY_MESSAGE_CHARS + 1)
         record = {
             "id": "i" * 2_000,
-            "task": "t" * 2_000,
+            "task": message,
             "status": "completed",
-            "result": "r" * 2_000,
+            "result": message,
             "chat_id": "conversation",
             "activity_surface_id": None,
             "activity_surface_closed": True,
         }
 
         with (
+            activity.session.bound_chat("conversation"),
             patch.object(activity, "get_chat_provider", return_value=provider),
             patch.object(activity.session, "save_state"),
             patch.object(activity, "ACTIVITY_UPDATE_INTERVAL_SECONDS", 0),
@@ -121,15 +126,19 @@ class ActivityProjectionTests(unittest.IsolatedAsyncioTestCase):
             len(snapshot.activity_id),
             activity.MAX_ACTIVITY_FIELD_CHARS,
         )
-        self.assertLessEqual(
+        self.assertEqual(
             len(snapshot.title),
-            activity.MAX_ACTIVITY_FIELD_CHARS,
+            activity.MAX_ACTIVITY_MESSAGE_CHARS,
         )
         self.assertLessEqual(
             len(snapshot.detail),
             activity.MAX_ACTIVITY_FIELD_CHARS,
         )
-        self.assertLessEqual(
+        self.assertEqual(
+            len(snapshot.result),
+            activity.MAX_ACTIVITY_MESSAGE_CHARS,
+        )
+        self.assertGreater(
             len(snapshot.result),
             activity.MAX_ACTIVITY_FIELD_CHARS,
         )
@@ -146,6 +155,7 @@ class ActivityProjectionTests(unittest.IsolatedAsyncioTestCase):
         }
 
         with (
+            activity.session.bound_chat("conversation"),
             patch.object(activity, "get_chat_provider", return_value=provider),
             patch.object(activity.session, "save_state"),
             patch.object(activity, "ACTIVITY_UPDATE_INTERVAL_SECONDS", 0),
@@ -179,7 +189,7 @@ class ActivityProjectionTests(unittest.IsolatedAsyncioTestCase):
             "surface",
             initial,
         )
-        reply = "old" * 300 + "latest"
+        reply = "old" * 11_000 + "latest"
 
         with patch.object(activity, "ACTIVITY_UPDATE_INTERVAL_SECONDS", 0):
             projection.publish_response(reply=reply)
@@ -187,7 +197,7 @@ class ActivityProjectionTests(unittest.IsolatedAsyncioTestCase):
             await projection.task
 
         rendered = provider.updates[-1].reply
-        self.assertEqual(len(rendered), activity.MAX_ACTIVITY_FIELD_CHARS)
+        self.assertEqual(len(rendered), activity.MAX_ACTIVITY_STREAM_CHARS)
         self.assertTrue(rendered.startswith("..."))
         self.assertTrue(rendered.endswith("latest"))
 

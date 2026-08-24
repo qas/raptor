@@ -124,8 +124,20 @@ class QueueProvider:
     ) -> None:
         self.calls.append(("answer", action_id, text, alert))
 
-    async def open_activity_surface(self, conversation_id, snapshot):
-        self.calls.append(("activity_open", conversation_id, snapshot))
+    async def open_activity_surface(
+        self,
+        conversation_id,
+        snapshot,
+        existing_surface_id=None,
+    ):
+        self.calls.append(
+            (
+                "activity_open",
+                conversation_id,
+                snapshot,
+                existing_surface_id,
+            )
+        )
         return "topic/message"
 
     async def update_activity_surface(
@@ -323,6 +335,59 @@ class MultiProviderTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertFalse(
             any(call[0].startswith("activity_") for call in self.api.calls)
+        )
+
+    async def test_existing_activity_surface_reopens_on_same_provider(
+        self,
+    ) -> None:
+        snapshot = ActivitySnapshot(
+            activity_id="worker",
+            title="Continue",
+            status="running",
+        )
+
+        surface_id = await self.multi.open_activity_surface(
+            "telegram:123",
+            snapshot,
+            "telegram:topic/message",
+        )
+
+        self.assertEqual(surface_id, "telegram:topic/message")
+        self.assertEqual(
+            self.telegram.calls[-1],
+            (
+                "activity_open",
+                "123",
+                snapshot,
+                "topic/message",
+            ),
+        )
+
+    async def test_existing_activity_surface_cannot_cross_providers(
+        self,
+    ) -> None:
+        snapshot = ActivitySnapshot(
+            activity_id="worker",
+            title="Continue",
+            status="running",
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "activity surface and conversation differ",
+        ):
+            await self.multi.open_activity_surface(
+                "telegram:123",
+                snapshot,
+                "responses_api:topic/message",
+            )
+
+        self.assertFalse(
+            any(
+                call[0] == "activity_open"
+                for provider in (self.telegram, self.api)
+                for call in provider.calls
+            )
         )
 
     async def test_responses_request_context_survives_multiplexed_poll(self) -> None:
