@@ -12,7 +12,7 @@ import httpx
 _ROOT = Path(__file__).resolve().parent.parent
 os.environ.setdefault("TG_BOT_TOKEN", "test-token")
 os.environ.setdefault("TG_USER_ID", "1")
-os.environ.setdefault("TG_CHAT_ID", "1")
+os.environ.setdefault("TG_CHAT_IDS", "1")
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
@@ -698,7 +698,7 @@ class TelegramNormalizationTests(unittest.TestCase):
         import telegram
 
         provider = telegram.TelegramProvider()
-        provider._activity_topic_ids.add(42)
+        provider._chats[1].activity_topic_ids.add(42)
         event = provider.normalize_update(
             {
                 "message": {
@@ -715,6 +715,146 @@ class TelegramNormalizationTests(unittest.TestCase):
         self.assertIsInstance(event, IncomingMessage)
         self.assertFalse(event.interactive)
 
+    def test_chat_and_topic_membership_are_isolated(self) -> None:
+        import telegram
+
+        with patch.object(telegram, "TG_CHAT_IDS", (1, 2)):
+            provider = telegram.TelegramProvider()
+        provider._chats[1].activity_topic_ids.add(42)
+
+        first_chat = provider.normalize_update(
+            {
+                "message": {
+                    "message_id": 10,
+                    "message_thread_id": 42,
+                    "is_topic_message": True,
+                    "from": {"id": 1},
+                    "chat": {"id": 1, "type": "supergroup"},
+                    "text": "activity input",
+                }
+            }
+        )
+        second_chat = provider.normalize_update(
+            {
+                "message": {
+                    "message_id": 11,
+                    "message_thread_id": 42,
+                    "is_topic_message": True,
+                    "from": {"id": 1},
+                    "chat": {"id": 2, "type": "supergroup"},
+                    "text": "main input",
+                }
+            }
+        )
+        unknown_chat = provider.normalize_update(
+            {
+                "message": {
+                    "message_id": 12,
+                    "from": {"id": 1},
+                    "chat": {"id": 3, "type": "private"},
+                    "text": "unknown input",
+                }
+            }
+        )
+
+        self.assertFalse(first_chat.interactive)
+        self.assertTrue(second_chat.interactive)
+        self.assertFalse(unknown_chat.interactive)
+
+
+class TelegramMultiChatTests(unittest.IsolatedAsyncioTestCase):
+    async def test_initialize_discovers_every_chat_in_order(self) -> None:
+        import telegram
+
+        call = AsyncMock(
+            side_effect=[
+                True,
+                {"type": "private"},
+                {"type": "supergroup", "is_forum": True},
+                {"id": 99},
+                {
+                    "status": "administrator",
+                    "can_manage_topics": True,
+                },
+                True,
+            ]
+        )
+        client = AsyncMock()
+        with (
+            patch.object(telegram, "TG_CHAT_IDS", (7, -1002)),
+            patch.object(telegram, "_client", client),
+            patch.object(telegram, "tg_call", call),
+        ):
+            provider = telegram.TelegramProvider()
+            await provider.initialize(())
+
+        self.assertEqual(provider.primary_conversation_id, "7")
+        self.assertEqual(
+            provider._chats[7].chat_type,
+            "private",
+        )
+        self.assertEqual(provider._chats[-1002].chat_type, "supergroup")
+        self.assertTrue(provider._chats[-1002].is_forum)
+        self.assertTrue(provider.capabilities.drafts)
+        self.assertEqual(
+            [entry.args for entry in call.await_args_list],
+            [
+                ("deleteWebhook", {"drop_pending_updates": False}),
+                ("getChat", {"chat_id": 7}),
+                ("getChat", {"chat_id": -1002}),
+                ("getMe",),
+                (
+                    "getChatMember",
+                    {"chat_id": -1002, "user_id": 99},
+                ),
+                ("setMyCommands", {"commands": []}),
+            ],
+        )
+
+    async def test_drafts_are_routed_only_to_private_chats(self) -> None:
+        import telegram
+
+        with patch.object(telegram, "TG_CHAT_IDS", (7, -1002)):
+            provider = telegram.TelegramProvider()
+        provider._chats[7].chat_type = "private"
+        provider._chats[-1002].chat_type = "supergroup"
+        draft = AsyncMock()
+
+        with patch.object(telegram, "send_draft", draft):
+            await provider.send_draft(7, 1, "private draft")
+            await provider.send_draft(-1002, 2, "group draft")
+
+        draft.assert_awaited_once_with(7, 1, "private draft")
+
+    async def test_activity_topics_are_isolated_by_chat(self) -> None:
+        import telegram
+        from activity import ActivitySnapshot
+
+        with patch.object(telegram, "TG_CHAT_IDS", (-1001, -1002)):
+            provider = telegram.TelegramProvider()
+        provider._chats[-1001].is_forum = True
+        provider._chats[-1002].is_forum = True
+        provider._chats[-1001].activity_topic_ids.add(42)
+        provider._chats[-1002].activity_topic_ids.add(42)
+        snapshot = ActivitySnapshot(
+            activity_id="worker",
+            title="Inspect target",
+            status="completed",
+        )
+
+        with (
+            patch.object(telegram, "_edit_rich_message", AsyncMock()),
+            patch.object(telegram, "_delete_forum_topic", AsyncMock()),
+        ):
+            await provider.close_activity_surface(
+                "-1001/10",
+                "42/77",
+                snapshot,
+            )
+
+        self.assertNotIn(42, provider._chats[-1001].activity_topic_ids)
+        self.assertIn(42, provider._chats[-1002].activity_topic_ids)
+
 
 class TelegramTransportTests(unittest.IsolatedAsyncioTestCase):
     async def test_activity_topic_is_created_and_deleted(self) -> None:
@@ -722,7 +862,7 @@ class TelegramTransportTests(unittest.IsolatedAsyncioTestCase):
         from activity import ActivitySnapshot
 
         provider = telegram.TelegramProvider()
-        provider._forum_enabled = True
+        provider._chats[1].is_forum = True
         call = AsyncMock(
             side_effect=[{"message_thread_id": 42}, True]
         )
@@ -756,7 +896,7 @@ class TelegramTransportTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIn("Subagent: worker", rich.await_args_list[0].args[2])
         self.assertEqual(call.await_args_list[1].args[0], "deleteForumTopic")
-        self.assertNotIn(42, provider._activity_topic_ids)
+        self.assertNotIn(42, provider._chats[1].activity_topic_ids)
 
     def test_activity_text_includes_reasoning_and_reply(self) -> None:
         import telegram

@@ -39,7 +39,7 @@ export RESPONSES_MODEL=your-model
 export CHAT_PROVIDERS=telegram,responses_api
 export TG_BOT_TOKEN=your-telegram-token
 export TG_USER_ID=123456789
-export TG_CHAT_ID=123456789
+export TG_CHAT_IDS=123456789
 
 uv run raptor.py
 ```
@@ -234,13 +234,15 @@ transcript and tool payloads remain isolated. Raptor coalesces updates, treats
 duplicates as no-ops, deletes the topic when the subagent ends, and returns the
 bounded completion to the parent chat.
 
-### Telegram forum mode
+### Telegram chats and forums
 
-Set `TG_CHAT_ID` to a private chat for one main chat, or to a forum-enabled
-supergroup for multichat. In forum mode, the General topic and every normal
-forum topic are independent main-agent chats. The bot must be an administrator
-with **Manage Topics** permission so it can manage temporary subagent activity
-topics. Only `TG_USER_ID` is accepted as interactive input.
+Set `TG_CHAT_IDS` to an ordered, comma-separated list of private chats, groups,
+or supergroups. The first entry is the default chat. Every configured chat is
+an independent main-agent chat; in a forum, the General topic and every normal
+topic are independent chats as well. The bot must be an administrator with
+**Manage Topics** permission in each configured forum so it can manage
+temporary subagent activity topics. Only `TG_USER_ID` is accepted as
+interactive input.
 
 Create and name normal topics with Telegram's standard UI. Raptor discovers a
 topic on its first message and persists its runtime. Activity topics are
@@ -364,7 +366,7 @@ outside the documented ranges stop startup with a configuration error.
 |---|---:|---|
 | `TG_BOT_TOKEN` | empty | Bot token; required when Telegram is enabled |
 | `TG_USER_ID` | `0` | Authorized Telegram user ID |
-| `TG_CHAT_ID` | `TG_USER_ID` | Private chat or forum group served by the bot |
+| `TG_CHAT_IDS` | `TG_USER_ID` | Ordered, comma-separated chats served by the bot |
 | `TELEGRAM_MARKDOWN` | `1` | Enable Telegram Markdown rendering |
 
 ### Inbound Responses API

@@ -12,7 +12,7 @@ os.environ["RAPTOR_HOME"] = str(_HOME)
 os.environ["AGENT_WORKDIR"] = str(_HOME)
 os.environ.setdefault("TG_BOT_TOKEN", "test-token")
 os.environ.setdefault("TG_USER_ID", "1")
-os.environ.setdefault("TG_CHAT_ID", "1")
+os.environ.setdefault("TG_CHAT_IDS", "1")
 
 import activity
 

@@ -56,6 +56,26 @@ def _env_bool(name: str, default: bool) -> bool:
         return False
     raise ValueError(f"{name} must be a boolean")
 
+
+def _env_int_tuple(name: str, default: tuple[int, ...]) -> tuple[int, ...]:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    parts = raw.split(",")
+    if not parts or any(not part.strip() for part in parts):
+        raise ValueError(f"{name} must contain comma-separated integers")
+    try:
+        values = tuple(int(part.strip()) for part in parts)
+    except ValueError as exc:
+        raise ValueError(
+            f"{name} must contain comma-separated integers"
+        ) from exc
+    if any(value == 0 for value in values):
+        raise ValueError(f"{name} entries must not be zero")
+    if len(set(values)) != len(values):
+        raise ValueError(f"{name} entries must be unique")
+    return values
+
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
@@ -99,7 +119,10 @@ RESPONSES_SERVER_MAX_BODY = _env_int(
 # time and validated only when the Telegram provider is initialized.
 TG_BOT_TOKEN = os.getenv("TG_BOT_TOKEN", "")
 TG_USER_ID = _env_int("TG_USER_ID", 0, minimum=0)
-TG_CHAT_ID = _env_int("TG_CHAT_ID", TG_USER_ID)
+TG_CHAT_IDS = _env_int_tuple(
+    "TG_CHAT_IDS",
+    (TG_USER_ID,) if TG_USER_ID else (),
+)
 
 RESPONSES_BASE_URL = os.getenv(
     "RESPONSES_BASE_URL",

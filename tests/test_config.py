@@ -11,7 +11,48 @@ import config
 ROOT = Path(__file__).resolve().parent.parent
 
 
+class TelegramConfigurationTests(unittest.TestCase):
+    def test_telegram_chat_ids_preserve_configured_order(self) -> None:
+        with patch.dict(
+            os.environ,
+            {"TG_USER_ID": "7", "TG_CHAT_IDS": "-1002, 7, -1001"},
+            clear=True,
+        ):
+            values = runpy.run_path(str(ROOT / "config.py"))
+
+        self.assertEqual(values["TG_CHAT_IDS"], (-1002, 7, -1001))
+
+    def test_telegram_chat_ids_default_to_authorized_user(self) -> None:
+        with patch.dict(os.environ, {"TG_USER_ID": "7"}, clear=True):
+            values = runpy.run_path(str(ROOT / "config.py"))
+
+        self.assertEqual(values["TG_CHAT_IDS"], (7,))
+
+    def test_rejects_duplicate_telegram_chat_ids(self) -> None:
+        with patch.dict(
+            os.environ,
+            {"TG_USER_ID": "7", "TG_CHAT_IDS": "7,-1001,7"},
+            clear=True,
+        ):
+            with self.assertRaisesRegex(
+                ValueError,
+                "TG_CHAT_IDS entries must be unique",
+            ):
+                runpy.run_path(str(ROOT / "config.py"))
+
+    def test_rejects_invalid_telegram_chat_ids(self) -> None:
+        for value in ("", "7,,8", "7,chat", "7,0"):
+            with self.subTest(value=value), patch.dict(
+                os.environ,
+                {"TG_USER_ID": "7", "TG_CHAT_IDS": value},
+                clear=True,
+            ):
+                with self.assertRaises(ValueError):
+                    runpy.run_path(str(ROOT / "config.py"))
+
+
 class ContextBudgetTests(unittest.TestCase):
+
     def test_subagent_settings_do_not_inherit_main_environment(self) -> None:
         with patch.dict(
             os.environ,
@@ -106,7 +147,7 @@ class ReadmeEnvironmentTests(unittest.TestCase):
         )
         names.update(
             re.findall(
-                r'_env_(?:int|float|bool)\(\s*["\']([A-Z0-9_]+)',
+                r'_env_[a-z_]+\(\s*["\']([A-Z0-9_]+)',
                 source,
             )
         )
