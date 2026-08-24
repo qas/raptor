@@ -44,14 +44,16 @@ export TG_CHAT_IDS=123456789
 uv run raptor.py
 ```
 
-The inbound Responses API listens on `0.0.0.0:8787` by default:
+The inbound Responses API listens on `127.0.0.1:8787` by default:
 
 ```bash
 curl http://127.0.0.1:8787/v1/responses \
-  -H 'Authorization: Bearer strong-secret' \
   -H 'Content-Type: application/json' \
   -d '{"conversation":"project-a","input":"Hello"}'
 ```
+
+To accept remote connections, set both a non-loopback bind address and a
+secret bearer token. Raptor refuses a non-loopback bind without a token.
 
 Model discovery is available at `GET /v1/models`. Live status surfaces are
 available at `GET /v1/status` for `default`, or at
@@ -227,12 +229,11 @@ result.
 
 The background-subagent limit is process-wide. Providers may project safe,
 bounded activity without receiving the child's transcript or tool payloads. In
-a Telegram forum, Raptor creates a temporary `Subagent: <id>` topic that shows
-the same public reasoning summaries, assistant output, and tool activity as the
-main agent. The topic is read-only because the parent owns steering; the child
-transcript and tool payloads remain isolated. Raptor coalesces updates, treats
-duplicates as no-ops, deletes the topic when the subagent ends, and returns the
-bounded completion to the parent chat.
+a Telegram forum, Raptor creates a persistent `Subagent: <id>` topic. The
+delegated task, public reasoning summary, streamed reply, and final assistant
+message appear as ordinary messages without exposing the child's transcript or
+tool payloads. Raptor removes user input from that topic because the parent owns
+steering; the completed topic remains as a read-only record.
 
 ### Telegram chats and forums
 
@@ -240,9 +241,9 @@ Set `TG_CHAT_IDS` to an ordered, comma-separated list of private chats, groups,
 or supergroups. The first entry is the default chat. Every configured chat is
 an independent main-agent chat; in a forum, the General topic and every normal
 topic are independent chats as well. The bot must be an administrator with
-**Manage Topics** permission in each configured forum so it can manage
-temporary subagent activity topics. Only `TG_USER_ID` is accepted as
-interactive input.
+**Manage Topics** and **Delete Messages** permissions in each configured
+forum so it can manage subagent topics and remove input from their read-only
+records. Only `TG_USER_ID` is accepted as interactive input.
 
 Create and name normal topics with Telegram's standard UI. Raptor discovers a
 topic on its first message and persists its runtime. Activity topics are
@@ -373,9 +374,9 @@ outside the documented ranges stop startup with a configuration error.
 
 | Variable | Default | Purpose |
 |---|---:|---|
-| `RESPONSES_SERVER_HOST` | `0.0.0.0` | Bind address |
+| `RESPONSES_SERVER_HOST` | `127.0.0.1` | Bind address |
 | `RESPONSES_SERVER_PORT` | `8787` | Bind port |
-| `RESPONSES_SERVER_API_KEY` | `strong-secret` | Bearer token required off loopback |
+| `RESPONSES_SERVER_API_KEY` | empty | Bearer token; required off loopback |
 | `RESPONSES_SERVER_MAX_BODY` | `1048576` | Maximum request body bytes; minimum 1024 |
 
 ### Main model backend
