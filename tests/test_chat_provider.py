@@ -12,6 +12,7 @@ import httpx
 _ROOT = Path(__file__).resolve().parent.parent
 os.environ.setdefault("TG_BOT_TOKEN", "test-token")
 os.environ.setdefault("TG_USER_ID", "1")
+os.environ.setdefault("TG_CHAT_ID", "1")
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
@@ -749,8 +750,75 @@ class TelegramTransportTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(surface_id, "42/77")
         self.assertEqual(call.await_args_list[0].args[0], "createForumTopic")
+        self.assertEqual(
+            call.await_args_list[0].args[1]["name"],
+            "Subagent: worker",
+        )
+        self.assertIn("Subagent: worker", rich.await_args_list[0].args[2])
         self.assertEqual(call.await_args_list[1].args[0], "deleteForumTopic")
         self.assertNotIn(42, provider._activity_topic_ids)
+
+    def test_activity_text_includes_reasoning_and_reply(self) -> None:
+        import telegram
+        from activity import ActivitySnapshot
+
+        text = telegram._activity_text(
+            ActivitySnapshot(
+                activity_id="worker",
+                title="Inspect target",
+                status="running",
+                reasoning_summary="Checking files",
+                reply="I found the issue",
+            )
+        )
+
+        self.assertIn("Reasoning\nChecking files", text)
+        self.assertIn("Reply\nI found the issue", text)
+
+    async def test_unchanged_message_edit_is_a_successful_noop(self) -> None:
+        import telegram
+
+        error = telegram.TelegramApiError(
+            "editMessageText",
+            status_code=200,
+            error_code=400,
+            description=(
+                "Bad Request: message is not modified: specified new message "
+                "content and reply markup are exactly the same"
+            ),
+        )
+        rich = AsyncMock(side_effect=error)
+
+        with patch.object(telegram, "send_rich", rich):
+            await telegram.TelegramProvider().edit_message(1, 7, "unchanged")
+
+        rich.assert_awaited_once()
+
+    async def test_activity_update_propagates_real_edit_errors(self) -> None:
+        import telegram
+        from activity import ActivitySnapshot
+
+        error = telegram.TelegramApiError(
+            "editMessageText",
+            status_code=400,
+            error_code=400,
+            description="Bad Request: message to edit not found",
+        )
+        snapshot = ActivitySnapshot(
+            activity_id="worker",
+            title="Inspect target",
+            status="running",
+        )
+
+        with (
+            patch.object(telegram, "send_rich", AsyncMock(side_effect=error)),
+            self.assertRaises(telegram.TelegramApiError),
+        ):
+            await telegram.TelegramProvider().update_activity_surface(
+                "1/10",
+                "42/77",
+                snapshot,
+            )
 
     async def test_chat_requests_are_spaced(self) -> None:
         import telegram

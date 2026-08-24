@@ -147,6 +147,13 @@ SUBAGENT_RESPONSES_REASONING_EFFORT = (
     ).strip()
     or None
 )
+SUBAGENT_RESPONSES_REASONING_SUMMARY = (
+    os.getenv(
+        "SUBAGENT_RESPONSES_REASONING_SUMMARY",
+        "auto",
+    ).strip()
+    or None
+)
 SUBAGENT_RESPONSES_MAX_RETRIES = _env_int(
     "SUBAGENT_RESPONSES_MAX_RETRIES",
     3,

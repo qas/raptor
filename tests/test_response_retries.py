@@ -184,6 +184,72 @@ class ResponseRetryTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result["status"], "completed")
 
+    async def test_stream_exposes_cumulative_public_output(self) -> None:
+        class FakeResponse:
+            is_error = False
+
+            def raise_for_status(self):
+                return None
+
+            async def aiter_lines(self):
+                yield (
+                    'data: {"type":"response.reasoning_summary_text.delta",'
+                    '"delta":"Check"}'
+                )
+                yield (
+                    'data: {"type":"response.reasoning_summary_text.delta",'
+                    '"delta":" files"}'
+                )
+                yield (
+                    'data: {"type":"response.output_text.delta",'
+                    '"delta":"Found"}'
+                )
+                yield (
+                    'data: {"type":"response.output_text.delta",'
+                    '"delta":" it"}'
+                )
+                yield (
+                    'data: {"type":"response.completed","response":'
+                    '{"status":"completed","output":[]}}'
+                )
+
+        class FakeStream:
+            async def __aenter__(self):
+                return FakeResponse()
+
+            async def __aexit__(self, *_args):
+                return False
+
+        class FakeClient:
+            def stream(self, *_args, **_kwargs):
+                return FakeStream()
+
+        text = AsyncMock()
+        reasoning = AsyncMock()
+        with patch.object(
+            responses.session,
+            "responses",
+            FakeClient(),
+            create=True,
+        ):
+            result = await responses.stream_response_payload(
+                url="http://backend/v1/responses",
+                headers={},
+                payload={"stream": True},
+                on_text=text,
+                on_reasoning_summary=reasoning,
+            )
+
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(
+            [call.args[0] for call in reasoning.await_args_list],
+            ["Check", "Check files"],
+        )
+        self.assertEqual(
+            [call.args[0] for call in text.await_args_list],
+            ["Found", "Found it"],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

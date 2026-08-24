@@ -116,13 +116,20 @@ def _parse_activity_surface_id(value: str) -> tuple[int, int]:
 
 def _activity_text(snapshot: ActivitySnapshot) -> str:
     lines = [
-        f"Subagent {snapshot.activity_id}",
+        f"Subagent: {snapshot.activity_id}",
         "",
         f"Task: {snapshot.title}",
         f"Status: {snapshot.status}",
     ]
     if snapshot.detail:
         lines.extend(("", snapshot.detail))
+    if snapshot.reasoning_summary:
+        lines.extend(("", "Reasoning", snapshot.reasoning_summary))
+    if snapshot.reply:
+        lines.extend(("", "Reply", snapshot.reply))
+    elif snapshot.result:
+        lines.extend(("", "Result", snapshot.result))
+    lines.extend(("", "Read-only. Steer from the parent chat."))
     return "\n".join(lines)
 
 
@@ -134,7 +141,7 @@ async def _delete_forum_topic(chat_id: int, topic_id: int) -> None:
         )
     except TelegramApiError as exc:
         description = exc.description.casefold()
-        if exc.status_code == 400 and "topic" in description and any(
+        if exc.is_bad_request and "topic" in description and any(
             marker in description
             for marker in ("not found", "deleted", "does not exist")
         ):
@@ -161,6 +168,10 @@ class TelegramApiError(RuntimeError):
         self.retry_after = retry_after
         code = error_code if error_code is not None else status_code
         super().__init__(f"Telegram {method} error {code}: {description}")
+
+    @property
+    def is_bad_request(self) -> bool:
+        return self.status_code == 400 or self.error_code == 400
 
 
 def _ensure_rate_state() -> asyncio.AbstractEventLoop:
@@ -648,7 +659,7 @@ async def send_rich(
 
         except TelegramApiError as exc:
             description = exc.description.lower()
-            if exc.status_code != 400 or not any(
+            if not exc.is_bad_request or not any(
                 marker in description
                 for marker in (
                     "can't parse entities",
@@ -675,6 +686,25 @@ async def send_rich(
         method,
         plain_payload,
     )
+
+
+def _is_unchanged_message_error(exc: TelegramApiError) -> bool:
+    return (
+        exc.is_bad_request
+        and "message is not modified" in exc.description.casefold()
+    )
+
+
+async def _edit_rich_message(
+    payload: dict[str, Any],
+    text: str,
+) -> None:
+    try:
+        await send_rich("editMessageText", payload, text)
+    except TelegramApiError as exc:
+        if _is_unchanged_message_error(exc):
+            return
+        raise
 
 
 async def send(
@@ -950,7 +980,7 @@ class TelegramProvider:
         }
         markup = _reply_markup(controls)
         payload["reply_markup"] = markup or {"inline_keyboard": []}
-        await send_rich("editMessageText", payload, text)
+        await _edit_rich_message(payload, text)
 
     async def delete_message(self, conversation_id, message_id) -> None:
         chat_id, _thread_id = _telegram_destination(conversation_id)
@@ -1030,12 +1060,7 @@ class TelegramProvider:
         if not self._forum_enabled:
             return None
         chat_id, _parent_thread_id = _telegram_destination(conversation_id)
-        title = " ".join(snapshot.title.split())
-        prefix = f"Subagent {snapshot.activity_id}: "
-        available = 128 - len(prefix)
-        topic_name = prefix + (
-            title if len(title) <= available else title[: available - 3] + "..."
-        )
+        topic_name = f"Subagent: {snapshot.activity_id}"
         topic = await tg_call(
             "createForumTopic",
             {"chat_id": chat_id, "name": topic_name},
@@ -1050,8 +1075,7 @@ class TelegramProvider:
             result = await send_rich(
                 "sendMessage",
                 {"chat_id": chat_id, "message_thread_id": topic_id},
-                _activity_text(snapshot)
-                + "\n\nRead-only activity feed. Steer from the parent chat.",
+                _activity_text(snapshot),
             )
             message_id = (
                 result.get("message_id") if isinstance(result, dict) else None
@@ -1092,8 +1116,7 @@ class TelegramProvider:
     ) -> None:
         chat_id, _parent_thread_id = _telegram_destination(conversation_id)
         _topic_id, message_id = _parse_activity_surface_id(surface_id)
-        await send_rich(
-            "editMessageText",
+        await _edit_rich_message(
             {"chat_id": chat_id, "message_id": message_id},
             _activity_text(snapshot),
         )
@@ -1107,8 +1130,7 @@ class TelegramProvider:
         chat_id, _parent_thread_id = _telegram_destination(conversation_id)
         topic_id, message_id = _parse_activity_surface_id(surface_id)
         try:
-            await send_rich(
-                "editMessageText",
+            await _edit_rich_message(
                 {"chat_id": chat_id, "message_id": message_id},
                 _activity_text(snapshot),
             )

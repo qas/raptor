@@ -3,6 +3,7 @@ import asyncio
 import json
 import secrets
 import time
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from chat_provider import ConversationId
@@ -21,6 +22,7 @@ from config import (
     SUBAGENT_RESPONSES_BASE_URL,
     SUBAGENT_RESPONSES_MODEL,
     SUBAGENT_RESPONSES_REASONING_EFFORT,
+    SUBAGENT_RESPONSES_REASONING_SUMMARY,
     SUBAGENT_RESPONSES_MAX_RETRIES,
     SUBAGENT_RESPONSES_RETRY_BASE_SECONDS,
     TOOLS,
@@ -46,6 +48,7 @@ from responses import (
     ContextLengthError,
     parse_context_length_error,
     retry_transient_response,
+    stream_response_payload,
     validate_chronological_input,
 )
 from skills import skill_catalog_instructions
@@ -54,6 +57,7 @@ from activity import (
     close_subagent_activity,
     open_subagent_activity,
     publish_subagent_activity,
+    publish_subagent_response,
     schedule_subagent_activity_close,
 )
 
@@ -190,6 +194,8 @@ def build_subagent_payload(
     extra_instructions: str = "",
     max_output_tokens: int | None = None,
     reasoning_effort: str | None = SUBAGENT_RESPONSES_REASONING_EFFORT,
+    reasoning_summary: str | None = None,
+    stream: bool = False,
 ) -> dict[str, Any]:
     validate_chronological_input(work)
     instructions = subagent_instructions(allow_subagents)
@@ -199,7 +205,7 @@ def build_subagent_payload(
         "model": subagent_model(),
         "input": work,
         "instructions": instructions,
-        "stream": False,
+        "stream": stream,
     }
     selected_tools = (
         subagent_tools(allow_subagents, depth)
@@ -211,8 +217,12 @@ def build_subagent_payload(
         payload["parallel_tool_calls"] = False
     if max_output_tokens is not None:
         payload["max_output_tokens"] = max_output_tokens
-    if reasoning_effort is not None:
-        payload["reasoning"] = {"effort": reasoning_effort}
+    if reasoning_effort is not None or reasoning_summary is not None:
+        payload["reasoning"] = {}
+        if reasoning_effort is not None:
+            payload["reasoning"]["effort"] = reasoning_effort
+        if reasoning_summary is not None:
+            payload["reasoning"]["summary"] = reasoning_summary
     return payload
 
 
@@ -249,7 +259,11 @@ async def _create_subagent_response_once(
     extra_instructions: str = "",
     max_output_tokens: int | None = None,
     reasoning_effort: str | None = SUBAGENT_RESPONSES_REASONING_EFFORT,
+    reasoning_summary: str | None = None,
+    on_text: Callable[[str], Awaitable[None]] | None = None,
+    on_reasoning_summary: Callable[[str], Awaitable[None]] | None = None,
 ) -> dict[str, Any]:
+    streaming = on_text is not None or on_reasoning_summary is not None
     payload = build_subagent_payload(
         work,
         allow_subagents=allow_subagents,
@@ -258,7 +272,19 @@ async def _create_subagent_response_once(
         extra_instructions=extra_instructions,
         max_output_tokens=max_output_tokens,
         reasoning_effort=reasoning_effort,
+        reasoning_summary=reasoning_summary if streaming else None,
+        stream=streaming,
     )
+    if streaming:
+        return await stream_response_payload(
+            url=f"{SUBAGENT_RESPONSES_BASE_URL}/responses",
+            headers=subagent_headers(),
+            payload=payload,
+            on_text=on_text,
+            on_reasoning_summary=on_reasoning_summary,
+            log_source="subagent",
+            log_data={"agent_id": agent_id},
+        )
     response = await session.responses.post(
         f"{SUBAGENT_RESPONSES_BASE_URL}/responses",
         headers=subagent_headers(),
@@ -292,6 +318,9 @@ async def create_subagent_response(
     extra_instructions: str = "",
     max_output_tokens: int | None = None,
     reasoning_effort: str | None = SUBAGENT_RESPONSES_REASONING_EFFORT,
+    reasoning_summary: str | None = None,
+    on_text: Callable[[str], Awaitable[None]] | None = None,
+    on_reasoning_summary: Callable[[str], Awaitable[None]] | None = None,
 ) -> dict[str, Any]:
     async def request() -> dict[str, Any]:
         return await _create_subagent_response_once(
@@ -303,6 +332,9 @@ async def create_subagent_response(
             extra_instructions=extra_instructions,
             max_output_tokens=max_output_tokens,
             reasoning_effort=reasoning_effort,
+            reasoning_summary=reasoning_summary,
+            on_text=on_text,
+            on_reasoning_summary=on_reasoning_summary,
         )
 
     return await retry_transient_response(
@@ -481,12 +513,39 @@ async def run_subagent(
                 )
 
         async def _request(items):
+            if not record.get("background"):
+                return await create_subagent_response(
+                    items,
+                    agent_id=agent_id,
+                    allow_subagents=allow_subagents,
+                    depth=depth,
+                    extra_instructions=recovery_inst,
+                )
+
+            publish_subagent_response(
+                record,
+                reasoning_summary="",
+                reply="",
+            )
+
+            async def publish_text(text: str) -> None:
+                publish_subagent_response(record, reply=text)
+
+            async def publish_reasoning(summary: str) -> None:
+                publish_subagent_response(
+                    record,
+                    reasoning_summary=summary,
+                )
+
             return await create_subagent_response(
                 items,
                 agent_id=agent_id,
                 allow_subagents=allow_subagents,
                 depth=depth,
                 extra_instructions=recovery_inst,
+                reasoning_summary=SUBAGENT_RESPONSES_REASONING_SUMMARY,
+                on_text=publish_text,
+                on_reasoning_summary=publish_reasoning,
             )
 
         async def _compact_forced(items):

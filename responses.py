@@ -449,6 +449,81 @@ async def stateless_response(
     )
 
 
+async def stream_response_payload(
+    *,
+    url: str,
+    headers: dict[str, str],
+    payload: dict[str, Any],
+    on_text: Callable[[str], Awaitable[None]] | None = None,
+    on_reasoning_summary: Callable[[str], Awaitable[None]] | None = None,
+    log_source: str = "responses",
+    log_data: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Stream one Responses request and expose cumulative public output."""
+    final_response: dict[str, Any] | None = None
+    text = ""
+    reasoning_summary = ""
+    async with session.responses.stream(
+        "POST",
+        url,
+        headers=headers,
+        json=payload,
+        timeout=None,
+    ) as response:
+        if response.is_error:
+            await response.aread()
+            log_event(
+                log_source,
+                "http_error",
+                {
+                    **(log_data or {}),
+                    "status": response.status_code,
+                    "body_chars": len(response.text),
+                },
+            )
+            context_error = parse_context_length_error(response)
+            if context_error:
+                raise context_error
+        response.raise_for_status()
+
+        async for line in response.aiter_lines():
+            if not line.startswith("data:"):
+                continue
+            raw = line[5:].strip()
+            if not raw or raw == "[DONE]":
+                continue
+            try:
+                event = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+
+            summary_delta = reasoning_summary_delta(event)
+            if summary_delta and on_reasoning_summary is not None:
+                reasoning_summary += summary_delta
+                await on_reasoning_summary(reasoning_summary)
+            event_type = event.get("type")
+            if event_type == "response.output_text.delta":
+                text += str(event.get("delta") or "")
+                if on_text is not None:
+                    await on_text(text)
+            elif event_type == "response.completed":
+                completed = event.get("response")
+                if isinstance(completed, dict):
+                    final_response = completed
+            elif event_type in {"response.failed", "error"}:
+                raise RuntimeError(
+                    event.get("message")
+                    or event.get("error")
+                    or str(event)
+                )
+
+    if final_response is None:
+        raise IncompleteResponsesStreamError(
+            "Responses stream ended without response.completed"
+        )
+    return final_response
+
+
 async def _responses_create_stream_once(
     chat_id: ConversationId,
     input_items: list[
@@ -523,130 +598,39 @@ async def _responses_create_stream_once(
                 },
             )
 
-    final_response: (
-        dict[str, Any]
-        | None
-    ) = None
+    reasoning_text = ""
 
-    async with session.responses.stream(
-        "POST",
-        f"{RESPONSES_BASE_URL}/responses",
+    async def collect_text(snapshot: str) -> None:
+        nonlocal text_buffer, last_draft, last_draft_text, draft_task
+        text_buffer = snapshot
+        now = time.monotonic()
+        if (
+            CHAT_STREAMING
+            and now - last_draft >= CHAT_STREAM_INTERVAL
+            and (draft_task is None or draft_task.done())
+        ):
+            last_draft_text = text_buffer
+            draft_task = asyncio.create_task(publish_draft(last_draft_text))
+            last_draft = now
+
+    async def collect_reasoning(snapshot: str) -> None:
+        nonlocal reasoning_text
+        delta = (
+            snapshot[len(reasoning_text):]
+            if snapshot.startswith(reasoning_text)
+            else snapshot
+        )
+        reasoning_text = snapshot
+        if delta:
+            await publish_reasoning_summary(delta)
+
+    final_response = await stream_response_payload(
+        url=f"{RESPONSES_BASE_URL}/responses",
         headers=auth_headers(),
-        json=payload,
-        timeout=None,
-    ) as response:
-        if response.is_error:
-            await response.aread()
-            log_event(
-                "responses",
-                "http_error",
-                {
-                    "status":
-                        response.status_code,
-                    "body_chars": len(response.text),
-                },
-            )
-
-            context_error = parse_context_length_error(
-                response
-            )
-            if context_error:
-                raise context_error
-
-        response.raise_for_status()
-
-        async for line in response.aiter_lines():
-            if not line.startswith(
-                "data:"
-            ):
-                continue
-
-            raw = line[
-                5:
-            ].strip()
-
-            if (
-                not raw
-                or raw == "[DONE]"
-            ):
-                continue
-
-            try:
-                event = json.loads(
-                    raw
-                )
-
-            except json.JSONDecodeError:
-                continue
-
-            event_type = event.get(
-                "type"
-            )
-            summary_delta = reasoning_summary_delta(event)
-            if summary_delta:
-                await publish_reasoning_summary(summary_delta)
-            if (
-                event_type
-                == "response.output_text.delta"
-            ):
-                text_buffer += str(
-                    event.get(
-                        "delta"
-                    )
-                    or ""
-                )
-
-                now = (
-                    time.monotonic()
-                )
-
-                if (
-                    CHAT_STREAMING
-                    and (
-                        now
-                        - last_draft
-                        >= CHAT_STREAM_INTERVAL
-                    )
-                    and (
-                        draft_task is None
-                        or draft_task.done()
-                    )
-                ):
-                    last_draft_text = text_buffer
-                    draft_task = asyncio.create_task(
-                        publish_draft(last_draft_text)
-                    )
-                    last_draft = now
-
-            elif (
-                event_type
-                == "response.completed"
-            ):
-                completed = event.get(
-                    "response"
-                )
-
-                if isinstance(
-                    completed,
-                    dict,
-                ):
-                    final_response = (
-                        completed
-                    )
-
-            elif event_type in {
-                "response.failed",
-                "error",
-            }:
-                raise RuntimeError(
-                    event.get(
-                        "message"
-                    )
-                    or event.get(
-                        "error"
-                    )
-                    or str(event)
-                )
+        payload=payload,
+        on_text=collect_text,
+        on_reasoning_summary=collect_reasoning,
+    )
 
     if (
         CHAT_STREAMING
@@ -656,12 +640,6 @@ async def _responses_create_stream_once(
             await draft_task
         if text_buffer != last_draft_text:
             await publish_draft(text_buffer)
-
-    if final_response is None:
-        raise IncompleteResponsesStreamError(
-            "Responses stream ended without "
-            "response.completed"
-        )
 
     return final_response
 

@@ -37,6 +37,10 @@ class ContextBudgetTests(unittest.TestCase):
         self.assertEqual(values["SUBAGENT_RESPONSES_API_KEY"], "")
         self.assertEqual(values["SUBAGENT_RESPONSES_MODEL"], "")
         self.assertIsNone(values["SUBAGENT_RESPONSES_REASONING_EFFORT"])
+        self.assertEqual(
+            values["SUBAGENT_RESPONSES_REASONING_SUMMARY"],
+            "auto",
+        )
         self.assertEqual(values["SUBAGENT_RESPONSES_MAX_RETRIES"], 3)
         self.assertEqual(
             values["SUBAGENT_RESPONSES_RETRY_BASE_SECONDS"],

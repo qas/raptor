@@ -221,9 +221,12 @@ result.
 
 The background-subagent limit is process-wide. Providers may project safe,
 bounded activity without receiving the child's transcript or tool payloads. In
-a Telegram forum, Raptor creates a temporary activity topic, ignores user input
-inside it, and deletes it when the subagent ends. The bounded completion still
-returns to the parent main chat.
+a Telegram forum, Raptor creates a temporary `Subagent: <id>` topic that shows
+the same public reasoning summaries, assistant output, and tool activity as the
+main agent. The topic is read-only because the parent owns steering; the child
+transcript and tool payloads remain isolated. Raptor coalesces updates, treats
+duplicates as no-ops, deletes the topic when the subagent ends, and returns the
+bounded completion to the parent chat.
 
 ### Telegram forum mode
 
@@ -387,6 +390,7 @@ outside the documented ranges stop startup with a configuration error.
 | `SUBAGENT_RESPONSES_API_KEY` | empty | Independent backend bearer token |
 | `SUBAGENT_RESPONSES_MODEL` | empty | Required subagent model |
 | `SUBAGENT_RESPONSES_REASONING_EFFORT` | empty | Independent reasoning effort |
+| `SUBAGENT_RESPONSES_REASONING_SUMMARY` | `auto` | Public reasoning-summary mode |
 | `SUBAGENT_RESPONSES_MAX_RETRIES` | `3` | Independent retries after the initial request |
 | `SUBAGENT_RESPONSES_RETRY_BASE_SECONDS` | `0.5` | Independent initial backoff delay |
 | `MAX_SUBAGENT_DEPTH` | `3` | Maximum recursive delegation depth; minimum 1 |

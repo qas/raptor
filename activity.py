@@ -1,7 +1,7 @@
 """Provider-neutral projection of background subagent activity."""
 
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Protocol, runtime_checkable
 
 from chat_provider import ConversationId
@@ -11,6 +11,21 @@ import session
 
 
 ACTIVITY_UPDATE_INTERVAL_SECONDS = 1.5
+MAX_ACTIVITY_FIELD_CHARS = 600
+
+
+def _bounded_activity_field(value: Any) -> str:
+    text = str(value or "")
+    if len(text) <= MAX_ACTIVITY_FIELD_CHARS:
+        return text
+    return text[: MAX_ACTIVITY_FIELD_CHARS - 3] + "..."
+
+
+def _bounded_activity_stream(value: Any) -> str:
+    text = str(value or "")
+    if len(text) <= MAX_ACTIVITY_FIELD_CHARS:
+        return text
+    return "..." + text[-(MAX_ACTIVITY_FIELD_CHARS - 3):]
 
 
 @dataclass(frozen=True)
@@ -22,6 +37,8 @@ class ActivitySnapshot:
     status: str
     detail: str = ""
     result: str = ""
+    reasoning_summary: str = ""
+    reply: str = ""
 
 
 @runtime_checkable
@@ -63,20 +80,59 @@ class ActivityProjection:
         provider: ActivitySurfaceProvider,
         conversation_id: ConversationId,
         surface_id: str,
+        snapshot: ActivitySnapshot,
     ) -> None:
         self.provider = provider
         self.conversation_id = conversation_id
         self.surface_id = surface_id
         self.pending: ActivitySnapshot | None = None
+        self.last_published = snapshot
         self.task: asyncio.Task[None] | None = None
         self.closed = False
 
     def publish(self, snapshot: ActivitySnapshot) -> None:
         if self.closed:
             return
+        if snapshot == self.pending:
+            return
+        if self.pending is None and snapshot == self.last_published:
+            return
         self.pending = snapshot
         if self.task is None or self.task.done():
             self.task = asyncio.create_task(self._drain())
+
+    def publish_response(
+        self,
+        *,
+        reasoning_summary: str | None = None,
+        reply: str | None = None,
+    ) -> None:
+        current = self.pending or self.last_published
+        self.publish(
+            replace(
+                current,
+                reasoning_summary=(
+                    current.reasoning_summary
+                    if reasoning_summary is None
+                    else _bounded_activity_stream(reasoning_summary)
+                ),
+                reply=(
+                    current.reply
+                    if reply is None
+                    else _bounded_activity_stream(reply)
+                ),
+            )
+        )
+
+    def publish_activity(self, snapshot: ActivitySnapshot) -> None:
+        current = self.pending or self.last_published
+        self.publish(
+            replace(
+                snapshot,
+                reasoning_summary=current.reasoning_summary,
+                reply=current.reply,
+            )
+        )
 
     async def _drain(self) -> None:
         await asyncio.sleep(ACTIVITY_UPDATE_INTERVAL_SECONDS)
@@ -89,6 +145,7 @@ class ActivityProjection:
                     self.surface_id,
                     snapshot,
                 )
+                self.last_published = snapshot
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -154,11 +211,17 @@ def _snapshot(
     status = str(record.get("status") or "unknown")
     result = str(record.get("result") or record.get("error") or "")
     return ActivitySnapshot(
-        activity_id=str(record.get("id") or ""),
-        title=str(record.get("last_task") or record.get("task") or "Subagent"),
-        status=status,
-        detail=detail,
-        result=result if status != "running" else "",
+        activity_id=_bounded_activity_field(record.get("id")),
+        title=_bounded_activity_field(
+            record.get("last_task") or record.get("task") or "Subagent"
+        ),
+        status=_bounded_activity_field(status),
+        detail=_bounded_activity_field(detail),
+        result=(
+            _bounded_activity_field(result)
+            if status != "running"
+            else ""
+        ),
     )
 
 
@@ -183,20 +246,37 @@ async def open_subagent_activity(record: dict[str, Any]) -> None:
         return
     if not surface_id:
         return
+    activity_id = str(record.get("id") or "")
     record["activity_surface_id"] = surface_id
     record["activity_surface_closed"] = False
     session.save_state()
-    _projections[_projection_key(snapshot.activity_id)] = ActivityProjection(
+    _projections[_projection_key(activity_id)] = ActivityProjection(
         provider,
         record["chat_id"],
         surface_id,
+        snapshot,
     )
 
 
 def publish_subagent_activity(record: dict[str, Any], detail: str) -> None:
     projection = _projections.get(_projection_key(str(record.get("id") or "")))
     if projection is not None:
-        projection.publish(_snapshot(record, detail=detail))
+        projection.publish_activity(_snapshot(record, detail=detail))
+
+
+def publish_subagent_response(
+    record: dict[str, Any],
+    *,
+    reasoning_summary: str | None = None,
+    reply: str | None = None,
+) -> None:
+    """Project safe model-visible output without exposing child context."""
+    projection = _projections.get(_projection_key(str(record.get("id") or "")))
+    if projection is not None:
+        projection.publish_response(
+            reasoning_summary=reasoning_summary,
+            reply=reply,
+        )
 
 
 async def close_subagent_activity(record: dict[str, Any]) -> None:
@@ -210,6 +290,12 @@ async def close_subagent_activity(record: dict[str, Any]) -> None:
     projection = _projections.pop(_projection_key(activity_id), None)
     snapshot = _snapshot(record)
     if projection is not None:
+        current = projection.pending or projection.last_published
+        snapshot = replace(
+            snapshot,
+            reasoning_summary=current.reasoning_summary,
+            reply=current.reply,
+        )
         closed = await projection.close(snapshot)
     else:
         try:

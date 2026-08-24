@@ -49,6 +49,108 @@ class BackgroundSubagentTests(unittest.IsolatedAsyncioTestCase):
             ):
                 subagents.subagent_model()
 
+    async def test_subagent_stream_uses_independent_backend_and_callbacks(
+        self,
+    ) -> None:
+        completed = {"status": "completed", "output": []}
+        stream = AsyncMock(return_value=completed)
+        on_text = AsyncMock()
+        on_reasoning = AsyncMock()
+
+        with (
+            patch.object(subagents, "SUBAGENT_RESPONSES_MODEL", "worker-model"),
+            patch.object(
+                subagents,
+                "SUBAGENT_RESPONSES_BASE_URL",
+                "http://worker.example/v1",
+            ),
+            patch.object(subagents, "stream_response_payload", stream),
+        ):
+            result = await subagents._create_subagent_response_once(
+                [],
+                agent_id="worker-1",
+                allow_subagents=False,
+                depth=1,
+                tools=[],
+                reasoning_summary="auto",
+                on_text=on_text,
+                on_reasoning_summary=on_reasoning,
+            )
+
+        self.assertEqual(result, completed)
+        kwargs = stream.await_args.kwargs
+        self.assertEqual(kwargs["url"], "http://worker.example/v1/responses")
+        self.assertEqual(kwargs["payload"]["model"], "worker-model")
+        self.assertTrue(kwargs["payload"]["stream"])
+        self.assertEqual(kwargs["payload"]["reasoning"]["summary"], "auto")
+        self.assertIs(kwargs["on_text"], on_text)
+        self.assertIs(kwargs["on_reasoning_summary"], on_reasoning)
+
+    async def test_background_runtime_projects_reasoning_and_reply(self) -> None:
+        record = {
+            "id": "worker-1",
+            "session_id": "session-1",
+            "background": True,
+            "pending_inputs": [],
+            "tool_events": [],
+            "todos": [],
+        }
+        session.subagent_records["worker-1"] = record
+
+        async def create_response(_items, **kwargs):
+            await kwargs["on_reasoning_summary"]("Checking files")
+            await kwargs["on_text"]("Found the issue")
+            return {
+                "status": "completed",
+                "output": [
+                    {
+                        "type": "message",
+                        "content": [
+                            {"type": "output_text", "text": "Found the issue"}
+                        ],
+                    }
+                ],
+            }
+
+        projected = []
+        with (
+            patch.object(
+                subagents,
+                "build_active_context",
+                return_value=[{"role": "user", "content": "Inspect"}],
+            ),
+            patch.object(
+                subagents,
+                "skill_catalog_instructions",
+                AsyncMock(return_value=""),
+            ),
+            patch.object(subagents, "subagent_context_input_budget", return_value=0),
+            patch.object(subagents, "create_subagent_response", create_response),
+            patch.object(subagents, "append_item"),
+            patch.object(subagents, "save_state"),
+            patch.object(
+                subagents,
+                "publish_subagent_response",
+                side_effect=lambda _record, **values: projected.append(values),
+            ),
+        ):
+            result = await subagents.run_subagent(
+                agent_id="worker-1",
+                chat_id="telegram:123",
+                depth=1,
+                allow_subagents=False,
+            )
+
+        self.assertEqual(result, "Found the issue")
+        self.assertEqual(
+            projected,
+            [
+                {"reasoning_summary": "", "reply": ""},
+                {"reasoning_summary": "Checking files"},
+                {"reply": "Found the issue"},
+            ],
+        )
+
     async def test_status_projection_excludes_private_child_context(self) -> None:
         session.subagent_records["worker-1"] = {
             "id": "worker-1",
