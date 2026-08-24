@@ -1,5 +1,7 @@
 # Raptor
 
+![Raptor](assets/banner.png)
+
 Raptor is a persistent, tool-using agent runtime built on the OpenAI Responses
 API. It provides durable conversations, bounded context compaction, goals,
 steering, approvals, managed shell sessions, skills, and isolated subagents
