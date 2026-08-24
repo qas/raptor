@@ -1,5 +1,4 @@
 """Provider-neutral text commands."""
-import copy
 import os
 from datetime import datetime, timezone
 from typing import Any
@@ -28,7 +27,7 @@ from config import (
     context_input_budget,
     subagent_context_input_budget,
 )
-from session import DEFAULT_STATE, pending_approvals, save_state, state
+from session import pending_approvals, save_state, state
 import session
 from observability import log_exception
 from agent import context_tokens
@@ -123,11 +122,13 @@ def _main_chat_sessions(
     current_id: str = "",
 ) -> list[dict[str, Any]]:
     needle = query.casefold()
+    chat_key = session.current_runtime().key
     rows = sorted(
         (
             row
             for row in list_sessions()
             if row.get("kind") == "main"
+            and row.get("chat_key") == chat_key
         ),
         key=lambda row: float(row.get("started_at") or 0),
         reverse=True,
@@ -679,6 +680,7 @@ async def command(
                 row
                 for row in list_sessions()
                 if row.get("kind") == "main"
+                and row.get("chat_key") == session.current_runtime().key
                 and row.get("session_id") == arg
             ),
             None,
@@ -727,24 +729,15 @@ async def command(
                 reason="new_session",
                 todos=list(state.get("todos") or []),
             )
-        model = state.get("model")
-        approval_mode = state.get("approval_mode", "off")
-        runtime = copy.deepcopy(state.get("runtime", {}))
-        subagents = copy.deepcopy(state.get("subagents", {}))
-        goal = copy.deepcopy(state.get("goal"))
-        new_session_id = create_session(kind="main")
-        state.clear()
-        state.update(copy.deepcopy(DEFAULT_STATE))
-        state["model"] = model
-        state["approval_mode"] = approval_mode
-        state["runtime"] = runtime
-        state["subagents"] = subagents
-        state["goal"] = goal
+        new_session_id = create_session(
+            kind="main",
+            chat_key=session.current_runtime().key,
+        )
         state["current_session_id"] = new_session_id
         state["todos"] = []
         state["pending_inputs"] = []
+        state["active_root_turn"] = None
         state["interrupted_subagents"] = []
-        session.subagent_records = state["subagents"]
         save_state()
         short_id = str(new_session_id)[-8:]
         await send(

@@ -318,9 +318,10 @@ def _higher_priority_pin_active(
     ignore_owner: str | None = None,
 ) -> bool:
     """True when approval owns the pinned status slot."""
-    pinned_owner = session.pinned_status_owner
+    runtime = session.current_runtime()
+    pinned_owner = runtime.pinned_status_owner
     if (
-        session.pinned_status_conversation_id == chat_id
+        runtime.pinned_status_conversation_id == chat_id
         and pinned_owner != ignore_owner
         and isinstance(pinned_owner, str)
         and pinned_owner.startswith("approval:")
@@ -338,10 +339,11 @@ def _higher_priority_pin_active(
 
 async def remove_goal_pin(chat_id: ConversationId) -> None:
     """Clear goal tracking, then remove its persistent chat status."""
-    message_id = session.goal_pin_message_id
-    goal_id = session.goal_pin_goal_id or ""
-    session.goal_pin_message_id = None
-    session.goal_pin_goal_id = None
+    runtime = session.current_runtime()
+    message_id = runtime.goal_pin_message_id
+    goal_id = runtime.goal_pin_goal_id or ""
+    runtime.goal_pin_message_id = None
+    runtime.goal_pin_goal_id = None
     if message_id is not None:
         try:
             await presentation.clear_goal_pin(
@@ -376,9 +378,10 @@ async def ensure_goal_pin(
         await remove_goal_pin(chat_id)
         return
     goal_id = str(goal.get("id") or "")
+    runtime = session.current_runtime()
     if (
-        session.goal_pin_message_id is not None
-        and session.goal_pin_goal_id == goal_id
+        runtime.goal_pin_message_id is not None
+        and runtime.goal_pin_goal_id == goal_id
     ):
         return
     await remove_goal_pin(chat_id)
@@ -419,8 +422,8 @@ async def ensure_goal_pin(
         except Exception as exc:
             log_exception("goal", "stale_goal_pin_cleanup_error", exc)
         return
-    session.goal_pin_message_id = message_id
-    session.goal_pin_goal_id = goal_id
+    runtime.goal_pin_message_id = message_id
+    runtime.goal_pin_goal_id = goal_id
 
 
 async def sync_goal_pin(
@@ -599,7 +602,7 @@ async def set_goal_tool(
             "ok": False,
             "error": "persistent goals are unavailable inside a thread",
         }
-    if not session.goal_creation_authorized:
+    if not session.current_runtime().goal_creation_authorized:
         return {
             "ok": False,
             "error": (

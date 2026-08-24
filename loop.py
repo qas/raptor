@@ -37,6 +37,12 @@ async def handle_event(event: ChatEvent) -> None:
     """Dispatch a normalized event without provider-specific payloads."""
     provider = get_chat_provider()
 
+    if (
+        event.sender_id != provider.authorized_user_id
+        or not event.interactive
+    ):
+        return
+
     if isinstance(event, IncomingAction):
         if await handle_thread_action(event):
             return
@@ -52,9 +58,6 @@ async def handle_event(event: ChatEvent) -> None:
 
     if not isinstance(event, IncomingMessage):
         return
-    if event.sender_id != provider.authorized_user_id or not event.private:
-        return
-
     conversation_id = event.conversation_id
     text = event.text.strip()
     if not text:

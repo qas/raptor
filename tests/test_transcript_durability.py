@@ -43,7 +43,7 @@ class TranscriptDurabilityTests(unittest.IsolatedAsyncioTestCase):
         chat_store._SEQ_CACHE.clear()
         session.state.clear()
         session.state.update(copy.deepcopy(session.DEFAULT_STATE))
-        sid = chat_store.create_session(kind="main")
+        sid = chat_store.create_session(kind="main", chat_key=session.current_runtime().key)
         session.state["current_session_id"] = sid
         turns.finish()
         session.pending_steers.clear()

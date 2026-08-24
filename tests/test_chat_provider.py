@@ -166,11 +166,11 @@ class ChatProviderContractTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         self.provider = FakeProvider()
         self.previous_provider = set_chat_provider(self.provider)
-        session.pinned_status_conversation_id = None
-        session.pinned_status_message_id = None
-        session.pinned_status_owner = None
-        session.goal_pin_message_id = None
-        session.goal_pin_goal_id = None
+        session.current_runtime().pinned_status_conversation_id = None
+        session.current_runtime().pinned_status_message_id = None
+        session.current_runtime().pinned_status_owner = None
+        session.current_runtime().goal_pin_message_id = None
+        session.current_runtime().goal_pin_goal_id = None
         session.pending_approvals.clear()
         session.pending_steers.clear()
         while True:
@@ -665,15 +665,93 @@ class TelegramNormalizationTests(unittest.TestCase):
             event,
             IncomingAction(
                 action_id="callback-1",
-                conversation_id=1,
+                conversation_id="1",
                 sender_id=1,
                 message_id=9,
                 data="approval:abc:approve",
             ),
         )
 
+    def test_forum_topic_is_an_independent_conversation(self) -> None:
+        import telegram
+
+        provider = telegram.TelegramProvider()
+        event = provider.normalize_update(
+            {
+                "message": {
+                    "message_id": 10,
+                    "message_thread_id": 42,
+                    "is_topic_message": True,
+                    "from": {"id": 1},
+                    "chat": {"id": 1, "type": "supergroup"},
+                    "text": "hello",
+                }
+            }
+        )
+
+        self.assertIsInstance(event, IncomingMessage)
+        self.assertEqual(event.conversation_id, "1/42")
+        self.assertTrue(event.interactive)
+
+    def test_activity_topic_input_is_noninteractive(self) -> None:
+        import telegram
+
+        provider = telegram.TelegramProvider()
+        provider._activity_topic_ids.add(42)
+        event = provider.normalize_update(
+            {
+                "message": {
+                    "message_id": 10,
+                    "message_thread_id": 42,
+                    "is_topic_message": True,
+                    "from": {"id": 1},
+                    "chat": {"id": 1, "type": "supergroup"},
+                    "text": "ignored",
+                }
+            }
+        )
+
+        self.assertIsInstance(event, IncomingMessage)
+        self.assertFalse(event.interactive)
+
 
 class TelegramTransportTests(unittest.IsolatedAsyncioTestCase):
+    async def test_activity_topic_is_created_and_deleted(self) -> None:
+        import telegram
+        from activity import ActivitySnapshot
+
+        provider = telegram.TelegramProvider()
+        provider._forum_enabled = True
+        call = AsyncMock(
+            side_effect=[{"message_thread_id": 42}, True]
+        )
+        rich = AsyncMock(return_value={"message_id": 77})
+        snapshot = ActivitySnapshot(
+            activity_id="worker",
+            title="Inspect target",
+            status="running",
+        )
+        with (
+            patch.object(telegram, "tg_call", call),
+            patch.object(telegram, "send_rich", rich),
+        ):
+            surface_id = await provider.open_activity_surface("1/10", snapshot)
+            await provider.close_activity_surface(
+                "1/10",
+                str(surface_id),
+                ActivitySnapshot(
+                    activity_id="worker",
+                    title="Inspect target",
+                    status="completed",
+                    result="done",
+                ),
+            )
+
+        self.assertEqual(surface_id, "42/77")
+        self.assertEqual(call.await_args_list[0].args[0], "createForumTopic")
+        self.assertEqual(call.await_args_list[1].args[0], "deleteForumTopic")
+        self.assertNotIn(42, provider._activity_topic_ids)
+
     async def test_chat_requests_are_spaced(self) -> None:
         import telegram
 

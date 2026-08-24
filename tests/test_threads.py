@@ -49,18 +49,18 @@ class ThreadTests(unittest.IsolatedAsyncioTestCase):
         chat_store._SEQ_CACHE.clear()
         session.state.clear()
         session.state.update(copy.deepcopy(session.DEFAULT_STATE))
-        self.parent = chat_store.create_session(kind="main")
+        self.parent = chat_store.create_session(kind="main", chat_key=session.current_runtime().key)
         session.state["current_session_id"] = self.parent
         session.state["model"] = "model-a"
         turns.finish()
         session.subagent_tasks.clear()
         session.pending_approvals.clear()
         session.pending_steers.clear()
-        session.goal_pin_message_id = None
-        session.goal_pin_goal_id = None
-        session.pinned_status_conversation_id = None
-        session.pinned_status_message_id = None
-        session.pinned_status_owner = None
+        session.current_runtime().goal_pin_message_id = None
+        session.current_runtime().goal_pin_goal_id = None
+        session.current_runtime().pinned_status_conversation_id = None
+        session.current_runtime().pinned_status_message_id = None
+        session.current_runtime().pinned_status_owner = None
         while not session.runtime_event_queue.empty():
             session.runtime_event_queue.get_nowait()
             session.runtime_event_queue.task_done()
@@ -222,18 +222,18 @@ class ThreadTests(unittest.IsolatedAsyncioTestCase):
         goal = replace_goal("main objective")
         await ensure_goal_pin("!room:example.org")
         self.assertEqual(
-            session.pinned_status_owner,
+            session.current_runtime().pinned_status_owner,
             f"goal:{goal['id']}",
         )
 
         result = await start_thread("!room:example.org")
         thread_id = str(result["thread"]["id"])
         self.assertEqual(
-            session.pinned_status_owner,
+            session.current_runtime().pinned_status_owner,
             f"thread:{thread_id}",
         )
-        self.assertIsNone(session.goal_pin_message_id)
-        self.assertIsNone(session.goal_pin_goal_id)
+        self.assertIsNone(session.current_runtime().goal_pin_message_id)
+        self.assertIsNone(session.current_runtime().goal_pin_goal_id)
         self.assertEqual(goal_instructions(), "")
 
         from presentation import show_pinned_status
@@ -247,16 +247,16 @@ class ThreadTests(unittest.IsolatedAsyncioTestCase):
             released_owner="approval:abc",
         )
         self.assertEqual(
-            session.pinned_status_owner,
+            session.current_runtime().pinned_status_owner,
             f"thread:{thread_id}",
         )
 
         await finish_thread("!room:example.org", merge=False)
         self.assertEqual(
-            session.pinned_status_owner,
+            session.current_runtime().pinned_status_owner,
             f"goal:{goal['id']}",
         )
-        self.assertEqual(session.goal_pin_goal_id, goal["id"])
+        self.assertEqual(session.current_runtime().goal_pin_goal_id, goal["id"])
         self.assertIn("main objective", goal_instructions())
 
     async def test_lifecycle_change_refuses_while_busy(self) -> None:
@@ -357,7 +357,7 @@ class ThreadTests(unittest.IsolatedAsyncioTestCase):
                 action_id="$clear-thread",
                 conversation_id="!room:example.org",
                 sender_id="@operator:example.org",
-                message_id=session.pinned_status_message_id,
+                message_id=session.current_runtime().pinned_status_message_id,
                 data=f"thread:{thread_id}:clear",
             )
         )

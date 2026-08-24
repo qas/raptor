@@ -31,7 +31,7 @@ class IncomingMessage:
     sender_id: UserId
     message_id: MessageId
     text: str
-    private: bool = True
+    interactive: bool = True
 
 
 @dataclass(frozen=True)
@@ -41,6 +41,7 @@ class IncomingAction:
     sender_id: UserId
     message_id: MessageId | None
     data: str
+    interactive: bool = True
 
 
 ChatEvent: TypeAlias = IncomingMessage | IncomingAction

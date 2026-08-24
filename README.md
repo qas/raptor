@@ -6,7 +6,9 @@ steering, approvals, managed shell sessions, skills, and isolated subagents
 behind a provider-neutral chat interface.
 
 Raptor ships with Telegram and an inbound Responses-compatible HTTP API. Both
-providers can run at the same time without sharing replies or transport state.
+providers can run at the same time. Every provider conversation owns an
+isolated durable main-agent chat; replies and transport state never cross chat
+boundaries.
 
 ## Key properties
 
@@ -35,6 +37,7 @@ export RESPONSES_MODEL=your-model
 export CHAT_PROVIDERS=telegram,responses_api
 export TG_BOT_TOKEN=your-telegram-token
 export TG_USER_ID=123456789
+export TG_CHAT_ID=123456789
 
 uv run raptor.py
 ```
@@ -45,11 +48,12 @@ The inbound Responses API listens on `0.0.0.0:8787` by default:
 curl http://127.0.0.1:8787/v1/responses \
   -H 'Authorization: Bearer strong-secret' \
   -H 'Content-Type: application/json' \
-  -d '{"input":"Hello"}'
+  -d '{"conversation":"project-a","input":"Hello"}'
 ```
 
-Model discovery is available at `GET /v1/models`; live status surfaces are
-available at `GET /v1/status`.
+Model discovery is available at `GET /v1/models`. Live status surfaces are
+available at `GET /v1/status` for `default`, or at
+`GET /v1/status?conversation=project-a` for a named conversation.
 
 Process commands:
 
@@ -78,7 +82,7 @@ the daemon (the launch workspace's `.raptor` directory by default).
 | `/thread merge` | Merge branch-native conversation items into its parent |
 | `/status` | Show runtime, context, goal, subagent, and shell status |
 | `/stop` | Interrupt the current root turn; background work continues |
-| `/stop all` | Interrupt the root and cancel background subagents and shells |
+| `/stop all` | Interrupt and cancel background work in the current main chat |
 | `/compact` | Create a durable context checkpoint |
 | `/model` | List or switch backend models |
 | `/approval` | Toggle tool approval |
@@ -121,7 +125,7 @@ side effects are not reversible.
 | `chat_store.py` | Append-only transcript storage |
 | `storage.py` | Crash-safe atomic local file replacement |
 | `context.py` | Active-context construction and checkpoint compaction |
-| `session.py` | Durable control state and process-wide runtime objects |
+| `session.py` | Durable chat registry and context-bound per-chat runtimes |
 | `thread_state.py` | Temporary-thread state queries |
 | `thread_status.py` | Temporary-thread status projection |
 | `subagents.py` | Isolated foreground and background subagents |
@@ -130,20 +134,33 @@ side effects are not reversible.
 | `commands.py` | Provider-neutral slash commands |
 | `threads.py` | Temporary branch lifecycle and merge policy |
 
-### Scheduling and delivery
+### Main chats, scheduling, and delivery
 
-One root controller owns all root turns. User input, steering, background shell
-completion, subagent completion, and goal continuation enter that controller
-instead of starting competing runs.
+Each provider conversation owns one main-chat runtime: transcript selection,
+goal, todos, thread, approvals, steering queue, background resources, status
+surface, and root controller. One root turn runs at a time within a chat;
+different chats can run concurrently. Model selection and process limits remain
+process-wide.
 
-The root agent can cancel one background subagent or managed shell by its
-returned identifier. Targeted cancellation suppresses completion delivery;
-`/stop all` is the user-facing global stop operation.
+User input, steering, background shell completion, subagent completion, and
+goal continuation enter the owning chat's controller instead of starting
+competing runs. Completion events carry their chat owner and cannot be consumed
+by another chat.
+
+The root agent can cancel one background subagent or managed shell owned by its
+chat using the returned identifier. Targeted cancellation suppresses completion
+delivery; `/stop all` cancels the current chat's root turn, queued work,
+subagents, and shells without disturbing other chats.
+
+Request-only providers never discard an out-of-band completion. If no request
+is open when background work finishes, delivery remains pending and is retried
+when the user next addresses that conversation.
 
 Each queued request retains its originating conversation and provider delivery
 context. A Responses HTTP request that becomes steering remains open and
-receives the answer produced for that specific queued input. Telegram replies
-remain on Telegram.
+receives the answer produced for that specific queued input. Supply the
+`conversation` field to select a named API chat; omitting it selects `default`.
+Telegram replies remain in their originating topic.
 
 The persistent status slot has this priority:
 
@@ -189,7 +206,8 @@ There is no unbounded automatic retry loop.
 Shell commands wait for `yield_time_ms` and then return a managed session ID if
 still running. `write_stdin` polls output or writes to a PTY. Detached
 completions re-enter through the root controller and retry delivery if the
-controller temporarily fails. `/stop all` terminates every live process group.
+controller temporarily fails. `/stop all` terminates every live process group
+owned by the current main chat.
 
 Subagents have isolated transcripts and independent backend, reasoning, retry,
 and context-window configuration. Completed record retention and recovery tool
@@ -198,6 +216,24 @@ are protected from pruning. Their private tool history is never projected into
 the parent. A subagent compacts lazily when its next model request needs room,
 so finishing a child does not trigger speculative compaction or delay its
 result.
+
+The background-subagent limit is process-wide. Providers may project safe,
+bounded activity without receiving the child's transcript or tool payloads. In
+a Telegram forum, Raptor creates a temporary activity topic, ignores user input
+inside it, and deletes it when the subagent ends. The bounded completion still
+returns to the parent main chat.
+
+### Telegram forum mode
+
+Set `TG_CHAT_ID` to a private chat for one main chat, or to a forum-enabled
+supergroup for multichat. In forum mode, the General topic and every normal
+forum topic are independent main-agent chats. The bot must be an administrator
+with **Manage Topics** permission so it can manage temporary subagent activity
+topics. Only `TG_USER_ID` is accepted as interactive input.
+
+Create and name normal topics with Telegram's standard UI. Raptor discovers a
+topic on its first message and persists its runtime. Activity topics are
+presentation-only and cannot steer their subagent; steer from the parent topic.
 
 ## Storage
 
@@ -213,7 +249,10 @@ $AGENT_WORKDIR/.raptor/
 ```
 
 `/new` creates a new transcript without deleting the old one. Archived sessions
-remain searchable with the `chat_history` tool.
+remain searchable with the `chat_history` tool, but only from their owning main
+chat. Transcript `session_start` records carry the main-chat key, and recovery
+rejects cross-chat references. State schema mismatches fail explicitly instead
+of guessing or silently discarding durable state.
 
 ## Skills
 
@@ -314,6 +353,7 @@ outside the documented ranges stop startup with a configuration error.
 |---|---:|---|
 | `TG_BOT_TOKEN` | empty | Bot token; required when Telegram is enabled |
 | `TG_USER_ID` | `0` | Authorized Telegram user ID |
+| `TG_CHAT_ID` | `TG_USER_ID` | Private chat or forum group served by the bot |
 | `TELEGRAM_MARKDOWN` | `1` | Enable Telegram Markdown rendering |
 
 ### Inbound Responses API
@@ -382,9 +422,10 @@ Run the provider contract separately while developing an adapter:
 uv run python -m unittest tests.test_chat_provider tests.test_multi_provider
 ```
 
-Changes should preserve the core invariants: one root controller, append-only
-conversation history, provider-affine delivery, bounded retained state, atomic
-process ownership, and explicit recovery after transient failure.
+Changes should preserve the core invariants: one root controller per main chat,
+append-only owner-tagged conversation history, provider-affine delivery,
+bounded retained state, atomic process ownership, and explicit recovery after
+transient failure.
 
 ## Contributing
 

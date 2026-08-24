@@ -32,7 +32,7 @@ class ChatStoreTests(unittest.TestCase):
         chat_store._SEQ_CACHE.clear()
 
     def test_session_creation_creates_jsonl(self) -> None:
-        sid = chat_store.create_session(kind="main")
+        sid = chat_store.create_session(kind="main", chat_key="local")
         path = chat_store.chat_path(sid)
         self.assertTrue(path.is_file())
         events = chat_store.read_events(sid)
@@ -41,7 +41,7 @@ class ChatStoreTests(unittest.TestCase):
         self.assertEqual(events[0]["seq"], 1)
 
     def test_sequence_numbers_monotonic(self) -> None:
-        sid = chat_store.create_session(kind="main")
+        sid = chat_store.create_session(kind="main", chat_key="local")
         a = chat_store.append_item(
             sid,
             {"role": "user", "content": "one"},
@@ -56,7 +56,7 @@ class ChatStoreTests(unittest.TestCase):
         self.assertEqual(b["seq"], 3)
 
     def test_append_never_rewrites_previous_lines(self) -> None:
-        sid = chat_store.create_session(kind="main")
+        sid = chat_store.create_session(kind="main", chat_key="local")
         path = chat_store.chat_path(sid)
         before = path.read_text(encoding="utf-8")
         chat_store.append_item(
@@ -69,7 +69,7 @@ class ChatStoreTests(unittest.TestCase):
         self.assertGreater(len(after), len(before))
 
     def test_raw_responses_items_round_trip(self) -> None:
-        sid = chat_store.create_session(kind="main")
+        sid = chat_store.create_session(kind="main", chat_key="local")
         item = {
             "type": "function_call",
             "name": "shell",
@@ -86,7 +86,7 @@ class ChatStoreTests(unittest.TestCase):
         self.assertEqual(written["item"], item)
 
     def test_checkpoint_and_session_end_persist(self) -> None:
-        sid = chat_store.create_session(kind="main")
+        sid = chat_store.create_session(kind="main", chat_key="local")
         chat_store.append_item(
             sid,
             {"role": "user", "content": "hi"},
@@ -123,9 +123,10 @@ class ChatStoreTests(unittest.TestCase):
         )
 
     def test_main_and_subagent_sessions_isolated(self) -> None:
-        main = chat_store.create_session(kind="main")
+        main = chat_store.create_session(kind="main", chat_key="local")
         child = chat_store.create_session(
             kind="subagent",
+            chat_key="local",
             agent_id="abcd1234",
             parent_session_id=main,
         )
@@ -152,7 +153,7 @@ class ChatStoreTests(unittest.TestCase):
         self.assertEqual(start["agent_id"], "abcd1234")
 
     def test_session_listing_and_search_are_transcript_scoped(self) -> None:
-        sid = chat_store.create_session(kind="main")
+        sid = chat_store.create_session(kind="main", chat_key="local")
         chat_store.append_item(
             sid,
             {"role": "user", "content": "Project Firefly"},
@@ -179,7 +180,7 @@ class ChatStoreTests(unittest.TestCase):
     def test_partial_final_line_repaired_before_append(
         self,
     ) -> None:
-        sid = chat_store.create_session(kind="main")
+        sid = chat_store.create_session(kind="main", chat_key="local")
         path = chat_store.chat_path(sid)
         path.write_bytes(
             path.read_bytes() + b'{"v":1,"seq":99,"partial"'
@@ -205,7 +206,7 @@ class ChatStoreTests(unittest.TestCase):
     def test_append_repairs_crash_tail_automatically(
         self,
     ) -> None:
-        sid = chat_store.create_session(kind="main")
+        sid = chat_store.create_session(kind="main", chat_key="local")
         path = chat_store.chat_path(sid)
         good = path.read_bytes()
         path.write_bytes(good + b'{"broken":')
@@ -218,8 +219,15 @@ class ChatStoreTests(unittest.TestCase):
             if line.strip():
                 json.loads(line)
 
+    def test_owner_lookup_does_not_parse_a_partial_tail(self) -> None:
+        sid = chat_store.create_session(kind="main", chat_key="owner")
+        with chat_store.chat_path(sid).open("ab") as handle:
+            handle.write(b'{"type":"item"')
+
+        self.assertEqual(chat_store.session_chat_key(sid), "owner")
+
     def test_complete_corrupt_event_is_reported(self) -> None:
-        sid = chat_store.create_session(kind="main")
+        sid = chat_store.create_session(kind="main", chat_key="local")
         path = chat_store.chat_path(sid)
         with path.open("a", encoding="utf-8") as handle:
             handle.write("not-json\n")
@@ -233,7 +241,7 @@ class ChatStoreTests(unittest.TestCase):
     def test_healthy_append_does_not_reread_whole_file(
         self,
     ) -> None:
-        sid = chat_store.create_session(kind="main")
+        sid = chat_store.create_session(kind="main", chat_key="local")
         path = chat_store.chat_path(sid)
         reads = {"n": 0}
         real_read = Path.read_bytes
@@ -280,7 +288,7 @@ class ChatStoreTests(unittest.TestCase):
     def test_compaction_render_leaves_archive_untouched(
         self,
     ) -> None:
-        sid = chat_store.create_session(kind="main")
+        sid = chat_store.create_session(kind="main", chat_key="local")
         huge = "CANONICAL-BLOB-" + ("Z" * 40_000)
         event = chat_store.append_item(
             sid,

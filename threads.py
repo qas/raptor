@@ -41,6 +41,7 @@ async def start_thread(conversation_id: ConversationId) -> dict[str, Any]:
         return {"ok": False, "error": "No valid main session."}
     branch_id = create_session(
         kind="thread",
+        chat_key=session.current_runtime().key,
         parent_session_id=parent_id,
     )
     seed = build_active_context(parent_id)

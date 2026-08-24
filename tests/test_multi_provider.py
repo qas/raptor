@@ -19,6 +19,7 @@ from chat_provider import (
 )
 from multi_provider import MultiProvider
 from responses_provider import ResponsesApiProvider
+from activity import ActivitySnapshot
 
 
 class QueueProvider:
@@ -122,6 +123,33 @@ class QueueProvider:
         self, action_id, text="", *, alert: bool = False,
     ) -> None:
         self.calls.append(("answer", action_id, text, alert))
+
+    async def open_activity_surface(self, conversation_id, snapshot):
+        self.calls.append(("activity_open", conversation_id, snapshot))
+        return "topic/message"
+
+    async def update_activity_surface(
+        self,
+        conversation_id,
+        surface_id,
+        snapshot,
+    ) -> None:
+        self.calls.append(
+            ("activity_update", conversation_id, surface_id, snapshot)
+        )
+
+    async def close_activity_surface(
+        self,
+        conversation_id,
+        surface_id,
+        snapshot,
+    ) -> None:
+        self.calls.append(
+            ("activity_close", conversation_id, surface_id, snapshot)
+        )
+
+    def restore_activity_surface(self, conversation_id, surface_id) -> None:
+        self.calls.append(("activity_restore", conversation_id, surface_id))
 
 
 class MultiProviderTests(unittest.IsolatedAsyncioTestCase):
@@ -263,6 +291,39 @@ class MultiProviderTests(unittest.IsolatedAsyncioTestCase):
             await self.multi.send_text("123", "ambiguous")
         with self.assertRaisesRegex(ValueError, "multiplexed action"):
             await self.multi.answer_action("action-1")
+
+    async def test_activity_surface_stays_on_its_provider(self) -> None:
+        snapshot = ActivitySnapshot(
+            activity_id="worker",
+            title="Task",
+            status="running",
+        )
+        conversation_id = "telegram:123"
+
+        surface_id = await self.multi.open_activity_surface(
+            conversation_id,
+            snapshot,
+        )
+        await self.multi.update_activity_surface(
+            conversation_id,
+            str(surface_id),
+            snapshot,
+        )
+        await self.multi.close_activity_surface(
+            conversation_id,
+            str(surface_id),
+            snapshot,
+        )
+
+        self.assertEqual(surface_id, "telegram:topic/message")
+        operations = [call[0] for call in self.telegram.calls]
+        self.assertEqual(
+            operations[-3:],
+            ["activity_open", "activity_update", "activity_close"],
+        )
+        self.assertFalse(
+            any(call[0].startswith("activity_") for call in self.api.calls)
+        )
 
     async def test_responses_request_context_survives_multiplexed_poll(self) -> None:
         responses = ResponsesApiProvider(host="127.0.0.1", port=0)

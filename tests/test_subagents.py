@@ -10,6 +10,14 @@ import subagents
 
 class BackgroundSubagentTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
+        self.runtime_context = session.bound_chat("telegram:123")
+        self.runtime_context.__enter__()
+        self.addCleanup(
+            self.runtime_context.__exit__,
+            None,
+            None,
+            None,
+        )
         session.subagent_records.clear()
         while True:
             try:
@@ -76,6 +84,7 @@ class BackgroundSubagentTests(unittest.IsolatedAsyncioTestCase):
         record = {
             "id": "worker-1",
             "chat_id": "telegram:123",
+            "chat_key": "telegram:123",
             "depth": 1,
             "allow_subagents": False,
             "notify_completion": True,
@@ -83,17 +92,21 @@ class BackgroundSubagentTests(unittest.IsolatedAsyncioTestCase):
             "completion_attempts": 0,
             "status": "running",
         }
-        session.subagent_records["worker-1"] = record
-        with (
-            patch.object(subagents, "run_subagent", wait_forever),
-            patch.object(subagents, "save_state"),
-            patch.object(subagents, "save_interrupted_subagent"),
-        ):
-            task = asyncio.create_task(subagents.run_background_subagent(record))
-            session.subagent_tasks["worker-1"] = task
-            await started.wait()
+        with session.bound_chat("telegram:123"):
+            session.subagent_records["worker-1"] = record
+        with session.bound_chat("telegram:123"):
+            with (
+                patch.object(subagents, "run_subagent", wait_forever),
+                patch.object(subagents, "save_state"),
+                patch.object(subagents, "save_interrupted_subagent"),
+            ):
+                task = asyncio.create_task(
+                    subagents.run_background_subagent(record)
+                )
+                session.subagent_tasks["worker-1"] = task
+                await started.wait()
 
-            result = await subagents.cancel_background_subagent("worker-1")
+                result = await subagents.cancel_background_subagent("worker-1")
 
         self.assertTrue(result["ok"])
         self.assertEqual(result["status"], "cancelled")
@@ -124,6 +137,17 @@ class BackgroundSubagentTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(record["status"], "completed")
         self.assertEqual(record["result"], "finished")
+
+    async def test_spawn_cannot_cross_chat_boundaries(self) -> None:
+        with session.bound_chat("telegram:parent"):
+            result = await subagents.subagent_tool(
+                {"task": "inspect", "background": True},
+                chat_id="responses_api:other",
+                execution_context={"depth": 0},
+            )
+
+        self.assertFalse(result["ok"])
+        self.assertIn("does not match", result["error"])
 
     def test_tool_event_recovery_history_is_bounded(self) -> None:
         events = [
@@ -249,11 +273,13 @@ class BackgroundSubagentTests(unittest.IsolatedAsyncioTestCase):
         record = {
             "id": "worker-1",
             "chat_id": "telegram:123",
+            "chat_key": "telegram:123",
             "status": "completed",
             "completion_pending": True,
             "completion_attempts": 0,
         }
-        session.subagent_records["worker-1"] = record
+        with session.bound_chat("telegram:123"):
+            session.subagent_records["worker-1"] = record
         delivered = AsyncMock(side_effect=RuntimeError("controller failed"))
         controller = types.ModuleType("controller")
         controller.enqueue_runtime_event = delivered

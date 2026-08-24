@@ -114,12 +114,12 @@ class GoalTests(unittest.IsolatedAsyncioTestCase):
             session.state["subagents"]
         )
         turns.finish()
-        session.goal_pin_message_id = None
-        session.goal_pin_goal_id = None
-        session.pinned_status_conversation_id = None
-        session.pinned_status_message_id = None
-        session.pinned_status_owner = None
-        session.goal_creation_authorized = False
+        session.current_runtime().goal_pin_message_id = None
+        session.current_runtime().goal_pin_goal_id = None
+        session.current_runtime().pinned_status_conversation_id = None
+        session.current_runtime().pinned_status_message_id = None
+        session.current_runtime().pinned_status_owner = None
+        session.current_runtime().goal_creation_authorized = False
         session.pending_approvals.clear()
         while True:
             try:
@@ -146,7 +146,8 @@ class GoalTests(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(self._chat_patch.stop)
         chat_store._SEQ_CACHE.clear()
         session.state["current_session_id"] = create_session(
-            kind="main"
+            kind="main",
+            chat_key=session.current_runtime().key,
         )
         session.state["pending_inputs"] = []
 
@@ -898,7 +899,7 @@ class GoalTests(unittest.IsolatedAsyncioTestCase):
             ),
         ):
             delivered = await controller.enqueue_runtime_event(
-                1,
+                session.current_runtime().conversation_id,
                 RuntimeEventKind.SUBAGENT_COMPLETED,
                 "A background subagent has finished.",
             )
@@ -924,7 +925,7 @@ class GoalTests(unittest.IsolatedAsyncioTestCase):
             patch.object(controller, "send", _noop),
         ):
             delivered = await controller.enqueue_runtime_event(
-                1,
+                session.current_runtime().conversation_id,
                 RuntimeEventKind.SUBAGENT_COMPLETED,
                 (
                     "A background subagent has finished.\n\n"
@@ -1080,7 +1081,7 @@ class GoalTests(unittest.IsolatedAsyncioTestCase):
             patch.object(controller, "send", _noop),
         ):
             delivered = await controller.enqueue_runtime_event(
-                1,
+                session.current_runtime().conversation_id,
                 RuntimeEventKind.SUBAGENT_COMPLETED,
                 "A background subagent has finished.",
             )
@@ -1544,12 +1545,12 @@ class GoalPinTests(unittest.IsolatedAsyncioTestCase):
             session.state["subagents"]
         )
         turns.finish()
-        session.goal_pin_message_id = None
-        session.goal_pin_goal_id = None
-        session.pinned_status_conversation_id = None
-        session.pinned_status_message_id = None
-        session.pinned_status_owner = None
-        session.goal_creation_authorized = False
+        session.current_runtime().goal_pin_message_id = None
+        session.current_runtime().goal_pin_goal_id = None
+        session.current_runtime().pinned_status_conversation_id = None
+        session.current_runtime().pinned_status_message_id = None
+        session.current_runtime().pinned_status_owner = None
+        session.current_runtime().goal_creation_authorized = False
         session.pending_approvals.clear()
         session.pending_steers.clear()
         while True:
@@ -1576,7 +1577,8 @@ class GoalPinTests(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(self._chat_patch.stop)
         chat_store._SEQ_CACHE.clear()
         session.state["current_session_id"] = create_session(
-            kind="main"
+            kind="main",
+            chat_key=session.current_runtime().key,
         )
         self._msg_ids = {"n": 100}
 
@@ -1606,9 +1608,9 @@ class GoalPinTests(unittest.IsolatedAsyncioTestCase):
     async def test_active_goal_creates_pin(self) -> None:
         replace_goal("Fix auth + verify tests")
         await ensure_goal_pin(1)
-        self.assertIsNotNone(session.goal_pin_message_id)
+        self.assertIsNotNone(session.current_runtime().goal_pin_message_id)
         self.assertEqual(
-            session.goal_pin_goal_id,
+            session.current_runtime().goal_pin_goal_id,
             current_goal()["id"],
         )
         self.assertEqual(
@@ -1621,11 +1623,11 @@ class GoalPinTests(unittest.IsolatedAsyncioTestCase):
     ) -> None:
         replace_goal("once only")
         await ensure_goal_pin(1)
-        first = session.goal_pin_message_id
+        first = session.current_runtime().goal_pin_message_id
         await ensure_goal_pin(1)
         await ensure_goal_pin(1)
         self.assertEqual(
-            session.goal_pin_message_id,
+            session.current_runtime().goal_pin_message_id,
             first,
         )
         self.assertEqual(len(self._cleared), 0)
@@ -1634,7 +1636,7 @@ class GoalPinTests(unittest.IsolatedAsyncioTestCase):
         replace_goal("pin id")
         await ensure_goal_pin(1)
         self.assertEqual(
-            session.goal_pin_goal_id,
+            session.current_runtime().goal_pin_goal_id,
             current_goal()["id"],
         )
 
@@ -1659,7 +1661,7 @@ class GoalPinTests(unittest.IsolatedAsyncioTestCase):
         await ensure_goal_pin(1)
         complete_goal(current_goal()["id"])
         await sync_goal_pin(1)
-        self.assertIsNone(session.goal_pin_message_id)
+        self.assertIsNone(session.current_runtime().goal_pin_message_id)
         self.assertEqual(len(self._cleared), 1)
 
     async def test_goal_blocked_removes_pin(self) -> None:
@@ -1667,7 +1669,7 @@ class GoalPinTests(unittest.IsolatedAsyncioTestCase):
         await ensure_goal_pin(1)
         block_goal(current_goal()["id"], "need help")
         await sync_goal_pin(1)
-        self.assertIsNone(session.goal_pin_message_id)
+        self.assertIsNone(session.current_runtime().goal_pin_message_id)
 
     async def test_goal_pause_removes_pin(self) -> None:
         replace_goal("pause me")
@@ -1675,7 +1677,7 @@ class GoalPinTests(unittest.IsolatedAsyncioTestCase):
         from commands import command
         with patch("commands.send", _noop):
             await command(1, "/goal pause")
-        self.assertIsNone(session.goal_pin_message_id)
+        self.assertIsNone(session.current_runtime().goal_pin_message_id)
         self.assertEqual(
             current_goal()["status"],
             GOAL_PAUSED,
@@ -1687,7 +1689,7 @@ class GoalPinTests(unittest.IsolatedAsyncioTestCase):
         from commands import command
         with patch("commands.send", _noop):
             await command(1, "/goal clear")
-        self.assertIsNone(session.goal_pin_message_id)
+        self.assertIsNone(session.current_runtime().goal_pin_message_id)
 
     async def test_stop_removes_pin(self) -> None:
         replace_goal("stop me")
@@ -1701,7 +1703,7 @@ class GoalPinTests(unittest.IsolatedAsyncioTestCase):
             patch("commands.send", _noop),
         ):
             await command(1, "/stop")
-        self.assertIsNone(session.goal_pin_message_id)
+        self.assertIsNone(session.current_runtime().goal_pin_message_id)
         self.assertEqual(
             current_goal()["status"],
             GOAL_PAUSED,
@@ -1727,7 +1729,7 @@ class GoalPinTests(unittest.IsolatedAsyncioTestCase):
             patch("commands.send", _noop),
         ):
             await command(1, "/goal resume")
-        self.assertIsNotNone(session.goal_pin_message_id)
+        self.assertIsNotNone(session.current_runtime().goal_pin_message_id)
         self.assertEqual(
             current_goal()["status"],
             GOAL_ACTIVE,
@@ -1739,13 +1741,13 @@ class GoalPinTests(unittest.IsolatedAsyncioTestCase):
         replace_goal("clean restart")
         notice = prepare_goal_on_startup()
         self.assertIsNone(notice)
-        session.goal_pin_message_id = None
-        session.goal_pin_goal_id = None
-        session.pinned_status_conversation_id = None
-        session.pinned_status_message_id = None
-        session.pinned_status_owner = None
+        session.current_runtime().goal_pin_message_id = None
+        session.current_runtime().goal_pin_goal_id = None
+        session.current_runtime().pinned_status_conversation_id = None
+        session.current_runtime().pinned_status_message_id = None
+        session.current_runtime().pinned_status_owner = None
         await ensure_goal_pin(1)
-        self.assertIsNotNone(session.goal_pin_message_id)
+        self.assertIsNotNone(session.current_runtime().goal_pin_message_id)
 
     async def test_unclean_restart_does_not_create_pin(
         self,
@@ -1755,20 +1757,20 @@ class GoalPinTests(unittest.IsolatedAsyncioTestCase):
         notice = prepare_goal_on_startup()
         self.assertIsNotNone(notice)
         await ensure_goal_pin(1)
-        self.assertIsNone(session.goal_pin_message_id)
+        self.assertIsNone(session.current_runtime().goal_pin_message_id)
 
     async def test_stale_goal_pin_is_replaced(self) -> None:
         replace_goal("first")
         await ensure_goal_pin(1)
-        old_id = session.goal_pin_message_id
-        session.goal_pin_goal_id = "stale-id"
+        old_id = session.current_runtime().goal_pin_message_id
+        session.current_runtime().goal_pin_goal_id = "stale-id"
         await ensure_goal_pin(1)
         self.assertNotEqual(
-            session.goal_pin_message_id,
+            session.current_runtime().goal_pin_message_id,
             old_id,
         )
         self.assertEqual(
-            session.goal_pin_goal_id,
+            session.current_runtime().goal_pin_goal_id,
             current_goal()["id"],
         )
         self.assertIn(old_id, self._cleared)
@@ -1790,7 +1792,7 @@ class GoalPinTests(unittest.IsolatedAsyncioTestCase):
             racing_show,
         ):
             await ensure_goal_pin(1)
-        self.assertIsNone(session.goal_pin_message_id)
+        self.assertIsNone(session.current_runtime().goal_pin_message_id)
         self.assertIn(555, self._cleared)
 
     async def test_pin_cleanup_is_idempotent(self) -> None:
@@ -1798,7 +1800,7 @@ class GoalPinTests(unittest.IsolatedAsyncioTestCase):
         await ensure_goal_pin(1)
         await remove_goal_pin(1)
         await remove_goal_pin(1)
-        self.assertIsNone(session.goal_pin_message_id)
+        self.assertIsNone(session.current_runtime().goal_pin_message_id)
 
     async def test_pin_delete_failure_does_not_break_goal_controller(
         self,
@@ -1814,7 +1816,7 @@ class GoalPinTests(unittest.IsolatedAsyncioTestCase):
             boom,
         ):
             await remove_goal_pin(1)
-        self.assertIsNone(session.goal_pin_message_id)
+        self.assertIsNone(session.current_runtime().goal_pin_message_id)
         calls: list[str] = []
 
         async def fake_turn(chat_id, text, **_kw):
@@ -1840,7 +1842,7 @@ class GoalPinTests(unittest.IsolatedAsyncioTestCase):
     async def test_steer_does_not_displace_goal_pin(self) -> None:
         replace_goal("steer alongside goal")
         await ensure_goal_pin(1)
-        goal_pin_id = session.goal_pin_message_id
+        goal_pin_id = session.current_runtime().goal_pin_message_id
         self.assertIsNotNone(goal_pin_id)
 
         async def fake_tg(method, payload=None):
@@ -1850,7 +1852,7 @@ class GoalPinTests(unittest.IsolatedAsyncioTestCase):
             from presentation import steering_indicator
             mid = await steering_indicator(1, "abcd")
         self.assertEqual(mid, 9001)
-        self.assertEqual(session.goal_pin_message_id, goal_pin_id)
+        self.assertEqual(session.current_runtime().goal_pin_message_id, goal_pin_id)
         self.assertEqual(
             current_goal()["status"],
             GOAL_ACTIVE,
@@ -1866,7 +1868,7 @@ class GoalPinTests(unittest.IsolatedAsyncioTestCase):
             "ui_finalized": False,
         }
         await sync_goal_pin(1)
-        self.assertIsNone(session.goal_pin_message_id)
+        self.assertIsNone(session.current_runtime().goal_pin_message_id)
         self.assertEqual(
             current_goal()["status"],
             GOAL_ACTIVE,
@@ -1882,7 +1884,7 @@ class GoalPinTests(unittest.IsolatedAsyncioTestCase):
             "status": "forcing",
         }
         await sync_goal_pin(1)
-        self.assertIsNotNone(session.goal_pin_message_id)
+        self.assertIsNotNone(session.current_runtime().goal_pin_message_id)
 
     async def test_goal_pin_restored_after_action_pin_clears(
         self,
@@ -1890,9 +1892,9 @@ class GoalPinTests(unittest.IsolatedAsyncioTestCase):
         replace_goal("restore me")
         await ensure_goal_pin(1)
         await suspend_goal_pin(1)
-        self.assertIsNone(session.goal_pin_message_id)
+        self.assertIsNone(session.current_runtime().goal_pin_message_id)
         await sync_goal_pin(1)
-        self.assertIsNotNone(session.goal_pin_message_id)
+        self.assertIsNotNone(session.current_runtime().goal_pin_message_id)
 
     async def test_completed_goal_not_restored_after_action_pin_clears(
         self,
@@ -1902,7 +1904,7 @@ class GoalPinTests(unittest.IsolatedAsyncioTestCase):
         await suspend_goal_pin(1)
         complete_goal(current_goal()["id"])
         await sync_goal_pin(1)
-        self.assertIsNone(session.goal_pin_message_id)
+        self.assertIsNone(session.current_runtime().goal_pin_message_id)
 
     async def test_paused_goal_not_restored_after_action_pin_clears(
         self,
@@ -1912,7 +1914,7 @@ class GoalPinTests(unittest.IsolatedAsyncioTestCase):
         await suspend_goal_pin(1)
         pause_goal()
         await sync_goal_pin(1)
-        self.assertIsNone(session.goal_pin_message_id)
+        self.assertIsNone(session.current_runtime().goal_pin_message_id)
 
     async def test_pin_suppression_does_not_change_goal_state(
         self,
@@ -1934,11 +1936,11 @@ class PinnedStatusSlotTests(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(set_chat_provider, previous_provider)
         session.state.clear()
         session.state.update(copy.deepcopy(session.DEFAULT_STATE))
-        session.goal_pin_message_id = None
-        session.goal_pin_goal_id = None
-        session.pinned_status_conversation_id = None
-        session.pinned_status_message_id = None
-        session.pinned_status_owner = None
+        session.current_runtime().goal_pin_message_id = None
+        session.current_runtime().goal_pin_goal_id = None
+        session.current_runtime().pinned_status_conversation_id = None
+        session.current_runtime().pinned_status_message_id = None
+        session.current_runtime().pinned_status_owner = None
         session.pending_approvals.clear()
         session.pending_steers.clear()
         self.calls: list[tuple[str, dict]] = []
@@ -1962,9 +1964,9 @@ class PinnedStatusSlotTests(unittest.IsolatedAsyncioTestCase):
 
         goal = replace_goal("shared slot")
         await ensure_goal_pin(1)
-        self.assertEqual(session.pinned_status_message_id, 321)
+        self.assertEqual(session.current_runtime().pinned_status_message_id, 321)
         self.assertEqual(
-            session.pinned_status_owner,
+            session.current_runtime().pinned_status_owner,
             f"goal:{goal['id']}",
         )
 
@@ -1986,9 +1988,9 @@ class PinnedStatusSlotTests(unittest.IsolatedAsyncioTestCase):
 
         await finalize_approval_message(entry, "approved")
 
-        self.assertEqual(session.pinned_status_message_id, 321)
+        self.assertEqual(session.current_runtime().pinned_status_message_id, 321)
         self.assertEqual(
-            session.pinned_status_owner,
+            session.current_runtime().pinned_status_owner,
             f"goal:{goal['id']}",
         )
         methods = [method for method, _payload in self.calls]
@@ -2057,8 +2059,8 @@ class PinnedStatusSlotTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertFalse(cleared)
-        self.assertEqual(session.pinned_status_owner, "steer:new")
-        self.assertEqual(session.pinned_status_message_id, 321)
+        self.assertEqual(session.current_runtime().pinned_status_owner, "steer:new")
+        self.assertEqual(session.current_runtime().pinned_status_message_id, 321)
 
     async def test_empty_slot_unpins_then_deletes_message(self) -> None:
         from presentation import clear_pinned_status, show_pinned_status
@@ -2067,7 +2069,7 @@ class PinnedStatusSlotTests(unittest.IsolatedAsyncioTestCase):
         cleared = await clear_pinned_status(1, owner="goal:test")
 
         self.assertTrue(cleared)
-        self.assertIsNone(session.pinned_status_message_id)
+        self.assertIsNone(session.current_runtime().pinned_status_message_id)
         methods = [method for method, _payload in self.calls]
         self.assertEqual(
             methods,
@@ -2114,12 +2116,12 @@ class SetGoalToolTests(unittest.IsolatedAsyncioTestCase):
             session.state["subagents"]
         )
         turns.finish()
-        session.goal_pin_message_id = None
-        session.goal_pin_goal_id = None
-        session.pinned_status_conversation_id = None
-        session.pinned_status_message_id = None
-        session.pinned_status_owner = None
-        session.goal_creation_authorized = False
+        session.current_runtime().goal_pin_message_id = None
+        session.current_runtime().goal_pin_goal_id = None
+        session.current_runtime().pinned_status_conversation_id = None
+        session.current_runtime().pinned_status_message_id = None
+        session.current_runtime().pinned_status_owner = None
+        session.current_runtime().goal_creation_authorized = False
         session.pending_approvals.clear()
         session.pending_steers.clear()
         while True:
@@ -2146,7 +2148,8 @@ class SetGoalToolTests(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(self._chat_patch.stop)
         chat_store._SEQ_CACHE.clear()
         session.state["current_session_id"] = create_session(
-            kind="main"
+            kind="main",
+            chat_key=session.current_runtime().key,
         )
         self._msg_ids = {"n": 200}
 
@@ -2188,7 +2191,7 @@ class SetGoalToolTests(unittest.IsolatedAsyncioTestCase):
             allow_goal_creation=False,
         ):
             authorized["seen"] = allow_goal_creation
-            session.goal_creation_authorized = allow_goal_creation
+            session.current_runtime().goal_creation_authorized = allow_goal_creation
             result = await set_goal_tool(
                 {
                     "objective": (
@@ -2267,7 +2270,7 @@ class SetGoalToolTests(unittest.IsolatedAsyncioTestCase):
             allow_goal_creation=False,
         ):
             seen["allow"] = allow_goal_creation
-            session.goal_creation_authorized = allow_goal_creation
+            session.current_runtime().goal_creation_authorized = allow_goal_creation
             result = await set_goal_tool(
                 {"objective": "hijack"},
                 chat_id=chat_id,
@@ -2303,7 +2306,7 @@ class SetGoalToolTests(unittest.IsolatedAsyncioTestCase):
             allow_goal_creation=False,
         ):
             seen["allow"] = allow_goal_creation
-            session.goal_creation_authorized = allow_goal_creation
+            session.current_runtime().goal_creation_authorized = allow_goal_creation
             result = await set_goal_tool(
                 {"objective": "nope"},
                 chat_id=chat_id,
@@ -2344,7 +2347,7 @@ class SetGoalToolTests(unittest.IsolatedAsyncioTestCase):
             allow_goal_creation=False,
         ):
             seen["allow"] = allow_goal_creation
-            session.goal_creation_authorized = allow_goal_creation
+            session.current_runtime().goal_creation_authorized = allow_goal_creation
             result = await set_goal_tool(
                 {"objective": "from subagent"},
                 chat_id=chat_id,
@@ -2365,7 +2368,7 @@ class SetGoalToolTests(unittest.IsolatedAsyncioTestCase):
             ),
         ):
             await controller.enqueue_runtime_event(
-                1,
+                session.current_runtime().conversation_id,
                 RuntimeEventKind.SUBAGENT_COMPLETED,
                 "A background subagent has finished.",
             )
@@ -2378,7 +2381,7 @@ class SetGoalToolTests(unittest.IsolatedAsyncioTestCase):
 
         async def fake_stream(chat_id, items, extra_instructions=""):
             during["authorized"] = (
-                session.goal_creation_authorized
+                session.current_runtime().goal_creation_authorized
             )
             return {
                 "output": [
@@ -2423,13 +2426,13 @@ class SetGoalToolTests(unittest.IsolatedAsyncioTestCase):
                 allow_goal_creation=True,
             )
         self.assertTrue(during["authorized"])
-        self.assertFalse(session.goal_creation_authorized)
+        self.assertFalse(session.current_runtime().goal_creation_authorized)
 
     async def test_set_goal_rejects_existing_unfinished_goal(
         self,
     ) -> None:
         replace_goal("existing")
-        session.goal_creation_authorized = True
+        session.current_runtime().goal_creation_authorized = True
         result = await set_goal_tool(
             {"objective": "replacement"},
             chat_id=1,
@@ -2444,7 +2447,7 @@ class SetGoalToolTests(unittest.IsolatedAsyncioTestCase):
     async def test_set_goal_uses_existing_goal_validation_and_length_limit(
         self,
     ) -> None:
-        session.goal_creation_authorized = True
+        session.current_runtime().goal_creation_authorized = True
         result = await set_goal_tool(
             {"objective": "   "},
             chat_id=1,
@@ -2471,7 +2474,7 @@ class SetGoalToolTests(unittest.IsolatedAsyncioTestCase):
             allow_goal_creation=False,
         ):
             calls.append(text)
-            session.goal_creation_authorized = allow_goal_creation
+            session.current_runtime().goal_creation_authorized = allow_goal_creation
             if allow_goal_creation and not current_goal():
                 await set_goal_tool(
                     {"objective": "ship it"},
@@ -2508,15 +2511,15 @@ class SetGoalToolTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_set_goal_creates_goal_pin(self) -> None:
-        session.goal_creation_authorized = True
+        session.current_runtime().goal_creation_authorized = True
         result = await set_goal_tool(
             {"objective": "pin please"},
             chat_id=1,
         )
         self.assertTrue(result["ok"])
-        self.assertIsNotNone(session.goal_pin_message_id)
+        self.assertIsNotNone(session.current_runtime().goal_pin_message_id)
         self.assertEqual(
-            session.goal_pin_goal_id,
+            session.current_runtime().goal_pin_goal_id,
             current_goal()["id"],
         )
 

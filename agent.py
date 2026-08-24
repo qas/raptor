@@ -296,7 +296,8 @@ async def agent_turn(
     turn_source = source or (
         "internal" if internal else "user"
     )
-    session.goal_creation_authorized = bool(
+    runtime = session.current_runtime()
+    runtime.goal_creation_authorized = bool(
         allow_goal_creation
         and turn_source == "user"
     )
@@ -675,7 +676,7 @@ async def agent_turn(
         )
         return False
     finally:
-        session.goal_creation_authorized = False
+        runtime.goal_creation_authorized = False
         typing_task.cancel()
         await asyncio.gather(typing_task, return_exceptions=True)
         if continue_pending:

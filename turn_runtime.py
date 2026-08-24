@@ -155,4 +155,64 @@ class TurnCoordinator:
         return InterruptResult(snapshot=active.snapshot, completed=True)
 
 
-turns = TurnCoordinator()
+class TurnRegistry:
+    """Route turn ownership to the currently bound main-agent chat."""
+
+    @staticmethod
+    def _current() -> TurnCoordinator:
+        from session import current_runtime
+
+        return current_runtime().turns
+
+    @property
+    def task(self) -> asyncio.Task[None] | None:
+        return self._current().task
+
+    @property
+    def snapshot(self) -> TurnSnapshot | None:
+        return self._current().snapshot
+
+    @property
+    def goal_id(self) -> str | None:
+        return self._current().goal_id
+
+    def is_running(self) -> bool:
+        return self._current().is_running()
+
+    def elapsed_seconds(self) -> int:
+        return self._current().elapsed_seconds()
+
+    def start(
+        self,
+        coroutine: Coroutine[Any, Any, None],
+        *,
+        kind: TurnKind,
+        goal_id: str | None = None,
+        before_start: Callable[[TurnSnapshot], None] | None = None,
+    ) -> asyncio.Task[None]:
+        return self._current().start(
+            coroutine,
+            kind=kind,
+            goal_id=goal_id,
+            before_start=before_start,
+        )
+
+    def set_goal_id(self, goal_id: str | None) -> None:
+        self._current().set_goal_id(goal_id)
+
+    def finish(self, task: asyncio.Task[Any] | None = None) -> bool:
+        return self._current().finish(task)
+
+    async def interrupt(
+        self,
+        *,
+        expected_turn_id: str | None = None,
+        grace_seconds: float = INTERRUPT_GRACE_SECONDS,
+    ) -> InterruptResult:
+        return await self._current().interrupt(
+            expected_turn_id=expected_turn_id,
+            grace_seconds=grace_seconds,
+        )
+
+
+turns = TurnRegistry()

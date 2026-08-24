@@ -99,6 +99,7 @@ RESPONSES_SERVER_MAX_BODY = _env_int(
 # time and validated only when the Telegram provider is initialized.
 TG_BOT_TOKEN = os.getenv("TG_BOT_TOKEN", "")
 TG_USER_ID = _env_int("TG_USER_ID", 0, minimum=0)
+TG_CHAT_ID = _env_int("TG_CHAT_ID", TG_USER_ID)
 
 RESPONSES_BASE_URL = os.getenv(
     "RESPONSES_BASE_URL",
@@ -779,7 +780,7 @@ TOOLS = [
             "Cancel one running background resource by its exact identifier. "
             "Use kind=subagent with an agent_id returned by subagent, or "
             "kind=shell with a session_id returned by shell. This is targeted; "
-            "/stop all is the user-controlled global stop operation."
+            "/stop all cancels background work owned by the current chat."
         ),
         "parameters": {
             "type": "object",

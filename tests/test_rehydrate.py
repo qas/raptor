@@ -38,7 +38,7 @@ class RehydrateTests(unittest.TestCase):
     def test_rehydrate_pending_inputs_into_steer_queue(
         self,
     ) -> None:
-        count = session.rehydrate_pending_inputs(1)
+        count = session.rehydrate_pending_inputs(session.current_runtime().conversation_id)
         self.assertEqual(count, 2)
         self.assertEqual(session.steer_queue.qsize(), 2)
         first = session.steer_queue.get_nowait()

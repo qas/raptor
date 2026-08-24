@@ -475,16 +475,17 @@ async def enqueue_runtime_event(
     *,
     is_active: Callable[[], bool] | None = None,
 ) -> bool:
-    done: asyncio.Future[bool] = (
-        asyncio.get_running_loop().create_future()
-    )
-    event = RuntimeEvent(
-        conversation_id=chat_id,
-        kind=kind,
-        content=text,
-        done=done,
-        is_active=is_active,
-    )
-    await session.runtime_event_queue.put(event)
-    ensure_root_session(chat_id, None)
-    return bool(await done)
+    with session.bound_chat(chat_id):
+        done: asyncio.Future[bool] = (
+            asyncio.get_running_loop().create_future()
+        )
+        event = RuntimeEvent(
+            conversation_id=chat_id,
+            kind=kind,
+            content=text,
+            done=done,
+            is_active=is_active,
+        )
+        await session.runtime_event_queue.put(event)
+        ensure_root_session(chat_id, None)
+        return bool(await done)

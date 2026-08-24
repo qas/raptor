@@ -245,14 +245,60 @@ class ResponsesApiProviderTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.json()["status"], "accepted")
         self.assertEqual(response.json()["message"], "Approved")
 
-    async def test_rejects_other_conversation(self) -> None:
+    async def test_routes_named_conversation(self) -> None:
         async with httpx.AsyncClient() as client:
-            response = await client.post(
-                self.base_url + "/v1/responses",
-                json={"input": "hello", "conversation": "other"},
+            request = asyncio.create_task(
+                client.post(
+                    self.base_url + "/v1/responses",
+                    json={"input": "hello", "conversation": "other"},
+                )
             )
-        self.assertEqual(response.status_code, 400)
-        self.assertIn("one durable conversation", response.text)
+            batch = await self._poll()
+            event = batch.events[0]
+            self.assertEqual(event.conversation_id, "other")
+            await self.provider.send_text(event.conversation_id, "answer")
+            response = await request
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["output_text"], "answer")
+
+    async def test_send_requires_an_active_request_for_the_conversation(
+        self,
+    ) -> None:
+        with self.assertRaisesRegex(RuntimeError, "no active Responses"):
+            await self.provider.send_text("default", "orphaned")
+
+    async def test_delivery_context_is_scoped_to_its_conversation(self) -> None:
+        pending = await self.provider._queue_message({
+            "input": "hello",
+            "conversation": "alpha",
+        })
+        batch = await self._poll()
+        with self.assertRaisesRegex(ValueError, "another conversation"):
+            self.provider.capture_delivery_context("beta")
+        context = self.provider.capture_delivery_context("alpha")
+        with self.assertRaisesRegex(ValueError, "another conversation"):
+            self.provider.activate_delivery_context("beta", context)
+        await self.provider.send_text("alpha", "done")
+        assert pending.completed is not None
+        await pending.completed
+
+    async def test_status_messages_are_scoped_to_their_conversation(
+        self,
+    ) -> None:
+        message_id = await self.provider.create_message("alpha", "Working")
+        operations = (
+            self.provider.edit_message("beta", message_id, "Changed"),
+            self.provider.delete_message("beta", message_id),
+            self.provider.pin_message("beta", message_id),
+            self.provider.unpin_message("beta", message_id),
+        )
+        for operation in operations:
+            with self.assertRaisesRegex(ValueError, "another conversation"):
+                await operation
+        self.assertEqual(
+            self.provider.messages[message_id]["conversation_id"],
+            "alpha",
+        )
 
     async def test_busy_noncommand_waits_for_steered_response(self) -> None:
         turns.start(
@@ -395,6 +441,10 @@ class ResponsesApiProviderTests(unittest.IsolatedAsyncioTestCase):
         async with httpx.AsyncClient() as client:
             response = await client.get(self.base_url + "/v1/status")
         self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.json()["conversation"],
+            self.provider.primary_conversation_id,
+        )
         self.assertEqual(response.json()["data"], [{
             "conversation_id": self.provider.primary_conversation_id,
             "message_id": message_id,
@@ -405,6 +455,26 @@ class ResponsesApiProviderTests(unittest.IsolatedAsyncioTestCase):
             }],
             "pinned": True,
         }])
+
+    async def test_status_snapshot_is_scoped_to_named_conversation(
+        self,
+    ) -> None:
+        default_id = await self.provider.create_message("default", "Default")
+        named_id = await self.provider.create_message("project-a", "Named")
+        async with httpx.AsyncClient() as client:
+            default_response = await client.get(self.base_url + "/v1/status")
+            named_response = await client.get(
+                self.base_url + "/v1/status",
+                params={"conversation": "project-a"},
+            )
+        self.assertEqual(
+            [item["message_id"] for item in default_response.json()["data"]],
+            [default_id],
+        )
+        self.assertEqual(
+            [item["message_id"] for item in named_response.json()["data"]],
+            [named_id],
+        )
 
     async def test_lists_the_agent_model(self) -> None:
         async with httpx.AsyncClient() as client:

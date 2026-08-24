@@ -50,6 +50,22 @@ from responses import (
 )
 from skills import skill_catalog_instructions
 from observability import log_event
+from activity import (
+    close_subagent_activity,
+    open_subagent_activity,
+    publish_subagent_activity,
+    schedule_subagent_activity_close,
+)
+
+
+_background_reservations = 0
+
+
+def _background_subagent_count() -> int:
+    return _background_reservations + sum(
+        len(runtime.subagent_tasks)
+        for runtime in session.all_chat_runtimes()
+    )
 
 
 def _bounded_tool_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -594,6 +610,10 @@ async def run_subagent(
         checkpoint=checkpoint,
         compact_context=compact_work,
         record_items=record_items,
+        report_activity=lambda detail: publish_subagent_activity(
+            record,
+            detail,
+        ),
     )
     record["tool_events"] = _bounded_tool_events(
         previous_events + list(result["tool_events"])
@@ -629,6 +649,7 @@ def new_record(
     parent_session_id = state.get("current_session_id")
     session_id = create_session(
         kind="subagent",
+        chat_key=session.current_runtime().key,
         agent_id=agent_id,
         parent_session_id=(
             str(parent_session_id)
@@ -643,6 +664,7 @@ def new_record(
     )
     return {
         "id": agent_id,
+        "chat_key": session.current_runtime().key,
         "session_id": session_id,
         "parent_session_id": parent_session_id,
         "task": task,
@@ -665,6 +687,8 @@ def new_record(
         "completion_pending": False,
         "completion_notified_at": None,
         "completion_attempts": 0,
+        "activity_surface_id": None,
+        "activity_surface_closed": True,
     }
 
 
@@ -812,6 +836,7 @@ def continue_record(
         source="delegation",
     )
     record["chat_id"] = chat_id
+    record["chat_key"] = session.current_runtime().key
     record["depth"] = depth
     record["background"] = background
     record[
@@ -837,6 +862,8 @@ def continue_record(
     record[
         "completion_attempts"
     ] = 0
+    record["activity_surface_id"] = None
+    record["activity_surface_closed"] = True
     save_state()
 
 
@@ -934,14 +961,15 @@ async def run_background_subagent(
                 record
             ),
         )
-        session.subagent_tasks.pop(
-            agent_id,
-            None,
-        )
         if should_notify:
             await session.subagent_events.put(
                 dict(record)
             )
+        session.subagent_tasks.pop(
+            agent_id,
+            None,
+        )
+        schedule_subagent_activity_close(record)
 
 
 async def subagent_tool(
@@ -1000,6 +1028,11 @@ async def subagent_tool(
                 "subagent requires a user-facing parent agent"
             ),
         }
+    if session.conversation_key(chat_id) != session.current_runtime().key:
+        return {
+            "ok": False,
+            "error": "subagent conversation does not match the current chat",
+        }
     parent_depth = int(
         execution_context.get(
             "depth",
@@ -1043,15 +1076,6 @@ async def subagent_tool(
                 "Nested subagents must run in the foreground"
             ),
         }
-    if background and len(session.subagent_tasks) >= MAX_BACKGROUND_SUBAGENTS:
-        return {
-            "ok": False,
-            "status": "capacity_reached",
-            "error": (
-                "Background subagent capacity reached "
-                f"({MAX_BACKGROUND_SUBAGENTS})"
-            ),
-        }
     if requested_id:
         record = (
             session.subagent_records.get(
@@ -1065,9 +1089,7 @@ async def subagent_tool(
                     f"subagent {requested_id} not found"
                 ),
             }
-        if record.get(
-            "status"
-        ) == "running":
+        if record.get("status") == "running":
             pending_inputs = record.setdefault(
                 "pending_inputs",
                 [],
@@ -1106,6 +1128,7 @@ async def subagent_tool(
                 "status":
                     "steering_queued",
             }
+        await close_subagent_activity(record)
         allow_subagents = (
             bool(
                 args[
@@ -1167,14 +1190,40 @@ async def subagent_tool(
         ),
     )
     if background:
-        task_handle = asyncio.create_task(
-            run_background_subagent(
-                record
+        global _background_reservations
+        if _background_subagent_count() >= MAX_BACKGROUND_SUBAGENTS:
+            record["status"] = "cancelled"
+            record["error"] = "Background subagent capacity reached"
+            record["completed_at"] = int(time.time())
+            save_state()
+            return {
+                "ok": False,
+                "status": "capacity_reached",
+                "error": (
+                    "Background subagent capacity reached "
+                    f"({MAX_BACKGROUND_SUBAGENTS})"
+                ),
+            }
+        _background_reservations += 1
+        try:
+            await open_subagent_activity(record)
+            task_handle = asyncio.create_task(
+                run_background_subagent(
+                    record
+                )
             )
-        )
-        session.subagent_tasks[
-            agent_id
-        ] = task_handle
+            session.subagent_tasks[
+                agent_id
+            ] = task_handle
+        except asyncio.CancelledError:
+            record["status"] = "cancelled"
+            record["error"] = "Subagent start was cancelled"
+            record["completed_at"] = int(time.time())
+            save_state()
+            await close_subagent_activity(record)
+            raise
+        finally:
+            _background_reservations -= 1
         return {
             "ok": True,
             "agent_id": agent_id,
@@ -1291,93 +1340,75 @@ async def completion_event_loop() -> None:
     from controller import enqueue_runtime_event
     from runtime_events import RuntimeEventKind
     restored = False
-    for record in (
-        session.subagent_records.values()
-    ):
-        if record.get(
-            "completion_pending"
-        ):
-            record["completion_attempts"] = 0
-            restored = True
-            await session.subagent_events.put(
-                dict(record)
-            )
+    for runtime in session.all_chat_runtimes():
+        with session.bound_runtime(runtime):
+            for record in runtime.subagent_records.values():
+                if record.get("completion_pending"):
+                    record["completion_attempts"] = 0
+                    restored = True
+                    await session.subagent_events.put(dict(record))
     if restored:
         save_state()
     while True:
         record = await session.subagent_events.get()
         try:
-            live_record = (
-                session.subagent_records.get(
-                    str(
-                        record["id"]
-                    )
-                )
-            )
-            if (
-                not live_record
-                or not live_record.get(
-                    "completion_pending"
-                )
-            ):
+            chat_id = record.get("chat_id")
+            if chat_id is None:
                 continue
-            try:
-                delivered = await enqueue_runtime_event(
-                    record["chat_id"],
-                    RuntimeEventKind.SUBAGENT_COMPLETED,
-                    completion_prompt(
-                        record
-                    ),
-                    is_active=lambda current=live_record: bool(
-                        current.get("completion_pending")
-                    ),
-                )
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                delivered = False
+            owner_key = str(record.get("chat_key") or "")
+            if owner_key != session.conversation_key(chat_id):
                 log_event(
                     "subagent",
-                    "completion_delivery_error",
-                    {
-                        "agent_id": record.get("id"),
-                        "type": type(exc).__name__,
-                        "message": str(exc),
-                    },
+                    "completion_owner_mismatch",
+                    {"agent_id": record.get("id")},
                 )
-            if delivered:
-                live_record[
-                    "completion_pending"
-                ] = False
-                live_record[
-                    "completion_notified_at"
-                ] = int(
-                    time.time()
-                )
-                live_record[
-                    "completion_attempts"
-                ] = 0
-                prune_subagent_records()
-                save_state()
-            else:
-                attempts = int(
-                    live_record.get(
-                        "completion_attempts",
-                        0,
+                continue
+            with session.bound_chat(chat_id):
+                live_record = session.subagent_records.get(str(record["id"]))
+                if not live_record or not live_record.get("completion_pending"):
+                    continue
+                try:
+                    delivered = await enqueue_runtime_event(
+                        chat_id,
+                        RuntimeEventKind.SUBAGENT_COMPLETED,
+                        completion_prompt(record),
+                        is_active=lambda current=live_record: bool(
+                            current.get("completion_pending")
+                        ),
                     )
-                ) + 1
-                live_record[
-                    "completion_attempts"
-                ] = attempts
-                save_state()
-                log_event(
-                    "subagent",
-                    "completion_deferred",
-                    {
-                        "agent_id": live_record.get("id"),
-                        "attempts": attempts,
-                    },
-                )
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    delivered = False
+                    log_event(
+                        "subagent",
+                        "completion_delivery_error",
+                        {
+                            "agent_id": record.get("id"),
+                            "type": type(exc).__name__,
+                            "message": str(exc),
+                        },
+                    )
+                if delivered:
+                    live_record["completion_pending"] = False
+                    live_record["completion_notified_at"] = int(time.time())
+                    live_record["completion_attempts"] = 0
+                    prune_subagent_records()
+                    save_state()
+                else:
+                    attempts = int(
+                        live_record.get("completion_attempts", 0)
+                    ) + 1
+                    live_record["completion_attempts"] = attempts
+                    save_state()
+                    log_event(
+                        "subagent",
+                        "completion_deferred",
+                        {
+                            "agent_id": live_record.get("id"),
+                            "attempts": attempts,
+                        },
+                    )
         finally:
             session.subagent_events.task_done()
 

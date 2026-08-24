@@ -2,11 +2,12 @@
 import asyncio
 import contextvars
 import json
+import re
 import secrets
 import time
 from dataclasses import dataclass, field
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 
 from chat_provider import (
     ChatEvent,
@@ -26,6 +27,7 @@ from config import (
 from observability import log_exception
 
 SSE_HEARTBEAT_SECONDS = 10.0
+CONVERSATION_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
 
 
 _request_id: contextvars.ContextVar[str | None] = contextvars.ContextVar(
@@ -38,6 +40,7 @@ _request_id: contextvars.ContextVar[str | None] = contextvars.ContextVar(
 class PendingResponse:
     response_id: str
     request_id: str
+    conversation_id: str
     stream: bool
     created_at: int = field(default_factory=lambda: int(time.time()))
     completed: asyncio.Future[dict[str, Any]] | None = None
@@ -114,11 +117,11 @@ def input_text(value: Any) -> str:
 
 
 class ResponsesApiProvider:
-    """Expose the single durable operator session over HTTP and SSE."""
+    """Expose named durable conversations over HTTP and SSE."""
 
     name = "responses_api"
     authorized_user_id = "api:operator"
-    primary_conversation_id = "api:default"
+    primary_conversation_id = "default"
     capabilities = ProviderCapabilities(
         drafts=True,
         reasoning_summaries=True,
@@ -181,6 +184,7 @@ class ResponsesApiProvider:
                 )
         self.pending.clear()
         self.event_requests.clear()
+        self._clear_request_context()
 
     async def poll(
         self,
@@ -214,11 +218,23 @@ class ResponsesApiProvider:
         request_id = _request_id.get()
         return self.pending.get(request_id or "")
 
+    def _conversation_pending(
+        self,
+        conversation_id: ConversationId,
+    ) -> PendingResponse | None:
+        pending = self._pending()
+        if (
+            pending is not None
+            and pending.conversation_id != str(conversation_id)
+        ):
+            raise ValueError("delivery context belongs to another conversation")
+        return pending
+
     def capture_delivery_context(
         self,
         conversation_id: ConversationId,
     ) -> str | None:
-        del conversation_id
+        self._conversation_pending(conversation_id)
         return _request_id.get()
 
     def activate_delivery_context(
@@ -226,8 +242,14 @@ class ResponsesApiProvider:
         conversation_id: ConversationId,
         value: Any | None,
     ) -> contextvars.Token[str | None]:
-        del conversation_id
-        return _request_id.set(str(value) if value is not None else None)
+        request_id = str(value) if value is not None else None
+        pending = self.pending.get(request_id or "")
+        if (
+            pending is not None
+            and pending.conversation_id != str(conversation_id)
+        ):
+            raise ValueError("delivery context belongs to another conversation")
+        return _request_id.set(request_id)
 
     def restore_delivery_context(
         self,
@@ -256,6 +278,7 @@ class ResponsesApiProvider:
         return {
             "type": "raptor.status",
             "operation": operation,
+            "conversation_id": message["conversation_id"],
             "message_id": message["message_id"],
             "text": message["text"],
             "actions": message["actions"],
@@ -297,10 +320,11 @@ class ResponsesApiProvider:
         }
 
     async def send_text(self, conversation_id, text: str) -> None:
-        del conversation_id
-        pending = self._pending()
+        pending = self._conversation_pending(conversation_id)
         if pending is None or pending.completed is None:
-            return
+            raise RuntimeError(
+                "no active Responses request for this conversation"
+            )
         response = self._response(pending, str(text))
         if not pending.completed.done():
             pending.completed.set_result(response)
@@ -340,8 +364,8 @@ class ResponsesApiProvider:
         draft_id: int,
         text: str,
     ) -> None:
-        del conversation_id, draft_id
-        pending = self._pending()
+        del draft_id
+        pending = self._conversation_pending(conversation_id)
         if pending is None or not pending.stream:
             return
         current = str(text)
@@ -363,8 +387,7 @@ class ResponsesApiProvider:
         conversation_id,
         delta: str,
     ) -> None:
-        del conversation_id
-        pending = self._pending()
+        pending = self._conversation_pending(conversation_id)
         text = str(delta)
         if pending is None or not pending.stream or not text:
             return
@@ -383,6 +406,7 @@ class ResponsesApiProvider:
         text: str,
         controls: Controls = (),
     ) -> str:
+        self._conversation_pending(conversation_id)
         self._message_counter += 1
         message_id = f"status_{self._message_counter}"
         message = {
@@ -403,8 +427,14 @@ class ResponsesApiProvider:
         text: str,
         controls: Controls = (),
     ) -> None:
+        self._conversation_pending(conversation_id)
         key = str(message_id)
         previous = self.messages.get(key, {})
+        if (
+            previous
+            and previous["conversation_id"] != str(conversation_id)
+        ):
+            raise ValueError("message belongs to another conversation")
         message = {
             "conversation_id": str(conversation_id),
             "message_id": key,
@@ -416,45 +446,57 @@ class ResponsesApiProvider:
         self._emit(self._status_event("updated", message))
 
     async def delete_message(self, conversation_id, message_id) -> None:
-        del conversation_id
+        self._conversation_pending(conversation_id)
         key = str(message_id)
+        message = self.messages.get(key)
+        if (
+            message is not None
+            and message["conversation_id"] != str(conversation_id)
+        ):
+            raise ValueError("message belongs to another conversation")
         self.messages.pop(key, None)
         self._emit({
             "type": "raptor.status",
             "operation": "deleted",
+            "conversation_id": str(conversation_id),
             "message_id": key,
         })
 
     async def pin_message(self, conversation_id, message_id) -> None:
-        del conversation_id
+        self._conversation_pending(conversation_id)
         message = self.messages.get(str(message_id))
         if message is None:
             return
+        if message["conversation_id"] != str(conversation_id):
+            raise ValueError("message belongs to another conversation")
         message["pinned"] = True
         self._emit(self._status_event("pinned", message))
 
     async def unpin_message(self, conversation_id, message_id) -> None:
-        del conversation_id
+        self._conversation_pending(conversation_id)
         message = self.messages.get(str(message_id))
         if message is None:
             return
+        if message["conversation_id"] != str(conversation_id):
+            raise ValueError("message belongs to another conversation")
         message["pinned"] = False
         self._emit(self._status_event("unpinned", message))
 
     async def set_typing(self, conversation_id, active: bool) -> None:
-        del conversation_id
+        self._conversation_pending(conversation_id)
         self._emit({
             "type": "raptor.status",
             "operation": "typing",
+            "conversation_id": str(conversation_id),
             "active": bool(active),
         })
 
     async def reject_busy_message(self, conversation_id) -> bool:
-        del conversation_id
+        self._conversation_pending(conversation_id)
         return False
 
     async def acknowledge_queued_message(self, conversation_id) -> None:
-        del conversation_id
+        self._conversation_pending(conversation_id)
         # Request-style steering remains open until the queued turn produces
         # its real response. The core restores this request's delivery context
         # when the work is selected.
@@ -503,12 +545,17 @@ class ResponsesApiProvider:
     async def _read_request(
         self,
         reader: asyncio.StreamReader,
-    ) -> tuple[str, str, dict[str, str], bytes]:
+    ) -> tuple[str, str, dict[str, str], dict[str, str], bytes]:
         header = await reader.readuntil(b"\r\n\r\n")
         if len(header) > 65536:
             raise ValueError("request headers are too large")
         lines = header[:-4].decode("latin-1").split("\r\n")
         method, target, _version = lines[0].split(" ", 2)
+        url = urlsplit(target)
+        query = {
+            key: values[-1]
+            for key, values in parse_qs(url.query, keep_blank_values=True).items()
+        }
         headers: dict[str, str] = {}
         for line in lines[1:]:
             name, separator, value = line.partition(":")
@@ -518,7 +565,7 @@ class ResponsesApiProvider:
         if length < 0 or length > self.max_body:
             raise ValueError("request body is too large")
         body = await reader.readexactly(length) if length else b""
-        return method.upper(), urlsplit(target).path, headers, body
+        return method.upper(), url.path, query, headers, body
 
     def _authorized(self, headers: dict[str, str]) -> bool:
         if not self.api_key:
@@ -603,25 +650,26 @@ class ResponsesApiProvider:
         self,
         payload: dict[str, Any],
     ) -> PendingResponse:
-        if payload.get("conversation") not in {
-            None,
-            self.primary_conversation_id,
-        }:
+        conversation_id = str(
+            payload.get("conversation") or self.primary_conversation_id
+        )
+        if not CONVERSATION_PATTERN.fullmatch(conversation_id):
             raise ValueError(
-                "this provider exposes one durable conversation: "
-                + str(self.primary_conversation_id)
+                "conversation must be 1-128 letters, numbers, dots, "
+                "underscores, or hyphens"
             )
         text = input_text(payload.get("input"))
         request_id = "req_" + secrets.token_hex(12)
         pending = PendingResponse(
             response_id="resp_" + secrets.token_hex(12),
             request_id=request_id,
+            conversation_id=conversation_id,
             stream=bool(payload.get("stream", False)),
             completed=asyncio.get_running_loop().create_future(),
         )
         self.pending[request_id] = pending
         event = IncomingMessage(
-            conversation_id=self.primary_conversation_id,
+            conversation_id=conversation_id,
             sender_id=self.authorized_user_id,
             message_id="in_" + secrets.token_hex(12),
             text=text,
@@ -634,10 +682,16 @@ class ResponsesApiProvider:
         data = str(payload.get("data") or "").strip()
         if not data:
             raise ValueError("data is required")
+        conversation_id = str(
+            payload.get("conversation") or self.primary_conversation_id
+        )
+        if not CONVERSATION_PATTERN.fullmatch(conversation_id):
+            raise ValueError("invalid conversation")
         request_id = "req_" + secrets.token_hex(12)
         pending = PendingResponse(
             response_id="action_" + secrets.token_hex(12),
             request_id=request_id,
+            conversation_id=conversation_id,
             stream=False,
             completed=asyncio.get_running_loop().create_future(),
             action=True,
@@ -645,7 +699,7 @@ class ResponsesApiProvider:
         self.pending[request_id] = pending
         event = IncomingAction(
             action_id=pending.response_id,
-            conversation_id=self.primary_conversation_id,
+            conversation_id=conversation_id,
             sender_id=self.authorized_user_id,
             message_id=payload.get("message_id"),
             data=data,
@@ -661,7 +715,9 @@ class ResponsesApiProvider:
     ) -> None:
         pending: PendingResponse | None = None
         try:
-            method, path, headers, body = await self._read_request(reader)
+            method, path, query, headers, body = await self._read_request(
+                reader
+            )
             if not self._authorized(headers):
                 await self._write_json(
                     writer,
@@ -678,9 +734,20 @@ class ResponsesApiProvider:
                 await self._write_json(writer, 200, {"ok": True})
                 return
             if method == "GET" and path == "/v1/status":
+                conversation_id = query.get(
+                    "conversation",
+                    self.primary_conversation_id,
+                )
+                if not CONVERSATION_PATTERN.fullmatch(conversation_id):
+                    raise ValueError("invalid conversation")
                 await self._write_json(writer, 200, {
                     "object": "raptor.status.list",
-                    "data": list(self.messages.values()),
+                    "conversation": conversation_id,
+                    "data": [
+                        message
+                        for message in self.messages.values()
+                        if message["conversation_id"] == conversation_id
+                    ],
                 })
                 return
             if method == "GET" and path == "/v1/models":

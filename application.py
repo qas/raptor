@@ -7,6 +7,7 @@ import signal
 import httpx
 
 import session
+from activity import close_activity_projections, reconcile_activity_surfaces
 from agent import repair_interrupted_root_turn
 from chat_runtime import load_chat_providers, send, set_chat_provider
 from chat_store import chat_path, ensure_chat_dirs
@@ -68,11 +69,20 @@ async def main() -> None:
         ensure_chat_dirs()
         RAPTOR_HOME.mkdir(parents=True, exist_ok=True)
         CHAT_DIR.mkdir(parents=True, exist_ok=True)
+        primary_runtime = session.set_default_chat(
+            provider.primary_conversation_id
+        )
         storage = bootstrap_runtime_storage()
-
-        session_id = state.get("current_session_id")
         conversation_id = provider.primary_conversation_id
-        rehydrated = rehydrate_pending_inputs(conversation_id)
+        rehydrated_by_chat: dict[str, int] = {}
+        for runtime in session.all_chat_runtimes():
+            with session.bound_runtime(runtime):
+                rehydrated_by_chat[runtime.key] = rehydrate_pending_inputs(
+                    runtime.conversation_id
+                )
+        with session.bound_runtime(primary_runtime):
+            session_id = state.get("current_session_id")
+            rehydrated = rehydrated_by_chat.get(primary_runtime.key, 0)
         log_event(
             "runtime",
             "ready",
@@ -111,53 +121,68 @@ async def main() -> None:
                 "state": str(STATE_PATH),
                 "home": str(RAPTOR_HOME),
                 "repaired_chats": storage["repaired_chats"],
+                "created_sessions": storage["created_sessions"],
                 "rehydrated_steers": rehydrated,
             },
         )
 
-        root_interrupted = repair_interrupted_root_turn()
-        goal_notice = prepare_goal_on_startup(
-            root_interrupted=root_interrupted,
-        )
-        if goal_notice:
-            try:
-                await send(conversation_id, goal_notice)
-            except Exception as exc:
-                log_event(
-                    "goal",
-                    "startup_notice_error",
-                    {
-                        "type": type(exc).__name__,
-                        "message": str(exc),
-                    },
+        for runtime in session.all_chat_runtimes():
+            with session.bound_runtime(runtime):
+                root_interrupted = repair_interrupted_root_turn()
+                goal_notice = prepare_goal_on_startup(
+                    root_interrupted=root_interrupted,
                 )
-        if thread_active():
-            try:
-                await ensure_thread_status(conversation_id)
-            except Exception as exc:
-                log_event(
-                    "thread",
-                    "thread_pin_error",
-                    {
-                        "type": type(exc).__name__,
-                        "message": str(exc),
-                    },
-                )
+                if goal_notice:
+                    try:
+                        await send(runtime.conversation_id, goal_notice)
+                    except Exception as exc:
+                        log_event(
+                            "goal",
+                            "startup_notice_error",
+                            {
+                                "chat": runtime.key,
+                                "type": type(exc).__name__,
+                                "message": str(exc),
+                            },
+                        )
+                if thread_active():
+                    try:
+                        await ensure_thread_status(runtime.conversation_id)
+                    except Exception as exc:
+                        log_event(
+                            "thread",
+                            "thread_pin_error",
+                            {
+                                "chat": runtime.key,
+                                "type": type(exc).__name__,
+                                "message": str(exc),
+                            },
+                        )
+        await reconcile_activity_surfaces()
         subagent_event_task = asyncio.create_task(completion_event_loop())
         shell_event_task = asyncio.create_task(shell_completion_event_loop())
-        if (goal_is_active() and not thread_active()) or rehydrated:
-            ensure_root_session(conversation_id, None)
+        for runtime in session.all_chat_runtimes():
+            with session.bound_runtime(runtime):
+                restored = rehydrated_by_chat.get(runtime.key, 0)
+                if (
+                    goal_is_active() and not thread_active()
+                ) or restored:
+                    ensure_root_session(runtime.conversation_id, None)
 
         while True:
             try:
                 batch = await provider.poll(cursor, timeout=50)
                 cursor = batch.cursor
                 for event in batch.events:
-                    try:
-                        provider.prepare_event(event)
-                        await handle_event(event)
-                    finally:
-                        await provider.finish_event(event)
+                    conversation_id = event.conversation_id
+                    if conversation_id is None:
+                        continue
+                    with session.bound_chat(conversation_id):
+                        try:
+                            provider.prepare_event(event)
+                            await handle_event(event)
+                        finally:
+                            await provider.finish_event(event)
 
             except asyncio.CancelledError:
                 raise
@@ -170,17 +195,22 @@ async def main() -> None:
                 await asyncio.sleep(2)
 
     finally:
-        if goal_is_active() and not thread_active():
-            pause_goal()
-        await interrupt_root_turn()
+        for runtime in session.all_chat_runtimes():
+            with session.bound_runtime(runtime):
+                if goal_is_active() and not thread_active():
+                    pause_goal()
+                await interrupt_root_turn()
 
         if subagent_event_task is not None:
             subagent_event_task.cancel()
         if shell_event_task is not None:
             shell_event_task.cancel()
 
-        await cancel_background_subagents()
-        await cancel_shell_sessions()
+        for runtime in session.all_chat_runtimes():
+            with session.bound_runtime(runtime):
+                await cancel_background_subagents()
+                await cancel_shell_sessions()
+        await close_activity_projections()
 
         event_tasks = tuple(
             task

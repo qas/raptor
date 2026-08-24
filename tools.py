@@ -15,6 +15,7 @@ from chat_store import (
     validate_session_id,
 )
 from config import AGENT_WORKDIR, MAX_TOOL_OUTPUT, TOOLS
+import session
 from session import save_state, state
 from storage import write_text_atomic
 from todos import MAX_TODO_EXPLANATION_CHARS, validate_plan
@@ -584,9 +585,14 @@ def chat_history_tool(
     action = str(args.get("action") or "").strip()
     limit = int(args.get("limit") or 20)
     limit = max(1, min(100, limit))
+    chat_key = session.current_runtime().key
+    owned_sessions = [
+        row
+        for row in list_sessions()
+        if row.get("chat_key") == chat_key
+    ]
     visible_sessions = [
-        row for row in list_sessions()
-        if row.get("kind") != "thread"
+        row for row in owned_sessions if row.get("kind") != "thread"
     ]
     if action == "list":
         sessions = visible_sessions[:limit]
@@ -601,18 +607,23 @@ def chat_history_tool(
     except ValueError as exc:
         return {"ok": False, "error": str(exc)}
     if session_id:
-        kind = next(
+        target = next(
             (
-                row.get("kind")
-                for row in list_sessions()
+                row
+                for row in owned_sessions
                 if row.get("session_id") == session_id
             ),
             None,
         )
+        if target is None:
+            return {"ok": False, "error": "session is not available"}
         current_execution_session = str(
             (execution_context or {}).get("session_id") or ""
         )
-        if kind == "thread" and current_execution_session != session_id:
+        if (
+            target.get("kind") == "thread"
+            and current_execution_session != session_id
+        ):
             return {
                 "ok": False,
                 "error": "thread session is not available",

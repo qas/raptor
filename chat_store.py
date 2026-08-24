@@ -164,9 +164,13 @@ def append_event(
 def create_session(
     *,
     kind: str,
+    chat_key: str,
     agent_id: str | None = None,
     parent_session_id: str | None = None,
 ) -> str:
+    owner = str(chat_key).strip()
+    if not owner:
+        raise ValueError("chat_key must not be empty")
     ensure_chat_dirs()
     session_id = new_session_id()
     parent = None
@@ -178,6 +182,7 @@ def create_session(
         {
             "type": "session_start",
             "kind": kind,
+            "chat_key": owner,
             "agent_id": agent_id,
             "parent_session_id": parent,
         },
@@ -309,6 +314,7 @@ def _session_summary(path: Path) -> dict[str, Any] | None:
     return {
         "session_id": path.stem,
         "kind": start.get("kind") or "main",
+        "chat_key": start.get("chat_key"),
         "parent_session_id": start.get("parent_session_id"),
         "agent_id": start.get("agent_id"),
         "started_at": start.get("ts"),
@@ -328,6 +334,24 @@ def list_sessions() -> list[dict[str, Any]]:
         if summary is not None:
             sessions.append(summary)
     return sessions
+
+
+def session_chat_key(session_id: str) -> str | None:
+    """Return the owning main-chat key recorded by a transcript."""
+    path = chat_path(session_id)
+    if not path.is_file():
+        return None
+    with path.open("r", encoding="utf-8") as handle:
+        for line_number, line in enumerate(handle, start=1):
+            line = line.strip()
+            if not line:
+                continue
+            event = _decode_event_line(path, line, line_number)
+            if event.get("type") != "session_start":
+                return None
+            value = event.get("chat_key")
+            return str(value) if value is not None else None
+    return None
 
 
 def session_contains_text(session_id: str, query: str) -> bool:

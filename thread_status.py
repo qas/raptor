@@ -11,9 +11,10 @@ def _approval_status_active(
     *,
     ignore_owner: str | None = None,
 ) -> bool:
-    owner = session.pinned_status_owner
+    runtime = session.current_runtime()
+    owner = runtime.pinned_status_owner
     if (
-        session.pinned_status_conversation_id == conversation_id
+        runtime.pinned_status_conversation_id == conversation_id
         and owner != ignore_owner
         and isinstance(owner, str)
         and owner.startswith("approval:")
@@ -41,10 +42,11 @@ async def ensure_thread_status(
         ignore_owner=replace_owner,
     ):
         return
+    runtime = session.current_runtime()
     if (
-        session.pinned_status_conversation_id == conversation_id
-        and session.pinned_status_owner == owner
-        and session.pinned_status_message_id is not None
+        runtime.pinned_status_conversation_id == conversation_id
+        and runtime.pinned_status_owner == owner
+        and runtime.pinned_status_message_id is not None
     ):
         return
     await presentation.show_pinned_status(
@@ -66,5 +68,5 @@ async def ensure_thread_status(
             owner=owner,
         )
         return
-    session.goal_pin_message_id = None
-    session.goal_pin_goal_id = None
+    runtime.goal_pin_message_id = None
+    runtime.goal_pin_goal_id = None

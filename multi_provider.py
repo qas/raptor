@@ -15,10 +15,11 @@ from chat_provider import (
     ProviderCapabilities,
 )
 from observability import log_exception
+from activity import ActivitySnapshot, ActivitySurfaceProvider
 
 
 class MultiProvider:
-    """Route multiple frontends into one durable operator session."""
+    """Route provider-qualified conversations to their native adapters."""
 
     authorized_user_id = "multi:operator"
 
@@ -33,16 +34,7 @@ class MultiProvider:
         if len(self.by_name) != len(providers):
             raise ValueError("MultiProvider provider names must be unique")
         self.name = ",".join(provider.name for provider in providers)
-        self.capabilities = ProviderCapabilities(
-            drafts=any(provider.capabilities.drafts for provider in providers),
-            reasoning_summaries=any(
-                provider.capabilities.reasoning_summaries
-                for provider in providers
-            ),
-            pins=any(provider.capabilities.pins for provider in providers),
-            controls=any(provider.capabilities.controls for provider in providers),
-            typing=any(provider.capabilities.typing for provider in providers),
-        )
+        self.capabilities = self._combined_capabilities()
         primary = providers[0]
         self.primary_conversation_id = self._conversation_id(
             primary,
@@ -54,6 +46,26 @@ class MultiProvider:
         }
         self._event_routes: dict[int, tuple[ChatProvider, ChatEvent]] = {}
         self._cursor = 0
+
+    def _combined_capabilities(self) -> ProviderCapabilities:
+        return ProviderCapabilities(
+            drafts=any(
+                provider.capabilities.drafts for provider in self.providers
+            ),
+            reasoning_summaries=any(
+                provider.capabilities.reasoning_summaries
+                for provider in self.providers
+            ),
+            pins=any(
+                provider.capabilities.pins for provider in self.providers
+            ),
+            controls=any(
+                provider.capabilities.controls for provider in self.providers
+            ),
+            typing=any(
+                provider.capabilities.typing for provider in self.providers
+            ),
+        )
 
     @staticmethod
     def _conversation_id(
@@ -134,6 +146,7 @@ class MultiProvider:
             for provider in self.providers:
                 await provider.initialize(commands)
                 initialized.append(provider)
+            self.capabilities = self._combined_capabilities()
         except Exception:
             for provider in reversed(initialized):
                 try:
@@ -347,3 +360,66 @@ class MultiProvider:
     ) -> None:
         provider, raw_id = self._route_action(action_id)
         await provider.answer_action(raw_id, text, alert=alert)
+
+    async def open_activity_surface(
+        self,
+        conversation_id: ConversationId,
+        snapshot: ActivitySnapshot,
+    ) -> str | None:
+        provider, raw_id = self._route_conversation(conversation_id)
+        if not isinstance(provider, ActivitySurfaceProvider):
+            return None
+        surface_id = await provider.open_activity_surface(raw_id, snapshot)
+        if not surface_id:
+            return None
+        return f"{provider.name}:{surface_id}"
+
+    def _route_activity_surface(
+        self,
+        conversation_id: ConversationId,
+        surface_id: str,
+    ) -> tuple[ActivitySurfaceProvider, ConversationId, str]:
+        provider, raw_id = self._route_conversation(conversation_id)
+        name, separator, nested_id = surface_id.partition(":")
+        if (
+            not separator
+            or name != provider.name
+            or not isinstance(provider, ActivitySurfaceProvider)
+        ):
+            raise ValueError("activity surface and conversation differ")
+        return provider, raw_id, nested_id
+
+    async def update_activity_surface(
+        self,
+        conversation_id: ConversationId,
+        surface_id: str,
+        snapshot: ActivitySnapshot,
+    ) -> None:
+        provider, raw_id, nested_id = self._route_activity_surface(
+            conversation_id,
+            surface_id,
+        )
+        await provider.update_activity_surface(raw_id, nested_id, snapshot)
+
+    async def close_activity_surface(
+        self,
+        conversation_id: ConversationId,
+        surface_id: str,
+        snapshot: ActivitySnapshot,
+    ) -> None:
+        provider, raw_id, nested_id = self._route_activity_surface(
+            conversation_id,
+            surface_id,
+        )
+        await provider.close_activity_surface(raw_id, nested_id, snapshot)
+
+    def restore_activity_surface(
+        self,
+        conversation_id: ConversationId,
+        surface_id: str,
+    ) -> None:
+        provider, raw_id, nested_id = self._route_activity_surface(
+            conversation_id,
+            surface_id,
+        )
+        provider.restore_activity_surface(raw_id, nested_id)

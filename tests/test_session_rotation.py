@@ -44,14 +44,13 @@ class SessionRotationTests(unittest.IsolatedAsyncioTestCase):
         chat_store._SEQ_CACHE.clear()
         session.state.clear()
         session.state.update(copy.deepcopy(session.DEFAULT_STATE))
-        sid = chat_store.create_session(kind="main")
+        sid = chat_store.create_session(kind="main", chat_key=session.current_runtime().key)
         session.state["current_session_id"] = sid
         session.state["model"] = "model-a"
         session.state["approval_mode"] = "on"
         session.state["todos"] = [
             {"step": "old", "status": "pending"}
         ]
-        session.subagent_records = session.state["subagents"]
         turns.finish()
         session.subagent_tasks.clear()
         session.pending_steers.clear()
@@ -133,7 +132,7 @@ class SessionRotationTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_chats_lists_main_sessions_and_marks_current(self) -> None:
         current = session.state["current_session_id"]
-        previous = chat_store.create_session(kind="main")
+        previous = chat_store.create_session(kind="main", chat_key=session.current_runtime().key)
         chat_store.append_item(
             previous,
             {"role": "user", "content": "find this launch note"},
@@ -141,6 +140,7 @@ class SessionRotationTests(unittest.IsolatedAsyncioTestCase):
         )
         child = chat_store.create_session(
             kind="subagent",
+            chat_key=session.current_runtime().key,
             agent_id="child",
             parent_session_id=current,
         )
@@ -160,7 +160,7 @@ class SessionRotationTests(unittest.IsolatedAsyncioTestCase):
     async def test_chats_keeps_an_old_resumed_session_visible(self) -> None:
         current = session.state["current_session_id"]
         for _index in range(25):
-            chat_store.create_session(kind="main")
+            chat_store.create_session(kind="main", chat_key=session.current_runtime().key)
         sent: list[str] = []
 
         async def capture(_chat_id, text, **_kwargs):
@@ -173,13 +173,13 @@ class SessionRotationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(f"{current} ·", sent[0].splitlines()[1])
 
     async def test_chats_searches_transcript_content(self) -> None:
-        matching = chat_store.create_session(kind="main")
+        matching = chat_store.create_session(kind="main", chat_key=session.current_runtime().key)
         chat_store.append_item(
             matching,
             {"role": "user", "content": "NeedleProject details"},
             source="user",
         )
-        other = chat_store.create_session(kind="main")
+        other = chat_store.create_session(kind="main", chat_key=session.current_runtime().key)
         chat_store.append_item(
             other,
             {"role": "user", "content": "unrelated"},
@@ -198,7 +198,7 @@ class SessionRotationTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_resume_switches_to_archived_main_session(self) -> None:
         current = session.state["current_session_id"]
-        target = chat_store.create_session(kind="main")
+        target = chat_store.create_session(kind="main", chat_key=session.current_runtime().key)
         archived_todos = [{"step": "continue this", "status": "pending"}]
         chat_store.end_session(
             target,
@@ -234,6 +234,7 @@ class SessionRotationTests(unittest.IsolatedAsyncioTestCase):
         current = session.state["current_session_id"]
         child = chat_store.create_session(
             kind="subagent",
+            chat_key=session.current_runtime().key,
             agent_id="child",
             parent_session_id=current,
         )
@@ -259,13 +260,61 @@ class SessionRotationTests(unittest.IsolatedAsyncioTestCase):
         state_path = Path(tempfile.mkdtemp()) / "state.json"
         state_path.write_text(
             json.dumps({
-                "todos": [
-                    {"id": 1, "text": "old shape", "status": "pending"}
-                ]
+                "schema_version": session.STATE_SCHEMA_VERSION,
+                "model": None,
+                "runtime": {},
+                "chats": {
+                    "local": {
+                        "conversation_id": "local",
+                        "state": {
+                            **session.CHAT_DEFAULT_STATE,
+                            "todos": [
+                                {
+                                    "id": 1,
+                                    "text": "old shape",
+                                    "status": "pending",
+                                }
+                            ],
+                        },
+                    }
+                },
             })
         )
         with patch.object(session, "STATE_PATH", state_path):
-            with self.assertRaisesRegex(RuntimeError, "persisted root plan"):
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "persisted local root plan",
+            ):
+                session.load_state()
+
+    def test_persisted_subagent_cannot_cross_chat_boundaries(self) -> None:
+        state_path = Path(tempfile.mkdtemp()) / "state.json"
+        chat_state = copy.deepcopy(session.CHAT_DEFAULT_STATE)
+        chat_state["subagents"] = {
+            "worker": {
+                "id": "worker",
+                "chat_key": "local",
+                "chat_id": "responses_api:other",
+                "status": "completed",
+            }
+        }
+        state_path.write_text(json.dumps({
+            "schema_version": session.STATE_SCHEMA_VERSION,
+            "model": None,
+            "runtime": {},
+            "chats": {
+                "local": {
+                    "conversation_id": "local",
+                    "state": chat_state,
+                }
+            },
+        }))
+
+        with patch.object(session, "STATE_PATH", state_path):
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "conversation does not match",
+            ):
                 session.load_state()
 
 

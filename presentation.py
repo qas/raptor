@@ -13,17 +13,16 @@ from chat_runtime import get_chat_provider
 from observability import log_exception
 import session
 
-_PINNED_STATUS_LOCK: asyncio.Lock | None = None
-_PINNED_STATUS_LOOP: asyncio.AbstractEventLoop | None = None
-
-
 def _pinned_status_lock() -> asyncio.Lock:
-    global _PINNED_STATUS_LOCK, _PINNED_STATUS_LOOP
+    runtime = session.current_runtime()
     loop = asyncio.get_running_loop()
-    if _PINNED_STATUS_LOCK is None or _PINNED_STATUS_LOOP is not loop:
-        _PINNED_STATUS_LOCK = asyncio.Lock()
-        _PINNED_STATUS_LOOP = loop
-    return _PINNED_STATUS_LOCK
+    if (
+        runtime.presentation_lock is None
+        or runtime.presentation_loop is not loop
+    ):
+        runtime.presentation_lock = asyncio.Lock()
+        runtime.presentation_loop = loop
+    return runtime.presentation_lock
 
 
 async def _unpin_and_delete(
@@ -52,20 +51,21 @@ async def show_pinned_status(
     """Project one owner into the shared persistent status surface."""
     async with _pinned_status_lock():
         provider = get_chat_provider()
+        runtime = session.current_runtime()
         effective_controls = (
             controls if provider.capabilities.controls else ()
         )
-        message_id = session.pinned_status_message_id
+        message_id = runtime.pinned_status_message_id
         same_conversation = (
-            session.pinned_status_conversation_id == conversation_id
+            runtime.pinned_status_conversation_id == conversation_id
         )
         if message_id is not None and not same_conversation:
-            old_conversation = session.pinned_status_conversation_id
+            old_conversation = runtime.pinned_status_conversation_id
             if old_conversation is not None:
                 await _unpin_and_delete(old_conversation, message_id)
-            session.pinned_status_conversation_id = None
-            session.pinned_status_message_id = None
-            session.pinned_status_owner = None
+            runtime.pinned_status_conversation_id = None
+            runtime.pinned_status_message_id = None
+            runtime.pinned_status_owner = None
             message_id = None
         if message_id is not None and same_conversation:
             try:
@@ -75,14 +75,14 @@ async def show_pinned_status(
                     text,
                     effective_controls,
                 )
-                session.pinned_status_owner = owner
+                runtime.pinned_status_owner = owner
                 return message_id
             except Exception as exc:
                 log_exception("presentation", "status_edit_error", exc)
                 await _unpin_and_delete(conversation_id, message_id)
-                session.pinned_status_conversation_id = None
-                session.pinned_status_message_id = None
-                session.pinned_status_owner = None
+                runtime.pinned_status_conversation_id = None
+                runtime.pinned_status_message_id = None
+                runtime.pinned_status_owner = None
 
         message_id = await provider.create_message(
             conversation_id,
@@ -105,9 +105,9 @@ async def show_pinned_status(
                         cleanup_exc,
                     )
                 raise
-        session.pinned_status_conversation_id = conversation_id
-        session.pinned_status_message_id = message_id
-        session.pinned_status_owner = owner
+        runtime.pinned_status_conversation_id = conversation_id
+        runtime.pinned_status_message_id = message_id
+        runtime.pinned_status_owner = owner
         return message_id
 
 
@@ -117,14 +117,15 @@ async def clear_pinned_status(
     owner: str | None = None,
 ) -> bool:
     async with _pinned_status_lock():
-        if session.pinned_status_conversation_id != conversation_id:
+        runtime = session.current_runtime()
+        if runtime.pinned_status_conversation_id != conversation_id:
             return False
-        if owner is not None and session.pinned_status_owner != owner:
+        if owner is not None and runtime.pinned_status_owner != owner:
             return False
-        message_id = session.pinned_status_message_id
-        session.pinned_status_conversation_id = None
-        session.pinned_status_message_id = None
-        session.pinned_status_owner = None
+        message_id = runtime.pinned_status_message_id
+        runtime.pinned_status_conversation_id = None
+        runtime.pinned_status_message_id = None
+        runtime.pinned_status_owner = None
         if message_id is not None:
             await _unpin_and_delete(conversation_id, message_id)
         return True

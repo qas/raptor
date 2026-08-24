@@ -55,7 +55,8 @@ class StatelessAskTests(unittest.IsolatedAsyncioTestCase):
         session.state.clear()
         session.state.update(copy.deepcopy(session.DEFAULT_STATE))
         session.state["current_session_id"] = chat_store.create_session(
-            kind="main"
+            kind="main",
+            chat_key=session.current_runtime().key,
         )
         session.state["model"] = "model-a"
 

@@ -32,8 +32,8 @@ class HistoryToolTests(unittest.IsolatedAsyncioTestCase):
         self._chat_patch.start()
         self.addCleanup(self._chat_patch.stop)
         chat_store._SEQ_CACHE.clear()
-        self.main = chat_store.create_session(kind="main")
-        self.old = chat_store.create_session(kind="main")
+        self.main = chat_store.create_session(kind="main", chat_key=session.current_runtime().key)
+        self.old = chat_store.create_session(kind="main", chat_key=session.current_runtime().key)
         session.state["current_session_id"] = self.main
         chat_store.append_item(
             self.main,
@@ -129,6 +129,7 @@ class HistoryToolTests(unittest.IsolatedAsyncioTestCase):
     def test_subagent_defaults_to_own_transcript(self) -> None:
         child = chat_store.create_session(
             kind="subagent",
+            chat_key=session.current_runtime().key,
             agent_id="abcd",
             parent_session_id=self.main,
         )
@@ -151,6 +152,7 @@ class HistoryToolTests(unittest.IsolatedAsyncioTestCase):
 
         child = chat_store.create_session(
             kind="subagent",
+            chat_key=session.current_runtime().key,
             agent_id="abcd",
             parent_session_id=self.main,
         )
@@ -194,7 +196,7 @@ class HistoryToolTests(unittest.IsolatedAsyncioTestCase):
     def test_list_sessions_payload_fits_max_output(self) -> None:
         import tools as tools_mod
         for _ in range(40):
-            chat_store.create_session(kind="main")
+            chat_store.create_session(kind="main", chat_key=session.current_runtime().key)
         with patch.object(tools_mod, "MAX_TOOL_OUTPUT", 500):
             result = chat_history_tool({"action": "list", "limit": 100})
         raw = json.dumps(result, ensure_ascii=False)

@@ -34,7 +34,7 @@ class ContextTests(unittest.IsolatedAsyncioTestCase):
         self._chat_patch.start()
         self.addCleanup(self._chat_patch.stop)
         chat_store._SEQ_CACHE.clear()
-        self.session_id = chat_store.create_session(kind="main")
+        self.session_id = chat_store.create_session(kind="main", chat_key="local")
 
     def _add_user(self, text: str) -> dict:
         return chat_store.append_item(
@@ -698,7 +698,7 @@ class EnsureUnderBudgetTests(unittest.IsolatedAsyncioTestCase):
         self._chat_patch.start()
         self.addCleanup(self._chat_patch.stop)
         chat_store._SEQ_CACHE.clear()
-        self.session_id = chat_store.create_session(kind="main")
+        self.session_id = chat_store.create_session(kind="main", chat_key="local")
 
     async def test_real_estimator_compacts_huge_archive_under_budget(
         self,

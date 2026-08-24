@@ -5,6 +5,7 @@ import unittest
 from unittest.mock import AsyncMock, patch
 
 import shell_sessions
+import session
 from config import TOOLS
 from shell_sessions import (
     HeadTailBuffer,
@@ -21,6 +22,14 @@ from tools import shell_tool
 
 class ShellSessionTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
+        self.runtime_context = session.bound_chat("telegram:123")
+        self.runtime_context.__enter__()
+        self.addCleanup(
+            self.runtime_context.__exit__,
+            None,
+            None,
+            None,
+        )
         await reset_shell_sessions_for_tests()
 
     async def asyncTearDown(self) -> None:
@@ -148,6 +157,31 @@ class ShellSessionTests(unittest.IsolatedAsyncioTestCase):
             "running",
         )
 
+    async def test_session_controls_cannot_cross_chat_boundaries(self) -> None:
+        result = await run_shell(
+            "sleep 10",
+            timeout=30,
+            yield_time_ms=250,
+            tty=False,
+            chat_id="telegram:123",
+            parent_session_id="main-1",
+        )
+        session_id = result["session_id"]
+
+        with session.bound_chat("responses_api:other"):
+            polled = await write_stdin({
+                "session_id": session_id,
+                "yield_time_ms": 0,
+            })
+            cancelled = await cancel_shell_session(session_id)
+
+        self.assertFalse(polled["ok"])
+        self.assertFalse(cancelled["ok"])
+        self.assertEqual(
+            shell_sessions._sessions[session_id].status,
+            "running",
+        )
+
     async def test_detached_completion_enters_internal_event_path(self) -> None:
         delivered = AsyncMock(return_value=True)
         controller = types.ModuleType("controller")
@@ -219,6 +253,7 @@ class ShellSessionTests(unittest.IsolatedAsyncioTestCase):
             id="shell-1",
             command="true",
             chat_id="telegram:123",
+            chat_key=session.current_runtime().key,
             parent_session_id=None,
             process=AsyncMock(),
             timeout=1,

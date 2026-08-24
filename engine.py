@@ -100,6 +100,7 @@ RecordItems = Callable[
     [list[dict[str, Any]], str],
     None,
 ]
+ReportActivity = Callable[[str], None]
 
 
 def estimate_tokens(value: Any) -> int:
@@ -163,6 +164,7 @@ async def run_agent(
     checkpoint: Checkpoint | None = None,
     compact_context: CompactContext | None = None,
     record_items: RecordItems | None = None,
+    report_activity: ReportActivity | None = None,
 ) -> dict[str, Any]:
     turn_inputs: list[dict[str, Any]] = []
     tool_events: list[dict[str, Any]] = []
@@ -179,6 +181,8 @@ async def run_agent(
                 work[:] = compacted
                 context_compacted = True
         log_event(source, "thinking", metadata)
+        if report_activity:
+            report_activity("Thinking")
         response = await create_response(work)
         log_event(
             source,
@@ -250,6 +254,8 @@ async def run_agent(
                     "call_id": call.get("call_id"),
                 },
             )
+            if report_activity:
+                report_activity(tool_activity(call))
             try:
                 call_result = await execute_call(call)
             except asyncio.CancelledError:
