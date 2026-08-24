@@ -64,6 +64,20 @@ class ResponsesServerConfigurationTests(unittest.TestCase):
         self.assertEqual(values["RESPONSES_SERVER_API_KEY"], "")
 
 
+class ShellConfigurationTests(unittest.TestCase):
+    def test_shell_timeout_defaults_to_unlimited(self) -> None:
+        with patch.dict(os.environ, {}, clear=True):
+            values = runpy.run_path(str(ROOT / "config.py"))
+
+        self.assertEqual(values["SHELL_TIMEOUT"], 0)
+
+    def test_shell_timeout_accepts_a_positive_deadline(self) -> None:
+        with patch.dict(os.environ, {"SHELL_TIMEOUT": "900"}, clear=True):
+            values = runpy.run_path(str(ROOT / "config.py"))
+
+        self.assertEqual(values["SHELL_TIMEOUT"], 900)
+
+
 class ContextBudgetTests(unittest.TestCase):
 
     def test_subagent_settings_do_not_inherit_main_environment(self) -> None:

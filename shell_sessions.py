@@ -78,7 +78,7 @@ class ShellSession:
     chat_key: str
     parent_session_id: str | None
     process: asyncio.subprocess.Process
-    timeout: int
+    timeout: int | None
     tty: bool = False
     pty_write_fd: int | None = None
     started_at: float = field(default_factory=time.time)
@@ -191,10 +191,13 @@ async def _monitor(
 ) -> None:
     try:
         try:
-            await asyncio.wait_for(
-                session.process.wait(),
-                timeout=session.timeout,
-            )
+            if session.timeout is None:
+                await session.process.wait()
+            else:
+                await asyncio.wait_for(
+                    session.process.wait(),
+                    timeout=session.timeout,
+                )
         except asyncio.TimeoutError:
             session.status = "timed_out"
             session.error = f"command timed out after {session.timeout}s"
@@ -364,7 +367,13 @@ async def run_shell(
             "ok": False,
             "error": f"shell command exceeds {MAX_TOOL_OUTPUT} characters",
         }
-    timeout = min(600, max(1, int(timeout or SHELL_TIMEOUT)))
+    requested_timeout = SHELL_TIMEOUT if timeout is None else int(timeout)
+    if requested_timeout < 0:
+        return {
+            "ok": False,
+            "error": "shell timeout must be zero or greater",
+        }
+    timeout = requested_timeout or None
     yield_ms = min(
         MAX_YIELD_TIME_MS,
         max(MIN_YIELD_TIME_MS, int(

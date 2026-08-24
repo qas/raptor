@@ -357,7 +357,7 @@ outside the documented ranges stop startup with a configuration error.
 | `CHAT_STREAMING` | `1` | Enable streamed draft previews |
 | `CHAT_STREAM_INTERVAL` | `0.35` | Minimum seconds between draft snapshots |
 | `MAX_TOOL_ROUNDS` | `0` | Tool-round cap; `0` is uncapped |
-| `SHELL_TIMEOUT` | `120` | Shell hard timeout in seconds |
+| `SHELL_TIMEOUT` | `0` | Default shell deadline in seconds; `0` disables it |
 | `MAX_TOOL_OUTPUT` | `30000` | Retained tool-output characters |
 | `MAX_PENDING_STEERS` | `64` | Maximum queued root steering inputs |
 

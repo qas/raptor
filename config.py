@@ -229,8 +229,8 @@ MAX_PENDING_STEERS = _env_int(
 
 SHELL_TIMEOUT = _env_int(
     "SHELL_TIMEOUT",
-    120,
-    minimum=1,
+    0,
+    minimum=0,
 )
 
 MAX_TOOL_OUTPUT = _env_int(
@@ -516,8 +516,11 @@ TOOLS = [
                 },
                 "timeout": {
                     "type": "integer",
-                    "minimum": 1,
-                    "maximum": 600,
+                    "minimum": 0,
+                    "description": (
+                        "Maximum runtime in seconds. Zero disables the "
+                        "deadline; defaults to SHELL_TIMEOUT."
+                    ),
                 },
                 "yield_time_ms": {
                     "type": "integer",

@@ -105,6 +105,52 @@ class ShellSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(completed["status"], "timed_out")
         self.assertIn("timed out", completed["error"])
 
+    async def test_default_timeout_is_unlimited(self) -> None:
+        with patch.object(shell_sessions, "SHELL_TIMEOUT", 0):
+            result = await run_shell(
+                "printf unlimited",
+                timeout=None,
+                yield_time_ms=1000,
+                tty=False,
+                chat_id="telegram:123",
+                parent_session_id="main-1",
+            )
+
+        shell_session = next(iter(shell_sessions._sessions.values()))
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["stdout"], "unlimited")
+        self.assertIsNone(shell_session.timeout)
+
+    async def test_zero_timeout_disables_deadline(self) -> None:
+        with patch.object(shell_sessions, "SHELL_TIMEOUT", 1):
+            result = await run_shell(
+                "printf unlimited",
+                timeout=0,
+                yield_time_ms=1000,
+                tty=False,
+                chat_id="telegram:123",
+                parent_session_id="main-1",
+            )
+
+        shell_session = next(iter(shell_sessions._sessions.values()))
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["stdout"], "unlimited")
+        self.assertIsNone(shell_session.timeout)
+
+    async def test_timeout_is_not_artificially_capped(self) -> None:
+        result = await run_shell(
+            "true",
+            timeout=900,
+            yield_time_ms=1000,
+            tty=False,
+            chat_id="telegram:123",
+            parent_session_id="main-1",
+        )
+
+        shell_session = next(iter(shell_sessions._sessions.values()))
+        self.assertTrue(result["ok"])
+        self.assertEqual(shell_session.timeout, 900)
+
     async def test_cancel_stops_all_running_sessions(self) -> None:
         result = await run_shell(
             "sleep 10",
@@ -276,6 +322,9 @@ class ShellSessionTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("yield_time_ms", schemas["shell"]["parameters"]["properties"])
         self.assertIn("tty", schemas["shell"]["parameters"]["properties"])
+        timeout = schemas["shell"]["parameters"]["properties"]["timeout"]
+        self.assertEqual(timeout["minimum"], 0)
+        self.assertNotIn("maximum", timeout)
         self.assertIn("write_stdin", schemas)
         self.assertEqual(
             schemas["cancel"]["parameters"]["required"],
