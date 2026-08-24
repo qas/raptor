@@ -44,7 +44,10 @@ class SessionRotationTests(unittest.IsolatedAsyncioTestCase):
         chat_store._SEQ_CACHE.clear()
         session.state.clear()
         session.state.update(copy.deepcopy(session.DEFAULT_STATE))
-        sid = chat_store.create_session(kind="main", chat_key=session.current_runtime().key)
+        sid = chat_store.create_session(
+            kind="main",
+            chat_key=session.current_runtime().key,
+        )
         session.state["current_session_id"] = sid
         session.state["model"] = "model-a"
         session.state["approval_mode"] = "on"
@@ -132,7 +135,10 @@ class SessionRotationTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_chats_lists_main_sessions_and_marks_current(self) -> None:
         current = session.state["current_session_id"]
-        previous = chat_store.create_session(kind="main", chat_key=session.current_runtime().key)
+        previous = chat_store.create_session(
+            kind="main",
+            chat_key=session.current_runtime().key,
+        )
         chat_store.append_item(
             previous,
             {"role": "user", "content": "find this launch note"},
@@ -160,7 +166,10 @@ class SessionRotationTests(unittest.IsolatedAsyncioTestCase):
     async def test_chats_keeps_an_old_resumed_session_visible(self) -> None:
         current = session.state["current_session_id"]
         for _index in range(25):
-            chat_store.create_session(kind="main", chat_key=session.current_runtime().key)
+            chat_store.create_session(
+                kind="main",
+                chat_key=session.current_runtime().key,
+            )
         sent: list[str] = []
 
         async def capture(_chat_id, text, **_kwargs):
@@ -173,13 +182,19 @@ class SessionRotationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(f"{current} ·", sent[0].splitlines()[1])
 
     async def test_chats_searches_transcript_content(self) -> None:
-        matching = chat_store.create_session(kind="main", chat_key=session.current_runtime().key)
+        matching = chat_store.create_session(
+            kind="main",
+            chat_key=session.current_runtime().key,
+        )
         chat_store.append_item(
             matching,
             {"role": "user", "content": "NeedleProject details"},
             source="user",
         )
-        other = chat_store.create_session(kind="main", chat_key=session.current_runtime().key)
+        other = chat_store.create_session(
+            kind="main",
+            chat_key=session.current_runtime().key,
+        )
         chat_store.append_item(
             other,
             {"role": "user", "content": "unrelated"},
@@ -198,7 +213,10 @@ class SessionRotationTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_resume_switches_to_archived_main_session(self) -> None:
         current = session.state["current_session_id"]
-        target = chat_store.create_session(kind="main", chat_key=session.current_runtime().key)
+        target = chat_store.create_session(
+            kind="main",
+            chat_key=session.current_runtime().key,
+        )
         archived_todos = [{"step": "continue this", "status": "pending"}]
         chat_store.end_session(
             target,
