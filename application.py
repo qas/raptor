@@ -9,6 +9,7 @@ import httpx
 import session
 from activity import close_activity_projections, reconcile_activity_surfaces
 from agent import repair_interrupted_root_turn
+from chat_provider import ChatEvent, ChatProvider
 from chat_runtime import load_chat_providers, send, set_chat_provider
 from chat_store import chat_path, ensure_chat_dirs
 from config import (
@@ -27,7 +28,7 @@ from config import (
 )
 from controller import ensure_root_session, interrupt_root_turn
 from goals import goal_is_active, pause_goal, prepare_goal_on_startup
-from loop import COMMANDS, handle_event
+from loop import COMMANDS, accepts_event, handle_event
 from responses import ensure_model
 from session import bootstrap_runtime_storage, rehydrate_pending_inputs, state
 from shell_sessions import cancel_shell_sessions, shell_completion_event_loop
@@ -39,6 +40,19 @@ from subagents import (
 from thread_state import thread_active
 from thread_status import ensure_thread_status
 from observability import log_event
+
+
+async def dispatch_event(provider: ChatProvider, event: ChatEvent) -> None:
+    """Finalize every transport event and bind state only after admission."""
+    provider.prepare_event(event)
+    try:
+        conversation_id = event.conversation_id
+        if conversation_id is None or not accepts_event(event, provider):
+            return
+        with session.bound_chat(conversation_id):
+            await handle_event(event)
+    finally:
+        await provider.finish_event(event)
 
 
 async def main() -> None:
@@ -174,15 +188,7 @@ async def main() -> None:
                 batch = await provider.poll(cursor, timeout=50)
                 cursor = batch.cursor
                 for event in batch.events:
-                    conversation_id = event.conversation_id
-                    if conversation_id is None:
-                        continue
-                    with session.bound_chat(conversation_id):
-                        try:
-                            provider.prepare_event(event)
-                            await handle_event(event)
-                        finally:
-                            await provider.finish_event(event)
+                    await dispatch_event(provider, event)
 
             except asyncio.CancelledError:
                 raise

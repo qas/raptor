@@ -5,6 +5,10 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+os.environ.setdefault("TG_BOT_TOKEN", "test-token")
+os.environ.setdefault("TG_USER_ID", "1")
+os.environ.setdefault("TG_CHAT_IDS", "1")
+
 import config
 
 
@@ -49,6 +53,15 @@ class TelegramConfigurationTests(unittest.TestCase):
             ):
                 with self.assertRaises(ValueError):
                     runpy.run_path(str(ROOT / "config.py"))
+
+
+class ResponsesServerConfigurationTests(unittest.TestCase):
+    def test_inbound_api_defaults_to_unauthenticated_loopback(self) -> None:
+        with patch.dict(os.environ, {}, clear=True):
+            values = runpy.run_path(str(ROOT / "config.py"))
+
+        self.assertEqual(values["RESPONSES_SERVER_HOST"], "127.0.0.1")
+        self.assertEqual(values["RESPONSES_SERVER_API_KEY"], "")
 
 
 class ContextBudgetTests(unittest.TestCase):

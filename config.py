@@ -10,6 +10,7 @@ from todos import (
     MAX_TODO_STEP_CHARS,
 )
 
+
 def _env_int(
     name: str,
     default: int,
@@ -97,7 +98,7 @@ if len(set(CHAT_PROVIDERS)) != len(CHAT_PROVIDERS):
 # separate from RESPONSES_BASE_URL, which is the model backend the agent calls.
 RESPONSES_SERVER_HOST = os.getenv(
     "RESPONSES_SERVER_HOST",
-    "0.0.0.0",
+    "127.0.0.1",
 ).strip()
 RESPONSES_SERVER_PORT = _env_int(
     "RESPONSES_SERVER_PORT",
@@ -107,8 +108,8 @@ RESPONSES_SERVER_PORT = _env_int(
 )
 RESPONSES_SERVER_API_KEY = os.getenv(
     "RESPONSES_SERVER_API_KEY",
-    "strong-secret",
-)
+    "",
+).strip()
 RESPONSES_SERVER_MAX_BODY = _env_int(
     "RESPONSES_SERVER_MAX_BODY",
     1_048_576,

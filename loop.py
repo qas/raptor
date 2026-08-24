@@ -2,7 +2,12 @@
 import secrets
 
 from approval import handle_approval_action, supersede_pending_approvals
-from chat_provider import ChatEvent, IncomingAction, IncomingMessage
+from chat_provider import (
+    ChatEvent,
+    ChatProvider,
+    IncomingAction,
+    IncomingMessage,
+)
 from chat_runtime import capture_delivery_context, get_chat_provider
 from chat_store import append_meta
 from commands import command
@@ -33,14 +38,20 @@ COMMANDS: tuple[tuple[str, str], ...] = (
 )
 
 
+def accepts_event(event: ChatEvent, provider: ChatProvider) -> bool:
+    """Return whether an event may enter chat-scoped runtime state."""
+    return bool(
+        event.conversation_id is not None
+        and event.sender_id == provider.authorized_user_id
+        and event.interactive
+    )
+
+
 async def handle_event(event: ChatEvent) -> None:
     """Dispatch a normalized event without provider-specific payloads."""
     provider = get_chat_provider()
 
-    if (
-        event.sender_id != provider.authorized_user_id
-        or not event.interactive
-    ):
+    if not accepts_event(event, provider):
         return
 
     if isinstance(event, IncomingAction):

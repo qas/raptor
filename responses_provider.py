@@ -1,6 +1,7 @@
 """Lightweight OpenAI Responses-compatible inbound chat provider."""
 import asyncio
 import contextvars
+import hmac
 import json
 import re
 import secrets
@@ -570,7 +571,9 @@ class ResponsesApiProvider:
     def _authorized(self, headers: dict[str, str]) -> bool:
         if not self.api_key:
             return True
-        return headers.get("authorization") == f"Bearer {self.api_key}"
+        provided = headers.get("authorization", "")
+        expected = f"Bearer {self.api_key}"
+        return hmac.compare_digest(provided, expected)
 
     async def _write_json(
         self,

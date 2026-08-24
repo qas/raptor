@@ -100,6 +100,7 @@ class ResponsesInputTests(unittest.TestCase):
 
 class ResponsesApiProviderTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
+        session.set_default_chat("responses-test")
         turns.finish()
         self.provider = ResponsesApiProvider(
             host="127.0.0.1",
@@ -118,6 +119,17 @@ class ResponsesApiProviderTests(unittest.IsolatedAsyncioTestCase):
         for event in batch.events:
             self.provider.prepare_event(event)
         return batch
+
+    async def test_nonloopback_bind_requires_api_key(self) -> None:
+        await self.provider.close()
+        self.provider = ResponsesApiProvider(
+            host="0.0.0.0",
+            port=0,
+            api_key="",
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "API_KEY is required"):
+            await self.provider.initialize(())
 
     async def _answer_once(self, text: str = "agent answer") -> IncomingMessage:
         batch = await self._poll()
