@@ -6,10 +6,10 @@ from typing import Any
 from observability import log_event
 
 from chat_store import (
+    active_checkpoint,
+    active_item_events,
     append_checkpoint,
     append_meta,
-    item_events,
-    latest_checkpoint,
     read_events,
     render_compaction_records,
 )
@@ -128,8 +128,8 @@ def checkpoint_continuation_input() -> list[dict[str, Any]]:
 def build_active_context(
     session_id: str,
 ) -> list[dict[str, Any]]:
-    items = item_events(session_id)
-    checkpoint = latest_checkpoint(session_id)
+    items = active_item_events(session_id)
+    checkpoint = active_checkpoint(session_id)
     if not checkpoint:
         return [
             _chronological_input_item(event["item"])
@@ -395,7 +395,7 @@ def _fit_checkpoint_to_active_budget(
     native tail. It is a deterministic final bound after semantic model
     compaction, not a replacement for that compaction.
     """
-    checkpoint = latest_checkpoint(session_id)
+    checkpoint = active_checkpoint(session_id)
     if not checkpoint:
         return False
     summary = str(checkpoint.get("summary") or "")
@@ -403,7 +403,7 @@ def _fit_checkpoint_to_active_budget(
     through_seq = int(checkpoint.get("through_seq") or 0)
     tail = [
         _chronological_input_item(event["item"])
-        for event in item_events(session_id)
+        for event in active_item_events(session_id)
         if int(event.get("seq") or 0) > through_seq
         and isinstance(event.get("item"), dict)
     ]
@@ -518,10 +518,10 @@ async def compact_session(
     input_budget: int | None = None,
     generation_budget: int | None = None,
 ) -> bool:
-    items = item_events(session_id)
+    items = active_item_events(session_id)
     if not items:
         return False
-    previous = latest_checkpoint(session_id)
+    previous = active_checkpoint(session_id)
     through_seq = int(previous.get("through_seq") or 0) if previous else 0
     candidates = [
         event
@@ -796,12 +796,12 @@ async def ensure_context_under_budget(
     pass_limit = (
         max_passes
         if max_passes is not None
-        else len(item_events(session_id)) + 2
+        else len(active_item_events(session_id)) + 2
     )
     for pass_n in range(pass_limit):
         if estimate < budget and not (force and pass_n == 0):
             break
-        checkpoint_before = latest_checkpoint(session_id)
+        checkpoint_before = active_checkpoint(session_id)
         through_before = (
             int(checkpoint_before.get("through_seq") or 0)
             if checkpoint_before
@@ -846,7 +846,7 @@ async def ensure_context_under_budget(
             break
         work = _active_work()
         estimate = estimate_active_fn(work)
-        checkpoint = latest_checkpoint(session_id)
+        checkpoint = active_checkpoint(session_id)
         through_after = (
             int(checkpoint.get("through_seq") or 0)
             if checkpoint
@@ -871,7 +871,7 @@ async def ensure_context_under_budget(
             return work
         remaining_native = any(
             int(event.get("seq") or 0) > through_after
-            for event in item_events(session_id)
+            for event in active_item_events(session_id)
         )
         if not remaining_native and _fit_checkpoint_to_active_budget(
             session_id,
@@ -951,10 +951,8 @@ async def request_with_checkpoint_retry(
 
 def session_context_stats(session_id: str) -> dict[str, Any]:
     events = read_events(session_id)
-    items = [
-        event for event in events if event.get("type") == "item"
-    ]
-    checkpoint = latest_checkpoint(session_id)
+    items = active_item_events(session_id)
+    checkpoint = active_checkpoint(session_id)
     through = int(checkpoint.get("through_seq") or 0) if checkpoint else 0
     active_native = [
         event for event in items if int(event.get("seq") or 0) > through

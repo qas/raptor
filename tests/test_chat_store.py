@@ -40,6 +40,45 @@ class ChatStoreTests(unittest.TestCase):
         self.assertEqual(events[0]["kind"], "main")
         self.assertEqual(events[0]["seq"], 1)
 
+    def test_context_reset_preserves_archive_and_discards_old_checkpoint(
+        self,
+    ) -> None:
+        sid = chat_store.create_session(kind="main", chat_key="local")
+        earlier = chat_store.append_item(
+            sid,
+            {"role": "user", "content": "earlier"},
+            source="user",
+        )
+        chat_store.append_checkpoint(
+            sid,
+            summary="safe context",
+            through_seq=int(earlier["seq"]),
+        )
+        failed = chat_store.append_item(
+            sid,
+            {"role": "user", "content": "rejected task"},
+            source="user",
+        )
+        chat_store.append_checkpoint(
+            sid,
+            summary="contaminated context",
+            through_seq=int(failed["seq"]),
+        )
+        outcome = chat_store.append_item(
+            sid,
+            {"role": "assistant", "content": "failed"},
+            source="assistant",
+        )
+
+        chat_store.reset_model_context(
+            sid,
+            through_seq=int(outcome["seq"]),
+        )
+
+        self.assertIsNone(chat_store.active_checkpoint(sid))
+        self.assertEqual(chat_store.active_item_events(sid), [])
+        self.assertEqual(len(chat_store.item_events(sid)), 3)
+
     def test_sequence_numbers_monotonic(self) -> None:
         sid = chat_store.create_session(kind="main", chat_key="local")
         a = chat_store.append_item(

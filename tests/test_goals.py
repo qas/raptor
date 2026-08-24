@@ -1065,6 +1065,22 @@ class GoalTests(unittest.IsolatedAsyncioTestCase):
             any("temporary Responses backend" in text for text in sent)
         )
 
+    async def test_user_turn_failure_also_pauses_active_goal(self) -> None:
+        replace_goal("retry me later")
+
+        async def fake_turn(chat_id, text, *, internal=False, **_kw):
+            return agent_mod.RetryableTurnFailure(
+                "an invalid model tool call"
+            )
+
+        with (
+            patch.object(controller, "agent_turn", fake_turn),
+            patch.object(controller, "send", _noop),
+        ):
+            await controller.run_root_session(1, "hello")
+
+        self.assertEqual(current_goal()["status"], GOAL_PAUSED)
+
     async def test_runtime_failure_does_not_block_parent_goal(self) -> None:
         replace_goal("continue after notification failure")
         calls: list[str] = []

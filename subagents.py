@@ -8,7 +8,11 @@ from typing import Any
 
 from chat_provider import ConversationId
 
-from chat_store import append_item, create_session
+from chat_store import (
+    append_item,
+    create_session,
+    reset_model_context,
+)
 from config import (
     BASE_INSTRUCTIONS,
     COMPACTION_REASONING_EFFORT,
@@ -36,7 +40,7 @@ from context import (
     ensure_context_under_budget,
     request_with_checkpoint_retry,
 )
-from engine import estimate_tokens, run_agent
+from engine import assistant_message, estimate_tokens, run_agent
 import session
 from session import (
     bounded_interrupted_subagents,
@@ -45,12 +49,12 @@ from session import (
     state,
 )
 from responses import (
-    ContextLengthError,
-    parse_context_length_error,
+    parse_http_response_error,
     retry_transient_response,
     stream_response_payload,
     validate_chronological_input,
 )
+from response_errors import ContextLengthError, MalformedToolCallError
 from skills import skill_catalog_instructions
 from observability import log_event
 from activity import (
@@ -301,9 +305,9 @@ async def _create_subagent_response_once(
                 "body_chars": len(response.text),
             },
         )
-        context_error = parse_context_length_error(response)
-        if context_error:
-            raise context_error
+        classified = parse_http_response_error(response)
+        if classified:
+            raise classified
     response.raise_for_status()
     return response.json()
 
@@ -658,22 +662,40 @@ async def run_subagent(
         )
         save_state()
 
-    result = await run_agent(
-        work=work,
-        create_response=create_response,
-        execute_call=execute_call,
-        source="subagent",
-        agent_id=agent_id,
-        max_tool_rounds=MAX_TOOL_ROUNDS,
-        drain_inputs=drain_inputs,
-        checkpoint=checkpoint,
-        compact_context=compact_work,
-        record_items=record_items,
-        report_activity=lambda detail: publish_subagent_activity(
-            record,
-            detail,
-        ),
-    )
+    try:
+        result = await run_agent(
+            work=work,
+            create_response=create_response,
+            execute_call=execute_call,
+            source="subagent",
+            agent_id=agent_id,
+            max_tool_rounds=MAX_TOOL_ROUNDS,
+            drain_inputs=drain_inputs,
+            checkpoint=checkpoint,
+            compact_context=compact_work,
+            record_items=record_items,
+            report_activity=lambda detail: publish_subagent_activity(
+                record,
+                detail,
+            ),
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        message = _bounded_record_text(
+            f"Subagent failed: {type(exc).__name__}: {exc}"
+        )
+        outcome = append_item(
+            session_id,
+            assistant_message(message),
+            source="assistant",
+        )
+        if isinstance(exc, MalformedToolCallError):
+            reset_model_context(
+                session_id,
+                through_seq=int(outcome["seq"]),
+            )
+        raise
     record["tool_events"] = _bounded_tool_events(
         previous_events + list(result["tool_events"])
     )

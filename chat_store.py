@@ -246,6 +246,22 @@ def append_meta(
     return append_event(session_id, event)
 
 
+def reset_model_context(
+    session_id: str,
+    *,
+    through_seq: int,
+) -> dict[str, Any]:
+    """Start a fresh model-context epoch without rewriting the archive."""
+    through = int(through_seq)
+    if through <= 0:
+        raise ValueError("invalid model context reset boundary")
+    return append_meta(
+        session_id,
+        "model_context_reset",
+        {"through_seq": through},
+    )
+
+
 def end_session(
     session_id: str,
     *,
@@ -283,6 +299,32 @@ def item_events(session_id: str) -> list[dict[str, Any]]:
     ]
 
 
+def active_item_events(session_id: str) -> list[dict[str, Any]]:
+    """Return transcript items eligible for model context."""
+    events = read_events(session_id)
+    reset = next(
+        (
+            event
+            for event in reversed(events)
+            if event.get("type") == "meta"
+            and event.get("name") == "model_context_reset"
+        ),
+        None,
+    )
+    data = reset.get("data") if reset is not None else None
+    through = (
+        int(data.get("through_seq") or 0)
+        if isinstance(data, dict)
+        else 0
+    )
+    return [
+        event
+        for event in events
+        if event.get("type") == "item"
+        and int(event.get("seq") or 0) > through
+    ]
+
+
 def latest_checkpoint(
     session_id: str,
 ) -> dict[str, Any] | None:
@@ -291,6 +333,32 @@ def latest_checkpoint(
         if event.get("type") == "checkpoint":
             latest = event
     return latest
+
+
+def active_checkpoint(session_id: str) -> dict[str, Any] | None:
+    """Return the newest checkpoint valid for the active projection."""
+    events = read_events(session_id)
+    checkpoints = [
+        event for event in events if event.get("type") == "checkpoint"
+    ]
+    reset = next(
+        (
+            event
+            for event in reversed(events)
+            if event.get("type") == "meta"
+            and event.get("name") == "model_context_reset"
+        ),
+        None,
+    )
+    if reset is None:
+        return checkpoints[-1] if checkpoints else None
+    reset_seq = int(reset.get("seq") or 0)
+    later = [
+        checkpoint
+        for checkpoint in checkpoints
+        if int(checkpoint.get("seq") or 0) > reset_seq
+    ]
+    return later[-1] if later else None
 
 
 def _session_summary(path: Path) -> dict[str, Any] | None:

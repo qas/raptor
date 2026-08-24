@@ -4,8 +4,10 @@ import types
 import unittest
 from unittest.mock import AsyncMock, patch
 
+import httpx
 import session
 import subagents
+from response_errors import MalformedToolCallError
 
 
 class BackgroundSubagentTests(unittest.IsolatedAsyncioTestCase):
@@ -48,6 +50,36 @@ class BackgroundSubagentTests(unittest.IsolatedAsyncioTestCase):
                 "SUBAGENT_RESPONSES_MODEL is not configured",
             ):
                 subagents.subagent_model()
+
+    async def test_foreground_request_classifies_malformed_tool_call(
+        self,
+    ) -> None:
+        response = httpx.Response(
+            500,
+            json={
+                "error": {
+                    "message": (
+                        "Failed to parse function call arguments as JSON: "
+                        "syntax error"
+                    )
+                }
+            },
+        )
+        client = AsyncMock()
+        client.post.return_value = response
+
+        with (
+            patch.object(session, "responses", client, create=True),
+            patch.object(subagents, "SUBAGENT_RESPONSES_MODEL", "model-a"),
+        ):
+            with self.assertRaises(MalformedToolCallError):
+                await subagents._create_subagent_response_once(
+                    [],
+                    agent_id="worker-1",
+                    allow_subagents=False,
+                    depth=1,
+                    tools=[],
+                )
 
     async def test_subagent_stream_uses_independent_backend_and_callbacks(
         self,
@@ -150,6 +182,67 @@ class BackgroundSubagentTests(unittest.IsolatedAsyncioTestCase):
                 {"reply": "Found the issue"},
             ],
         )
+
+    async def test_failed_subagent_turn_records_terminal_outcome(self) -> None:
+        record = {
+            "id": "worker-1",
+            "session_id": "session-1",
+            "background": False,
+            "pending_inputs": [],
+            "tool_events": [],
+            "todos": [],
+        }
+        session.subagent_records["worker-1"] = record
+
+        async def malformed(*_args, **_kwargs):
+            raise MalformedToolCallError("invalid generated arguments")
+
+        appended: list[tuple[dict, str]] = []
+        next_seq = 1
+
+        def append(_sid, item, *, source):
+            nonlocal next_seq
+            next_seq += 1
+            appended.append((item, source))
+            return {"seq": next_seq, "item": item, "source": source}
+
+        with (
+            patch.object(
+                subagents,
+                "build_active_context",
+                return_value=[{"role": "user", "content": "Inspect"}],
+            ),
+            patch.object(
+                subagents,
+                "skill_catalog_instructions",
+                AsyncMock(return_value=""),
+            ),
+            patch.object(
+                subagents,
+                "subagent_context_input_budget",
+                return_value=0,
+            ),
+            patch.object(subagents, "create_subagent_response", malformed),
+            patch.object(
+                subagents,
+                "append_item",
+                side_effect=append,
+            ),
+            patch.object(subagents, "reset_model_context") as reset,
+            patch.object(subagents, "save_state"),
+        ):
+            with self.assertRaises(MalformedToolCallError):
+                await subagents.run_subagent(
+                    agent_id="worker-1",
+                    chat_id="telegram:123",
+                    depth=1,
+                    allow_subagents=False,
+                )
+
+        self.assertEqual(appended[-1][1], "assistant")
+        self.assertEqual(appended[-1][0]["role"], "assistant")
+        self.assertIn("MalformedToolCallError", str(appended[-1][0]))
+        reset.assert_called_once()
 
     async def test_status_projection_excludes_private_child_context(self) -> None:
         session.subagent_records["worker-1"] = {

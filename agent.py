@@ -7,7 +7,12 @@ from typing import Any
 import httpx
 from chat_provider import ConversationId
 
-from chat_store import append_item, append_meta, session_exists
+from chat_store import (
+    append_item,
+    append_meta,
+    reset_model_context,
+    session_exists,
+)
 from config import (
     COMPACTION_REASONING_EFFORT,
     MAX_TOOL_ROUNDS,
@@ -21,7 +26,12 @@ from context import (
     request_with_checkpoint_retry,
     session_context_stats,
 )
-from engine import function_call_output, interrupted_tool_result, run_agent
+from engine import (
+    assistant_message,
+    function_call_output,
+    interrupted_tool_result,
+    run_agent,
+)
 from goals import (
     combine_instructions,
     goal_instructions,
@@ -43,11 +53,14 @@ from presentation import (
 )
 from observability import log_agent_activity, log_event
 from responses import (
-    ContextLengthError,
-    TransientResponsesError,
     estimate_response_request_tokens,
     responses_create,
     responses_create_stream,
+)
+from response_errors import (
+    ContextLengthError,
+    MalformedToolCallError,
+    TransientResponsesError,
 )
 from skills import skill_catalog_instructions
 
@@ -56,6 +69,11 @@ TURN_ABORTED_GUIDANCE = (
     "The user intentionally interrupted the previous turn. Any unfinished "
     "tool may have partially changed external state; inspect before retrying. "
     "Managed background resources may still be running."
+)
+
+MALFORMED_TOOL_CALL_MESSAGE = (
+    "The model generated an invalid tool call. Nothing was executed, and "
+    "the turn was closed safely. Send a new message to continue."
 )
 
 
@@ -383,6 +401,33 @@ async def agent_turn(
         for item in items:
             append_item(session_id, item, source=source)
 
+    async def deliver_terminal_failure(
+        message: str,
+        *,
+        reset_context: bool = False,
+    ) -> None:
+        outcome = append_item(
+            session_id,
+            assistant_message(message),
+            source="assistant",
+        )
+        if reset_context:
+            reset_model_context(
+                session_id,
+                through_seq=int(outcome["seq"]),
+            )
+        try:
+            await send(chat_id, message)
+        except Exception as exc:
+            log_event(
+                "agent",
+                "delivery_error",
+                {
+                    "type": type(exc).__name__,
+                    "message": str(exc),
+                },
+            )
+
     try:
         extra_instructions = ""
         if internal:
@@ -629,6 +674,18 @@ async def agent_turn(
             record_turn_interrupted(session_id)
         log_agent_activity("request cancelled")
         raise
+    except MalformedToolCallError as exc:
+        log_agent_activity("model generated malformed tool arguments")
+        log_event(
+            "agent",
+            "malformed_tool_call",
+            {"message": str(exc)},
+        )
+        await deliver_terminal_failure(
+            MALFORMED_TOOL_CALL_MESSAGE,
+            reset_context=True,
+        )
+        return RetryableTurnFailure("an invalid model tool call")
     except httpx.HTTPStatusError as exc:
         log_agent_activity("request failed")
         body = exc.response.text[:1200]
@@ -640,8 +697,7 @@ async def agent_turn(
                 "body_chars": len(exc.response.text),
             },
         )
-        await send(
-            chat_id,
+        await deliver_terminal_failure(
             f"Responses/HTTP error {exc.response.status_code}:\n{body}",
         )
         return False
@@ -655,8 +711,7 @@ async def agent_turn(
                 "message": str(exc),
             },
         )
-        await send(
-            chat_id,
+        await deliver_terminal_failure(
             f"Temporary Responses failure: {exc}",
         )
         return RetryableTurnFailure("a temporary Responses backend failure")
@@ -670,8 +725,7 @@ async def agent_turn(
                 "message": str(exc),
             },
         )
-        await send(
-            chat_id,
+        await deliver_terminal_failure(
             f"Error: {type(exc).__name__}: {exc}",
         )
         return False

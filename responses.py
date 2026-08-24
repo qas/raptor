@@ -29,12 +29,86 @@ from engine import estimate_tokens
 from response_errors import (
     ContextLengthError,
     IncompleteResponsesStreamError,
+    MalformedToolCallError,
     TransientResponsesError,
 )
 
 
 _RETRYABLE_HTTP_STATUSES = {408, 429, 500, 502, 503, 504}
 _ResponseT = TypeVar("_ResponseT")
+
+
+def _error_text(payload: Any) -> str:
+    """Return a bounded searchable rendering of a provider error."""
+    parts: list[str] = []
+    character_count = 0
+
+    def collect(value: Any, depth: int = 0) -> None:
+        nonlocal character_count
+        if character_count >= 4096 or depth > 4:
+            return
+        if isinstance(value, dict):
+            for key in ("type", "code", "message", "error", "response"):
+                if key in value:
+                    collect(value[key], depth + 1)
+            return
+        if isinstance(value, list):
+            for item in value:
+                collect(item, depth + 1)
+            return
+        text = str(value)
+        parts.append(text)
+        character_count += len(text)
+
+    collect(payload)
+    return " ".join(parts)[:4096]
+
+
+def parse_malformed_tool_call_error(
+    payload: Any,
+) -> MalformedToolCallError | None:
+    """Recognize rejection of invalid model-generated call arguments."""
+    text = _error_text(payload).lower()
+    mentions_call = any(
+        marker in text
+        for marker in (
+            "tool call",
+            "tool_call",
+            "function call",
+            "function_call",
+        )
+    )
+    invalid_json = "json" in text and any(
+        marker in text
+        for marker in (
+            "invalid",
+            "malformed",
+            "parse",
+            "syntax",
+            "unterminated",
+        )
+    )
+    if not (mentions_call and "argument" in text and invalid_json):
+        return None
+    return MalformedToolCallError(
+        "provider rejected malformed model-generated tool arguments"
+    )
+
+
+def parse_http_response_error(
+    response: httpx.Response,
+) -> RuntimeError | None:
+    """Classify provider failures that require agent-level handling."""
+    context_error = parse_context_length_error(response)
+    if context_error:
+        return context_error
+    if not response.is_error:
+        return None
+    try:
+        payload: Any = response.json()
+    except ValueError:
+        payload = response.text
+    return parse_malformed_tool_call_error(payload)
 
 
 def is_transient_responses_error(exc: BaseException) -> bool:
@@ -360,11 +434,9 @@ async def _responses_create_once(
     )
 
     if response.is_error:
-        context_error = parse_context_length_error(
-            response
-        )
-        if context_error:
-            raise context_error
+        classified = parse_http_response_error(response)
+        if classified:
+            raise classified
 
     response.raise_for_status()
     return response.json()
@@ -433,9 +505,9 @@ async def _stateless_response_once(
         timeout=None,
     )
     if response.is_error:
-        context_error = parse_context_length_error(response)
-        if context_error:
-            raise context_error
+        classified = parse_http_response_error(response)
+        if classified:
+            raise classified
     response.raise_for_status()
     return response.json()
 
@@ -481,9 +553,9 @@ async def stream_response_payload(
                     "body_chars": len(response.text),
                 },
             )
-            context_error = parse_context_length_error(response)
-            if context_error:
-                raise context_error
+            classified = parse_http_response_error(response)
+            if classified:
+                raise classified
         response.raise_for_status()
 
         async for line in response.aiter_lines():
@@ -511,6 +583,9 @@ async def stream_response_payload(
                 if isinstance(completed, dict):
                     final_response = completed
             elif event_type in {"response.failed", "error"}:
+                malformed = parse_malformed_tool_call_error(event)
+                if malformed:
+                    raise malformed
                 raise RuntimeError(
                     event.get("message")
                     or event.get("error")

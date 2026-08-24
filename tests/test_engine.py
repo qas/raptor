@@ -159,6 +159,49 @@ class AgentEngineTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(failure["ok"])
         self.assertIn("approval transport failed", failure["error"])
 
+    async def test_malformed_tool_arguments_never_reach_execution(self) -> None:
+        recorded: list[dict] = []
+        responses = [
+            {
+                "output": [{
+                    "type": "function_call",
+                    "name": "shell",
+                    "call_id": "call-1",
+                    "arguments": '{"command":"unterminated}',
+                }]
+            },
+            {
+                "output": [{
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "recovered"}],
+                }]
+            },
+        ]
+
+        async def create_response(_work):
+            return responses.pop(0)
+
+        async def execute_call(_call):
+            self.fail("malformed tool arguments reached execution")
+
+        def record_items(items, _source):
+            recorded.extend(items)
+
+        result = await run_agent(
+            work=[],
+            create_response=create_response,
+            execute_call=execute_call,
+            source="test",
+            max_tool_rounds=1,
+            record_items=record_items,
+        )
+
+        self.assertEqual(result["text"], "recovered")
+        failure = json.loads(recorded[1]["output"])
+        self.assertFalse(failure["ok"])
+        self.assertIn("bad JSON arguments", failure["error"])
+
 
 if __name__ == "__main__":
     unittest.main()

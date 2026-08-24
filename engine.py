@@ -152,6 +152,26 @@ def response_calls(
     ]
 
 
+def assistant_message(text: str) -> dict[str, Any]:
+    """Build a completed assistant message for a durable transcript."""
+    return {
+        "type": "message",
+        "status": "completed",
+        "role": "assistant",
+        "content": [{"type": "output_text", "text": text}],
+    }
+
+
+def _function_call_argument_error(call: dict[str, Any]) -> str | None:
+    try:
+        arguments = json.loads(str(call.get("arguments") or "{}"))
+    except json.JSONDecodeError as exc:
+        return f"bad JSON arguments: {exc}"
+    if not isinstance(arguments, dict):
+        return "tool arguments must be a JSON object"
+    return None
+
+
 async def run_agent(
     *,
     work: list[dict[str, Any]],
@@ -256,8 +276,12 @@ async def run_agent(
             )
             if report_activity:
                 report_activity(tool_activity(call))
+            argument_error = _function_call_argument_error(call)
             try:
-                call_result = await execute_call(call)
+                if argument_error is not None:
+                    call_result = {"ok": False, "error": argument_error}
+                else:
+                    call_result = await execute_call(call)
             except asyncio.CancelledError:
                 call_result = interrupted_tool_result()
                 event["status"] = "interrupted"

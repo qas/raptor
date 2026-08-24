@@ -8,6 +8,7 @@ from typing import Any
 from chat_provider import ConversationId, IncomingAction
 from chat_runtime import get_chat_provider
 from chat_store import (
+    active_item_events,
     append_event,
     append_item,
     append_meta,
@@ -123,7 +124,7 @@ async def finish_thread(
             if event.get("source") == "thread_merge"
             and isinstance((origin := event.get("origin")), dict)
         }
-        for event in item_events(branch_id):
+        for event in active_item_events(branch_id):
             if event.get("source") == "thread_seed":
                 continue
             item = event.get("item")

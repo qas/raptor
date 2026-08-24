@@ -18,5 +18,9 @@ class IncompleteResponsesStreamError(RuntimeError):
     """The transport closed before the protocol's terminal event."""
 
 
+class MalformedToolCallError(RuntimeError):
+    """The provider rejected malformed model-generated tool arguments."""
+
+
 class TransientResponsesError(RuntimeError):
     """A retryable backend failure exhausted its bounded attempts."""

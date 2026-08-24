@@ -21,6 +21,7 @@ if str(_ROOT) not in sys.path:
 import agent as agent_mod
 import chat_store
 import controller
+from response_errors import MalformedToolCallError
 import session
 from turn_runtime import turns
 import subagents
@@ -130,6 +131,74 @@ class TranscriptDurabilityTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("function_call", types)
         self.assertIn("function_call_output", types)
         self.assertIn("message", types)
+
+    async def test_malformed_tool_call_closes_the_durable_turn(self) -> None:
+        sid = str(session.state["current_session_id"])
+        sent: list[str] = []
+
+        async def malformed(*_args, **_kwargs):
+            failed_input = chat_store.item_events(sid)[-1]
+            chat_store.append_checkpoint(
+                sid,
+                summary="checkpoint containing rejected task: do it",
+                through_seq=int(failed_input["seq"]),
+                reason="threshold",
+            )
+            raise MalformedToolCallError("invalid generated arguments")
+
+        async def capture(_chat_id, text, **_kwargs):
+            sent.append(text)
+
+        with (
+            patch.object(agent_mod, "responses_create_stream", malformed),
+            patch.object(agent_mod, "send", capture),
+            patch.object(agent_mod, "typing_loop", _noop),
+            patch.object(agent_mod, "maybe_auto_compact", _noop),
+        ):
+            result = await agent_mod.agent_turn(1, "do it")
+
+        self.assertIsInstance(result, agent_mod.RetryableTurnFailure)
+        self.assertEqual(sent, [agent_mod.MALFORMED_TOOL_CALL_MESSAGE])
+        items = [event["item"] for event in chat_store.item_events(sid)]
+        self.assertEqual(items[-1]["role"], "assistant")
+        self.assertIn(
+            agent_mod.MALFORMED_TOOL_CALL_MESSAGE,
+            str(items[-1]),
+        )
+        self.assertNotIn("do it", str(agent_mod.build_active_context(sid)))
+        self.assertNotIn(
+            agent_mod.MALFORMED_TOOL_CALL_MESSAGE,
+            str(agent_mod.build_active_context(sid)),
+        )
+
+        seen_work: list[dict] = []
+
+        async def answer(_chat_id, work, **_kwargs):
+            seen_work.extend(copy.deepcopy(work))
+            return {
+                "output": [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [
+                            {"type": "output_text", "text": "Hello"}
+                        ],
+                    }
+                ]
+            }
+
+        with (
+            patch.object(agent_mod, "responses_create_stream", answer),
+            patch.object(agent_mod, "send", _noop),
+            patch.object(agent_mod, "typing_loop", _noop),
+            patch.object(agent_mod, "maybe_auto_compact", _noop),
+        ):
+            result = await agent_mod.agent_turn(1, "hi")
+
+        self.assertTrue(result)
+        self.assertEqual(seen_work[0]["content"], "hi")
+        self.assertNotIn("do it", str(seen_work))
+        self.assertNotIn(agent_mod.MALFORMED_TOOL_CALL_MESSAGE, str(seen_work))
 
     async def test_root_turn_marker_spans_exact_task_lifetime(self) -> None:
         started = asyncio.Event()

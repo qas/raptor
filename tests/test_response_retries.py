@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import httpx
+from response_errors import MalformedToolCallError
 
 _ROOT = Path(__file__).resolve().parent.parent
 os.environ.setdefault("TG_BOT_TOKEN", "test-token")
@@ -85,6 +86,95 @@ class ResponseRetryTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(responses.is_transient_responses_error(retryable))
         self.assertFalse(responses.is_transient_responses_error(terminal))
+
+    def test_malformed_tool_arguments_are_model_output_failure(self) -> None:
+        response = httpx.Response(
+            500,
+            json={
+                "error": {
+                    "message": (
+                        "Failed to parse tool call arguments as JSON: "
+                        "invalid string"
+                    )
+                }
+            },
+        )
+
+        error = responses.parse_http_response_error(response)
+
+        self.assertIsInstance(error, MalformedToolCallError)
+        assert error is not None
+        self.assertFalse(responses.is_transient_responses_error(error))
+
+    async def test_malformed_tool_call_is_not_retried(self) -> None:
+        request = AsyncMock(
+            side_effect=MalformedToolCallError("invalid generated arguments")
+        )
+        with (
+            patch.object(responses, "RESPONSES_MAX_RETRIES", 3),
+            patch.object(responses, "_responses_create_stream_once", request),
+        ):
+            with self.assertRaises(MalformedToolCallError):
+                await responses.responses_create_stream(1, [])
+        self.assertEqual(request.await_count, 1)
+
+    async def test_stream_classifies_malformed_tool_call_response(self) -> None:
+        def reject(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                500,
+                request=request,
+                json={
+                    "error": {
+                        "message": (
+                            "Failed to parse function_call arguments as "
+                            "JSON: syntax error"
+                        )
+                    }
+                },
+            )
+
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(reject)
+        ) as client:
+            with patch.object(
+                responses.session,
+                "responses",
+                client,
+                create=True,
+            ):
+                with self.assertRaises(MalformedToolCallError):
+                    await responses.stream_response_payload(
+                        url="http://backend/v1/responses",
+                        headers={},
+                        payload={"stream": True},
+                    )
+
+    async def test_stateless_request_classifies_malformed_tool_call(self) -> None:
+        response = httpx.Response(
+            400,
+            json={
+                "error": {
+                    "message": (
+                        "Could not parse tool_call arguments as JSON: "
+                        "invalid value"
+                    )
+                }
+            },
+        )
+        client = AsyncMock()
+        client.post.return_value = response
+
+        with (
+            patch.object(
+                responses.session,
+                "responses",
+                client,
+                create=True,
+            ),
+            patch.object(responses, "state", {"model": "model-a"}),
+        ):
+            with self.assertRaises(MalformedToolCallError):
+                await responses._stateless_response_once([])
 
     async def test_remote_disconnect_retries_three_times(self) -> None:
         request = AsyncMock(

@@ -195,6 +195,12 @@ Transient transport errors include connection failures, disconnects such as
 `429`, `500`, `502`, `503`, and `504`). The initial request is followed by up
 to `RESPONSES_MAX_RETRIES` exponential-backoff retries.
 
+If a provider rejects malformed model-generated tool arguments, Raptor
+executes nothing, archives the rejected turn and terminal outcome, and retires
+the failed context epoch. An active goal pauses, and later messages start with
+fresh model context instead of regenerating the same call. The archived chat
+remains available to history search.
+
 Retry exhaustion ends only the current attempt:
 
 - an ordinary root turn releases the controller, so the user can message again;

@@ -309,7 +309,7 @@ async def run_root_session(
                     if isinstance(delivered, RetryableTurnFailure)
                     else "a temporary agent failure"
                 )
-                if next_source == "goal" and goal_is_active():
+                if goal_is_active():
                     _goal, changed = pause_goal()
                     if changed:
                         await send(
