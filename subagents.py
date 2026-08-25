@@ -6,8 +6,16 @@ import time
 from collections.abc import Awaitable, Callable
 from typing import Any
 
+import session
+from activity import (
+    append_subagent_activity_input,
+    delete_subagent_activity,
+    finish_subagent_activity,
+    open_subagent_activity,
+    publish_subagent_activity,
+    publish_subagent_response,
+)
 from chat_provider import ConversationId
-
 from chat_store import (
     append_item,
     create_session,
@@ -19,15 +27,16 @@ from config import (
     MAX_BACKGROUND_SUBAGENTS,
     MAX_SUBAGENT_DEPTH,
     MAX_SUBAGENT_PENDING_INPUTS,
+    MAX_SUBAGENT_RECORDS,
     MAX_SUBAGENT_TOOL_EVENTS,
     MAX_TOOL_OUTPUT,
     MAX_TOOL_ROUNDS,
     SUBAGENT_RESPONSES_API_KEY,
     SUBAGENT_RESPONSES_BASE_URL,
+    SUBAGENT_RESPONSES_MAX_RETRIES,
     SUBAGENT_RESPONSES_MODEL,
     SUBAGENT_RESPONSES_REASONING_EFFORT,
     SUBAGENT_RESPONSES_REASONING_SUMMARY,
-    SUBAGENT_RESPONSES_MAX_RETRIES,
     SUBAGENT_RESPONSES_RETRY_BASE_SECONDS,
     TOOLS,
     subagent_compaction_generation_budget,
@@ -41,30 +50,25 @@ from context import (
     request_with_checkpoint_retry,
 )
 from engine import assistant_message, estimate_tokens, run_agent
-import session
+from observability import log_event
+from response_errors import (
+    ContextLengthError,
+    MalformedToolCallError,
+)
+from responses import (
+    ResponsesStreamReplayGuard,
+    parse_http_response_error,
+    retry_transient_response,
+    stream_response_payload,
+    validate_chronological_input,
+)
 from session import (
     bounded_interrupted_subagents,
     prune_subagent_records,
     save_state,
     state,
 )
-from responses import (
-    parse_http_response_error,
-    retry_transient_response,
-    stream_response_payload,
-    validate_chronological_input,
-)
-from response_errors import ContextLengthError, MalformedToolCallError
 from skills import skill_catalog_instructions
-from observability import log_event
-from activity import (
-    close_subagent_activity,
-    open_subagent_activity,
-    publish_subagent_activity,
-    publish_subagent_response,
-    schedule_subagent_activity_close,
-)
-
 
 _background_reservations = 0
 
@@ -74,6 +78,33 @@ def _background_subagent_count() -> int:
         len(runtime.subagent_tasks)
         for runtime in session.all_chat_runtimes()
     )
+
+
+def _background_capacity_error() -> dict[str, Any] | None:
+    pending_completions = sum(
+        bool(item.get("completion_pending"))
+        for runtime in session.all_chat_runtimes()
+        for item in runtime.subagent_records.values()
+    )
+    if pending_completions >= MAX_SUBAGENT_RECORDS:
+        return {
+            "ok": False,
+            "status": "capacity_reached",
+            "error": (
+                "Pending subagent completions must be delivered before "
+                "more background subagents can start"
+            ),
+        }
+    if _background_subagent_count() >= MAX_BACKGROUND_SUBAGENTS:
+        return {
+            "ok": False,
+            "status": "capacity_reached",
+            "error": (
+                "Background subagent capacity reached "
+                f"({MAX_BACKGROUND_SUBAGENTS})"
+            ),
+        }
+    return None
 
 
 def _bounded_tool_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -326,20 +357,29 @@ async def create_subagent_response(
     on_text: Callable[[str], Awaitable[None]] | None = None,
     on_reasoning_summary: Callable[[str], Awaitable[None]] | None = None,
 ) -> dict[str, Any]:
+    replay_guard = ResponsesStreamReplayGuard()
+
     async def request() -> dict[str, Any]:
-        return await _create_subagent_response_once(
-            work,
-            agent_id=agent_id,
-            allow_subagents=allow_subagents,
-            depth=depth,
-            tools=tools,
-            extra_instructions=extra_instructions,
-            max_output_tokens=max_output_tokens,
-            reasoning_effort=reasoning_effort,
-            reasoning_summary=reasoning_summary,
-            on_text=on_text,
-            on_reasoning_summary=on_reasoning_summary,
-        )
+        try:
+            return await _create_subagent_response_once(
+                work,
+                agent_id=agent_id,
+                allow_subagents=allow_subagents,
+                depth=depth,
+                tools=tools,
+                extra_instructions=extra_instructions,
+                max_output_tokens=max_output_tokens,
+                reasoning_effort=reasoning_effort,
+                reasoning_summary=reasoning_summary,
+                on_text=replay_guard.wrap(on_text),
+                on_reasoning_summary=replay_guard.wrap(on_reasoning_summary),
+            )
+        except Exception as exc:
+            replay_guard.reject_unsafe_replay(
+                exc,
+                operation="Subagent stream",
+            )
+            raise
 
     return await retry_transient_response(
         request,
@@ -517,7 +557,7 @@ async def run_subagent(
                 )
 
         async def _request(items):
-            if not record.get("background"):
+            if not record.get("activity_surface_id"):
                 return await create_subagent_response(
                     items,
                     agent_id=agent_id,
@@ -725,9 +765,10 @@ def new_record(
     depth: int,
     background: bool,
     allow_subagents: bool,
+    parent_session_id: str | None,
+    root_session_id: str | None,
 ) -> dict[str, Any]:
     agent_id = secrets.token_hex(4)
-    parent_session_id = state.get("current_session_id")
     session_id = create_session(
         kind="subagent",
         chat_key=session.current_runtime().key,
@@ -748,6 +789,7 @@ def new_record(
         "chat_key": session.current_runtime().key,
         "session_id": session_id,
         "parent_session_id": parent_session_id,
+        "root_session_id": root_session_id,
         "task": task,
         "last_task": task,
         "task_count": 1,
@@ -768,8 +810,10 @@ def new_record(
         "completion_pending": False,
         "completion_notified_at": None,
         "completion_attempts": 0,
+        "run_generation": 1,
+        "activity_finished_generation": 0,
+        "activity_result_delivered": False,
         "activity_surface_id": None,
-        "activity_surface_closed": True,
     }
 
 
@@ -906,6 +950,13 @@ def continue_record(
                     [],
                 ),
         }
+    for pending_text in list(record.get("pending_inputs") or []):
+        append_item(
+            str(record["session_id"]),
+            {"role": "user", "content": str(pending_text)},
+            source="steer",
+        )
+    record["pending_inputs"] = []
     record["last_task"] = task
     record["task_count"] = int(record.get("task_count") or 1) + 1
     append_item(
@@ -930,7 +981,6 @@ def continue_record(
     record["completed_at"] = None
     record["result"] = None
     record["error"] = None
-    record["pending_inputs"] = []
     record[
         "notify_completion"
     ] = background
@@ -943,7 +993,11 @@ def continue_record(
     record[
         "completion_attempts"
     ] = 0
-    record["activity_surface_closed"] = True
+    record["run_generation"] = max(
+        1,
+        int(record.get("run_generation") or 1) + 1,
+    )
+    record["activity_result_delivered"] = False
     save_state()
 
 
@@ -990,6 +1044,8 @@ async def run_background_subagent(
     agent_id = str(
         record["id"]
     )
+    owner_task = asyncio.current_task()
+    generation = max(1, int(record.get("run_generation") or 1))
     try:
         result = await run_subagent(
             agent_id=agent_id,
@@ -1021,35 +1077,61 @@ async def run_background_subagent(
             f"{type(exc).__name__}: {exc}"
         )
     finally:
-        record["completed_at"] = int(
-            time.time()
-        )
-        should_notify = bool(
-            record.get(
-                "notify_completion",
-                True,
-            )
-        )
-        record[
-            "completion_pending"
-        ] = should_notify
-        save_state()
-        log_event(
-            "subagent",
-            "completed",
-            lifecycle_record(
-                record
-            ),
-        )
-        if should_notify:
-            await session.subagent_events.put(
-                dict(record)
-            )
-        session.subagent_tasks.pop(
-            agent_id,
-            None,
-        )
-        schedule_subagent_activity_close(record)
+        try:
+            if int(record.get("run_generation") or 1) == generation:
+                record["completed_at"] = int(time.time())
+                should_notify = bool(record.get("notify_completion", True))
+                record["completion_pending"] = should_notify
+                save_state()
+                log_event("subagent", "completed", lifecycle_record(record))
+                if should_notify:
+                    _queue_subagent_completion(record)
+                await finish_subagent_activity(
+                    record,
+                    expected_generation=generation,
+                )
+        finally:
+            if session.subagent_tasks.get(agent_id) is owner_task:
+                session.subagent_tasks.pop(agent_id, None)
+
+
+async def delete_subagent_record(agent_id: str) -> dict[str, Any]:
+    """Delete one terminal subagent and its provider-owned surface."""
+    record = session.subagent_records.get(agent_id)
+    if record is None:
+        return {"ok": False, "error": f"subagent {agent_id} not found"}
+    task = session.subagent_tasks.get(agent_id)
+    if record.get("status") == "running" or (
+        task is not None and not task.done()
+    ):
+        return {
+            "ok": False,
+            "agent_id": agent_id,
+            "status": "running",
+            "error": "Stop the subagent before deleting it",
+        }
+    if record.get("completion_pending"):
+        return {
+            "ok": False,
+            "agent_id": agent_id,
+            "status": "completion_pending",
+            "error": "Wait for the parent completion notification",
+        }
+    if not await delete_subagent_activity(record):
+        return {
+            "ok": False,
+            "agent_id": agent_id,
+            "status": "delete_failed",
+            "error": "Subagent activity surface could not be deleted",
+        }
+    session.subagent_records.pop(agent_id, None)
+    state["interrupted_subagents"] = [
+        item
+        for item in state.get("interrupted_subagents", [])
+        if str(item.get("id")) != agent_id
+    ]
+    save_state()
+    return {"ok": True, "agent_id": agent_id, "status": "deleted"}
 
 
 async def subagent_tool(
@@ -1070,6 +1152,26 @@ async def subagent_tool(
             "",
         )
     ).strip()
+    delete_requested = bool(args.get("delete", False))
+    if delete_requested:
+        if task:
+            return {
+                "ok": False,
+                "error": "delete cannot be combined with task",
+            }
+        if not requested_id:
+            return {
+                "ok": False,
+                "error": "delete requires agent_id",
+            }
+        if chat_id is None or (
+            session.conversation_key(chat_id) != session.current_runtime().key
+        ):
+            return {
+                "ok": False,
+                "error": "subagent conversation does not match the current chat",
+            }
+        return await delete_subagent_record(requested_id)
     if not task:
         if requested_id:
             record = (
@@ -1119,6 +1221,14 @@ async def subagent_tool(
             0,
         )
     )
+    immediate_parent_session_id = str(
+        execution_context.get("session_id") or ""
+    ) or None
+    root_session_id = str(
+        execution_context.get("root_session_id")
+        or immediate_parent_session_id
+        or ""
+    ) or None
     if (
         parent_depth > 0
         and not execution_context.get(
@@ -1156,6 +1266,7 @@ async def subagent_tool(
                 "Nested subagents must run in the foreground"
             ),
         }
+    previous_completion: dict[str, Any] | None = None
     if requested_id:
         record = (
             session.subagent_records.get(
@@ -1169,6 +1280,15 @@ async def subagent_tool(
                     f"subagent {requested_id} not found"
                 ),
             }
+        owner_task = session.subagent_tasks.get(requested_id)
+        if owner_task is not None and not owner_task.done():
+            if record.get("status") != "running":
+                return {
+                    "ok": False,
+                    "agent_id": requested_id,
+                    "status": "finalizing",
+                    "error": "Subagent is finalizing its current run",
+                }
         if record.get("status") == "running":
             pending_inputs = record.setdefault(
                 "pending_inputs",
@@ -1192,6 +1312,7 @@ async def subagent_tool(
             ) + 1
             pending_inputs.append(task)
             save_state()
+            await append_subagent_activity_input(record, task)
             log_event(
                 "subagent",
                 "steering_queued",
@@ -1208,7 +1329,8 @@ async def subagent_tool(
                 "status":
                     "steering_queued",
             }
-        await close_subagent_activity(record)
+        if record.get("completion_pending"):
+            previous_completion = subagent_status(record)
         allow_subagents = (
             bool(
                 args[
@@ -1224,6 +1346,11 @@ async def subagent_tool(
                 )
             )
         )
+        await finish_subagent_activity(record)
+        if background:
+            capacity_error = _background_capacity_error()
+            if capacity_error is not None:
+                return capacity_error
         continue_record(
             record,
             task,
@@ -1237,6 +1364,23 @@ async def subagent_tool(
             ),
         )
     else:
+        open_surfaces = sum(
+            bool(item.get("activity_surface_id"))
+            for item in session.subagent_records.values()
+        )
+        if background and open_surfaces >= MAX_SUBAGENT_RECORDS:
+            return {
+                "ok": False,
+                "status": "capacity_reached",
+                "error": (
+                    "Persistent subagent topic capacity reached "
+                    f"({MAX_SUBAGENT_RECORDS})"
+                ),
+            }
+        if background:
+            capacity_error = _background_capacity_error()
+            if capacity_error is not None:
+                return capacity_error
         allow_subagents = bool(
             args.get(
                 "allow_subagents",
@@ -1253,6 +1397,8 @@ async def subagent_tool(
                 and depth
                 < MAX_SUBAGENT_DEPTH
             ),
+            parent_session_id=immediate_parent_session_id,
+            root_session_id=root_session_id,
         )
     agent_id = str(
         record["id"]
@@ -1269,21 +1415,11 @@ async def subagent_tool(
             record
         ),
     )
+    generation = max(1, int(record.get("run_generation") or 1))
+    if not background and record.get("activity_surface_id"):
+        await open_subagent_activity(record)
     if background:
         global _background_reservations
-        if _background_subagent_count() >= MAX_BACKGROUND_SUBAGENTS:
-            record["status"] = "cancelled"
-            record["error"] = "Background subagent capacity reached"
-            record["completed_at"] = int(time.time())
-            save_state()
-            return {
-                "ok": False,
-                "status": "capacity_reached",
-                "error": (
-                    "Background subagent capacity reached "
-                    f"({MAX_BACKGROUND_SUBAGENTS})"
-                ),
-            }
         _background_reservations += 1
         try:
             await open_subagent_activity(record)
@@ -1300,7 +1436,7 @@ async def subagent_tool(
             record["error"] = "Subagent start was cancelled"
             record["completed_at"] = int(time.time())
             save_state()
-            await close_subagent_activity(record)
+            await finish_subagent_activity(record)
             raise
         finally:
             _background_reservations -= 1
@@ -1308,6 +1444,12 @@ async def subagent_tool(
             "ok": True,
             "agent_id": agent_id,
             "status": "running",
+            "completion_notification": "automatic",
+            **(
+                {"previous_completion": previous_completion}
+                if previous_completion is not None
+                else {}
+            ),
         }
     try:
         result = await run_subagent(
@@ -1328,6 +1470,11 @@ async def subagent_tool(
             "agent_id": agent_id,
             "status": "completed",
             "result": record["result"],
+            **(
+                {"previous_completion": previous_completion}
+                if previous_completion is not None
+                else {}
+            ),
         }
     except asyncio.CancelledError:
         record["status"] = "cancelled"
@@ -1352,10 +1499,19 @@ async def subagent_tool(
             "agent_id": agent_id,
             "status": "failed",
             "error": record["error"],
+            **(
+                {"previous_completion": previous_completion}
+                if previous_completion is not None
+                else {}
+            ),
         }
     finally:
         record["completed_at"] = int(
             time.time()
+        )
+        await finish_subagent_activity(
+            record,
+            expected_generation=generation,
         )
         prune_subagent_records()
         save_state()
@@ -1383,8 +1539,10 @@ def completion_prompt(
     }
     return (
         "A background subagent has finished. Assess its result as the parent "
-        "agent and send the user the relevant outcome. Do not describe "
-        "this notification as a new user request.\n\n"
+        "agent and send the user the relevant outcome exactly once. This is "
+        "the authoritative completion for this run; do not poll the subagent "
+        "or start a wait command. Do not describe this notification as a new "
+        "user request.\n\n"
         + json.dumps(
             payload,
             ensure_ascii=False,
@@ -1410,87 +1568,122 @@ async def requeue_deferred_subagent_completions() -> int:
     ]
     for record in records:
         record["completion_attempts"] = 0
-        await session.subagent_events.put(dict(record))
+        _queue_subagent_completion(record)
     if records:
         save_state()
     return len(records)
 
 
-async def completion_event_loop() -> None:
+def _queue_subagent_completion(record: dict[str, Any]) -> bool:
     from controller import enqueue_runtime_event
     from runtime_events import RuntimeEventKind
-    restored = False
-    for runtime in session.all_chat_runtimes():
-        with session.bound_runtime(runtime):
-            for record in runtime.subagent_records.values():
-                if record.get("completion_pending"):
-                    record["completion_attempts"] = 0
-                    restored = True
-                    await session.subagent_events.put(dict(record))
-    if restored:
-        save_state()
-    while True:
-        record = await session.subagent_events.get()
+
+    chat_id = record.get("chat_id")
+    if chat_id is None:
+        return False
+    owner_key = str(record.get("chat_key") or "")
+    if owner_key != session.conversation_key(chat_id):
+        log_event(
+            "subagent",
+            "completion_owner_mismatch",
+            {"agent_id": record.get("id")},
+        )
+        return False
+    agent_id = str(record.get("id") or "")
+    generation = max(1, int(record.get("run_generation") or 1))
+    with session.bound_chat(chat_id):
+        live_record = session.subagent_records.get(agent_id)
+        if (
+            not live_record
+            or not live_record.get("completion_pending")
+        ):
+            return False
+        live_generation = max(
+            1,
+            int(live_record.get("run_generation") or 1),
+        )
+        if live_generation != generation:
+            return False
         try:
-            chat_id = record.get("chat_id")
-            if chat_id is None:
-                continue
-            owner_key = str(record.get("chat_key") or "")
-            if owner_key != session.conversation_key(chat_id):
-                log_event(
-                    "subagent",
-                    "completion_owner_mismatch",
-                    {"agent_id": record.get("id")},
-                )
-                continue
-            with session.bound_chat(chat_id):
-                live_record = session.subagent_records.get(str(record["id"]))
-                if not live_record or not live_record.get("completion_pending"):
-                    continue
-                try:
-                    delivered = await enqueue_runtime_event(
-                        chat_id,
-                        RuntimeEventKind.SUBAGENT_COMPLETED,
-                        completion_prompt(record),
-                        is_active=lambda current=live_record: bool(
-                            current.get("completion_pending")
-                        ),
-                    )
-                except asyncio.CancelledError:
-                    raise
-                except Exception as exc:
-                    delivered = False
-                    log_event(
-                        "subagent",
-                        "completion_delivery_error",
-                        {
-                            "agent_id": record.get("id"),
-                            "type": type(exc).__name__,
-                            "message": str(exc),
-                        },
-                    )
-                if delivered:
-                    live_record["completion_pending"] = False
-                    live_record["completion_notified_at"] = int(time.time())
-                    live_record["completion_attempts"] = 0
-                    prune_subagent_records()
-                    save_state()
-                else:
-                    attempts = int(
-                        live_record.get("completion_attempts", 0)
-                    ) + 1
-                    live_record["completion_attempts"] = attempts
-                    save_state()
-                    log_event(
-                        "subagent",
-                        "completion_deferred",
-                        {
-                            "agent_id": live_record.get("id"),
-                            "attempts": attempts,
-                        },
-                    )
-        finally:
-            session.subagent_events.task_done()
+            completion = enqueue_runtime_event(
+                chat_id,
+                RuntimeEventKind.SUBAGENT_COMPLETED,
+                completion_prompt(record),
+                is_active=lambda current=live_record, expected=generation: bool(
+                    current.get("completion_pending")
+                    and max(1, int(current.get("run_generation") or 1))
+                    == expected
+                ),
+            )
+        except Exception as exc:
+            log_event(
+                "subagent",
+                "completion_delivery_error",
+                {
+                    "agent_id": record.get("id"),
+                    "type": type(exc).__name__,
+                    "message": str(exc),
+                },
+            )
+            live_record["completion_attempts"] = 1
+            save_state()
+            return False
+
+    def completed(done: asyncio.Future[bool]) -> None:
+        try:
+            delivered = not done.cancelled() and bool(done.result())
+        except Exception as exc:
+            delivered = False
+            log_event(
+                "subagent",
+                "completion_delivery_error",
+                {
+                    "agent_id": agent_id,
+                    "type": type(exc).__name__,
+                    "message": str(exc),
+                },
+            )
+        with session.bound_chat(chat_id):
+            current = session.subagent_records.get(agent_id)
+            if (
+                current is None
+                or not current.get("completion_pending")
+                or max(1, int(current.get("run_generation") or 1))
+                != generation
+            ):
+                return
+            if delivered:
+                current["completion_pending"] = False
+                current["completion_notified_at"] = int(time.time())
+                current["completion_attempts"] = 0
+                prune_subagent_records()
+                event = "completion_delivered"
+                payload = {"agent_id": agent_id}
+            else:
+                attempts = int(current.get("completion_attempts") or 0) + 1
+                current["completion_attempts"] = attempts
+                event = "completion_deferred"
+                payload = {"agent_id": agent_id, "attempts": attempts}
+            save_state()
+            log_event("subagent", event, payload)
+
+    completion.add_done_callback(completed)
+    return True
+
+
+def restore_pending_subagent_completions() -> int:
+    """Queue persisted completions once when a chat runtime starts."""
+    records = [
+        record
+        for record in session.subagent_records.values()
+        if record.get("completion_pending")
+    ]
+    for record in records:
+        record["completion_attempts"] = 0
+        _queue_subagent_completion(record)
+    if records:
+        save_state()
+    return len(records)
 
 
 async def cancel_background_subagents(*, discard_pending: bool = False) -> int:

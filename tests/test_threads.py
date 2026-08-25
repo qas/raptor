@@ -47,6 +47,16 @@ class ThreadTests(unittest.IsolatedAsyncioTestCase):
         self._chat_patch.start()
         self.addCleanup(self._chat_patch.stop)
         chat_store._SEQ_CACHE.clear()
+        self._runtime_context = session.bound_chat(
+            f"threads:{self._chat_dir.name}"
+        )
+        self._runtime_context.__enter__()
+        self.addCleanup(
+            self._runtime_context.__exit__,
+            None,
+            None,
+            None,
+        )
         session.state.clear()
         session.state.update(copy.deepcopy(session.DEFAULT_STATE))
         self.parent = chat_store.create_session(
@@ -113,6 +123,42 @@ class ThreadTests(unittest.IsolatedAsyncioTestCase):
             branch,
             {row["session_id"] for row in listed["sessions"]},
         )
+
+    async def test_bootstrap_finishes_interrupted_thread_clear(self) -> None:
+        result = await start_thread("!room:example.org")
+        branch = str(result["thread"]["session_id"])
+        chat_store.end_session(branch, reason="thread_cleared")
+
+        with patch.object(
+            session,
+            "all_chat_runtimes",
+            return_value=(session.current_runtime(),),
+        ):
+            repaired = session.bootstrap_runtime_storage()
+
+        self.assertFalse(thread_active())
+        self.assertEqual(session.state["current_session_id"], self.parent)
+        self.assertEqual(repaired["created_sessions"], 0)
+
+    async def test_bootstrap_replaces_orphaned_ended_thread(self) -> None:
+        result = await start_thread("!room:example.org")
+        branch = str(result["thread"]["session_id"])
+        chat_store.end_session(branch, reason="thread_cleared")
+        chat_store.end_session(self.parent, reason="archived")
+
+        with patch.object(
+            session,
+            "all_chat_runtimes",
+            return_value=(session.current_runtime(),),
+        ):
+            repaired = session.bootstrap_runtime_storage()
+
+        current = str(session.state["current_session_id"])
+        self.assertFalse(thread_active())
+        self.assertNotIn(current, {self.parent, branch})
+        self.assertTrue(chat_store.session_exists(current))
+        self.assertFalse(chat_store.session_is_ended(current))
+        self.assertEqual(repaired["created_sessions"], 1)
 
     async def test_merge_adds_only_branch_native_items(self) -> None:
         result = await start_thread("!room:example.org")

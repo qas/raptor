@@ -1,13 +1,27 @@
 import asyncio
+import os
 import sys
+import tempfile
 import types
 import unittest
-from unittest.mock import AsyncMock, patch
+from collections.abc import Callable
+from pathlib import Path
+from unittest.mock import AsyncMock, Mock, patch
 
 import httpx
+
+_HOME = Path(tempfile.mkdtemp(prefix="raptor-subagent-tests-"))
+os.environ["RAPTOR_HOME"] = str(_HOME)
+os.environ["AGENT_WORKDIR"] = str(_HOME)
+
+import controller
 import session
 import subagents
-from response_errors import MalformedToolCallError
+from response_errors import (
+    IncompleteResponsesStreamError,
+    MalformedToolCallError,
+    PartialResponsesStreamError,
+)
 
 
 class BackgroundSubagentTests(unittest.IsolatedAsyncioTestCase):
@@ -21,13 +35,6 @@ class BackgroundSubagentTests(unittest.IsolatedAsyncioTestCase):
             None,
         )
         session.subagent_records.clear()
-        while True:
-            try:
-                session.subagent_events.get_nowait()
-            except asyncio.QueueEmpty:
-                break
-            else:
-                session.subagent_events.task_done()
 
     def test_subagent_payload_rejects_instruction_roles_in_history(self) -> None:
         with (
@@ -118,11 +125,48 @@ class BackgroundSubagentTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(kwargs["on_text"], on_text)
         self.assertIs(kwargs["on_reasoning_summary"], on_reasoning)
 
+    async def test_public_subagent_stream_is_never_replayed(self) -> None:
+        for callback_name in ("on_text", "on_reasoning_summary"):
+            with self.subTest(callback=callback_name):
+                attempts = 0
+
+                async def interrupted(_items, **kwargs):
+                    nonlocal attempts
+                    attempts += 1
+                    await kwargs[callback_name]("public output")
+                    raise IncompleteResponsesStreamError("disconnected")
+
+                callbacks = {callback_name: AsyncMock()}
+                with (
+                    patch.object(
+                        subagents,
+                        "_create_subagent_response_once",
+                        interrupted,
+                    ),
+                    patch.object(subagents, "SUBAGENT_RESPONSES_MAX_RETRIES", 3),
+                    patch.object(
+                        subagents,
+                        "SUBAGENT_RESPONSES_RETRY_BASE_SECONDS",
+                        0,
+                    ),
+                ):
+                    with self.assertRaises(PartialResponsesStreamError):
+                        await subagents.create_subagent_response(
+                            [],
+                            agent_id="worker-1",
+                            allow_subagents=False,
+                            depth=1,
+                            **callbacks,
+                        )
+
+                self.assertEqual(attempts, 1)
+
     async def test_background_runtime_projects_reasoning_and_reply(self) -> None:
         record = {
             "id": "worker-1",
             "session_id": "session-1",
             "background": True,
+            "activity_surface_id": "telegram:42/77",
             "pending_inputs": [],
             "tool_events": [],
             "todos": [],
@@ -333,6 +377,458 @@ class BackgroundSubagentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(record["status"], "completed")
         self.assertEqual(record["result"], "finished")
 
+    async def test_background_start_declares_automatic_completion(self) -> None:
+        started = asyncio.Event()
+
+        async def wait_forever(_record):
+            started.set()
+            await asyncio.Event().wait()
+
+        with (
+            patch.object(subagents, "open_subagent_activity", AsyncMock()),
+            patch.object(subagents, "run_background_subagent", wait_forever),
+            patch.object(subagents, "save_state"),
+        ):
+            result = await subagents.subagent_tool(
+                {"task": "inspect", "background": True},
+                chat_id="telegram:123",
+                execution_context={"depth": 0},
+            )
+            await started.wait()
+            task = session.subagent_tasks[result["agent_id"]]
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            session.subagent_tasks.pop(result["agent_id"], None)
+
+        self.assertEqual(result["status"], "running")
+        self.assertEqual(result["completion_notification"], "automatic")
+
+    def test_completion_prompt_is_single_shot(self) -> None:
+        prompt = subagents.completion_prompt(
+            {
+                "id": "worker-1",
+                "task": "inspect",
+                "status": "completed",
+                "result": "done",
+            }
+        )
+
+        self.assertIn("exactly once", prompt)
+        self.assertIn("do not poll", prompt)
+        self.assertIn("or start a wait command", prompt)
+
+    async def test_continuation_waits_for_prior_generation_to_finalize(self) -> None:
+        closing = asyncio.Event()
+        release = asyncio.Event()
+        record = {
+            "id": "worker-1",
+            "chat_id": "telegram:123",
+            "chat_key": "telegram:123",
+            "depth": 1,
+            "allow_subagents": False,
+            "notify_completion": False,
+            "status": "running",
+            "run_generation": 1,
+        }
+
+        async def finish(*_args, **_kwargs):
+            closing.set()
+            await release.wait()
+
+        with (
+            patch.object(subagents, "run_subagent", AsyncMock(return_value="done")),
+            patch.object(subagents, "finish_subagent_activity", finish),
+            patch.object(subagents, "save_state"),
+        ):
+            task = asyncio.create_task(subagents.run_background_subagent(record))
+            session.subagent_records["worker-1"] = record
+            session.subagent_tasks["worker-1"] = task
+            await closing.wait()
+
+            result = await subagents.subagent_tool(
+                {"agent_id": "worker-1", "task": "continue", "background": True},
+                chat_id="telegram:123",
+                execution_context={"depth": 0},
+            )
+
+            self.assertFalse(result["ok"])
+            self.assertEqual(result["status"], "finalizing")
+            release.set()
+            await task
+
+        self.assertNotIn("worker-1", session.subagent_tasks)
+
+    async def test_parent_notification_does_not_wait_for_topic_finalization(
+        self,
+    ) -> None:
+        finalizing = asyncio.Event()
+        release = asyncio.Event()
+        completion = asyncio.get_running_loop().create_future()
+        enqueue = Mock(return_value=completion)
+        record = {
+            "id": "worker-1",
+            "chat_id": "telegram:123",
+            "chat_key": "telegram:123",
+            "depth": 1,
+            "allow_subagents": False,
+            "notify_completion": True,
+            "completion_pending": False,
+            "status": "running",
+            "run_generation": 1,
+        }
+
+        async def finish(*_args, **_kwargs):
+            finalizing.set()
+            await release.wait()
+
+        with (
+            patch.object(
+                subagents,
+                "run_subagent",
+                AsyncMock(return_value="done"),
+            ),
+            patch.object(subagents, "finish_subagent_activity", finish),
+            patch.object(subagents, "save_state"),
+            patch.object(controller, "enqueue_runtime_event", enqueue),
+        ):
+            task = asyncio.create_task(subagents.run_background_subagent(record))
+            session.subagent_records["worker-1"] = record
+            session.subagent_tasks["worker-1"] = task
+            await finalizing.wait()
+
+            enqueue.assert_called_once()
+            self.assertTrue(record["completion_pending"])
+
+            release.set()
+            await task
+
+        self.assertNotIn("worker-1", session.subagent_tasks)
+
+    async def test_background_completion_joins_running_parent_end_to_end(
+        self,
+    ) -> None:
+        finalizing = asyncio.Event()
+        release = asyncio.Event()
+        parent_running = asyncio.Event()
+        release_parent = asyncio.Event()
+        parent_inputs: list[str] = []
+        record = {
+            "id": "worker-1",
+            "chat_id": "telegram:123",
+            "chat_key": "telegram:123",
+            "depth": 1,
+            "allow_subagents": False,
+            "notify_completion": True,
+            "completion_pending": False,
+            "status": "running",
+            "run_generation": 1,
+        }
+
+        async def finish(*_args, **_kwargs):
+            finalizing.set()
+            await release.wait()
+
+        async def parent_turn(_chat_id, text, **_kwargs):
+            parent_inputs.append(text)
+            if text == "parent request":
+                parent_running.set()
+                await release_parent.wait()
+            return True
+
+        with (
+            patch.object(
+                subagents,
+                "run_subagent",
+                AsyncMock(return_value="Tatooine"),
+            ),
+            patch.object(subagents, "finish_subagent_activity", finish),
+            patch.object(subagents, "save_state"),
+            patch.object(controller, "agent_turn", parent_turn),
+            patch.object(
+                controller,
+                "flush_pending_delivery",
+                AsyncMock(return_value=True),
+            ),
+            patch.object(controller, "ensure_goal_pin", AsyncMock()),
+            patch.object(controller, "sync_goal_pin", AsyncMock()),
+        ):
+            parent_task = controller.start_root_session(
+                "telegram:123",
+                "parent request",
+            )
+            await parent_running.wait()
+            child_task = asyncio.create_task(
+                subagents.run_background_subagent(record)
+            )
+            session.subagent_records["worker-1"] = record
+            session.subagent_tasks["worker-1"] = child_task
+            try:
+                await finalizing.wait()
+                release_parent.set()
+                await asyncio.wait_for(
+                    _wait_until(lambda: not record["completion_pending"]),
+                    timeout=1,
+                )
+                await parent_task
+            finally:
+                release_parent.set()
+                release.set()
+                await child_task
+
+        self.assertEqual(len(parent_inputs), 2)
+        self.assertEqual(parent_inputs[0], "parent request")
+        self.assertIn("Tatooine", parent_inputs[1])
+        self.assertEqual(record["status"], "completed")
+
+    async def test_running_steer_is_appended_to_activity_surface(self) -> None:
+        record = {
+            "id": "worker-1",
+            "chat_id": "telegram:123",
+            "chat_key": "telegram:123",
+            "status": "running",
+            "task_count": 1,
+            "pending_inputs": [],
+            "activity_surface_id": "telegram:42/77",
+        }
+        session.subagent_records["worker-1"] = record
+        append_input = AsyncMock()
+        with (
+            patch.object(
+                subagents,
+                "append_subagent_activity_input",
+                append_input,
+            ),
+            patch.object(subagents, "save_state"),
+        ):
+            result = await subagents.subagent_tool(
+                {"agent_id": "worker-1", "task": "check the logs"},
+                chat_id="telegram:123",
+                execution_context={"depth": 0},
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["status"], "steering_queued")
+        append_input.assert_awaited_once_with(record, "check the logs")
+
+    async def test_surfaced_subagent_projects_foreground_continuation(
+        self,
+    ) -> None:
+        record = {
+            "id": "worker-1",
+            "chat_id": "telegram:123",
+            "chat_key": "telegram:123",
+            "session_id": "subagent-session",
+            "status": "completed",
+            "task_count": 1,
+            "pending_inputs": [],
+            "allow_subagents": False,
+            "run_generation": 1,
+            "activity_surface_id": "telegram:42/77",
+        }
+        session.subagent_records["worker-1"] = record
+        finish = AsyncMock(return_value=True)
+        open_surface = AsyncMock()
+        with (
+            patch.object(subagents, "finish_subagent_activity", finish),
+            patch.object(subagents, "open_subagent_activity", open_surface),
+            patch.object(subagents, "run_subagent", AsyncMock(return_value="done")),
+            patch.object(subagents, "append_item"),
+            patch.object(subagents, "save_state"),
+            patch.object(subagents, "prune_subagent_records"),
+        ):
+            result = await subagents.subagent_tool(
+                {"agent_id": "worker-1", "task": "continue"},
+                chat_id="telegram:123",
+                execution_context={"depth": 0},
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertFalse(record["background"])
+        self.assertEqual(record["run_generation"], 2)
+        open_surface.assert_awaited_once_with(record)
+        self.assertEqual(finish.await_count, 2)
+        self.assertEqual(
+            finish.await_args_list[-1].kwargs["expected_generation"],
+            2,
+        )
+
+    async def test_continuation_hands_pending_completion_to_parent(self) -> None:
+        record = {
+            "id": "worker-1",
+            "chat_id": "telegram:123",
+            "chat_key": "telegram:123",
+            "session_id": "subagent-session",
+            "status": "completed",
+            "result": "first result",
+            "task_count": 1,
+            "pending_inputs": [],
+            "allow_subagents": False,
+            "run_generation": 1,
+            "completion_pending": True,
+        }
+        session.subagent_records["worker-1"] = record
+        with (
+            patch.object(
+                subagents,
+                "finish_subagent_activity",
+                AsyncMock(return_value=True),
+            ),
+            patch.object(
+                subagents,
+                "run_subagent",
+                AsyncMock(return_value="second result"),
+            ),
+            patch.object(subagents, "append_item"),
+            patch.object(subagents, "save_state"),
+            patch.object(subagents, "prune_subagent_records"),
+        ):
+            result = await subagents.subagent_tool(
+                {"agent_id": "worker-1", "task": "continue"},
+                chat_id="telegram:123",
+                execution_context={"depth": 0},
+            )
+
+        self.assertEqual(
+            result["previous_completion"]["result"],
+            "first result",
+        )
+        self.assertEqual(result["result"], "second result")
+
+    async def test_activity_failure_does_not_block_continuation(
+        self,
+    ) -> None:
+        record = {
+            "id": "worker-1",
+            "chat_id": "telegram:123",
+            "chat_key": "telegram:123",
+            "session_id": "subagent-session",
+            "status": "completed",
+            "task_count": 1,
+            "pending_inputs": [],
+            "allow_subagents": False,
+            "run_generation": 1,
+            "activity_surface_id": "telegram:42/77",
+        }
+        session.subagent_records["worker-1"] = record
+        with (
+            patch.object(
+                subagents,
+                "finish_subagent_activity",
+                AsyncMock(return_value=False),
+            ),
+            patch.object(
+                subagents,
+                "run_subagent",
+                AsyncMock(return_value="continued"),
+            ),
+            patch.object(
+                subagents,
+                "open_subagent_activity",
+                AsyncMock(),
+            ),
+            patch.object(subagents, "append_item") as append_item,
+            patch.object(subagents, "save_state"),
+            patch.object(subagents, "prune_subagent_records"),
+        ):
+            result = await subagents.subagent_tool(
+                {"agent_id": "worker-1", "task": "continue"},
+                chat_id="telegram:123",
+                execution_context={"depth": 0},
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["result"], "continued")
+        self.assertEqual(record["status"], "completed")
+        self.assertEqual(record["run_generation"], 2)
+        append_item.assert_called()
+
+    async def test_delete_removes_terminal_subagent_record(self) -> None:
+        record = {
+            "id": "worker-1",
+            "status": "completed",
+            "activity_surface_id": "telegram:42/77",
+        }
+        session.subagent_records["worker-1"] = record
+        session.state["interrupted_subagents"] = [{"id": "worker-1"}]
+        with (
+            patch.object(
+                subagents,
+                "delete_subagent_activity",
+                AsyncMock(return_value=True),
+            ),
+            patch.object(subagents, "save_state"),
+        ):
+            result = await subagents.subagent_tool(
+                {"agent_id": "worker-1", "delete": True},
+                chat_id="telegram:123",
+                execution_context={"depth": 0},
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["status"], "deleted")
+        self.assertNotIn("worker-1", session.subagent_records)
+        self.assertEqual(session.state["interrupted_subagents"], [])
+
+    async def test_delete_waits_for_pending_completion_delivery(self) -> None:
+        record = {
+            "id": "worker-1",
+            "status": "completed",
+            "completion_pending": True,
+            "activity_surface_id": "telegram:42/77",
+        }
+        session.subagent_records["worker-1"] = record
+        delete_surface = AsyncMock(return_value=True)
+        with patch.object(
+            subagents,
+            "delete_subagent_activity",
+            delete_surface,
+        ):
+            result = await subagents.subagent_tool(
+                {"agent_id": "worker-1", "delete": True},
+                chat_id="telegram:123",
+                execution_context={"depth": 0},
+            )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["status"], "completion_pending")
+        self.assertIs(session.subagent_records["worker-1"], record)
+        delete_surface.assert_not_awaited()
+
+    async def test_parent_completion_does_not_depend_on_activity_finish(
+        self,
+    ) -> None:
+        record = {
+            "id": "worker-1",
+            "chat_id": "telegram:123",
+            "chat_key": "telegram:123",
+            "depth": 1,
+            "allow_subagents": False,
+            "notify_completion": True,
+            "run_generation": 1,
+        }
+        order: list[str] = []
+        completion = asyncio.get_running_loop().create_future()
+
+        def enqueue(*_args, **_kwargs):
+            order.append("completion")
+            return completion
+
+        async def finish(_record, *, expected_generation=None):
+            self.assertEqual(expected_generation, 1)
+            order.append("activity")
+            return True
+
+        with (
+            patch.object(subagents, "run_subagent", AsyncMock(return_value="done")),
+            patch.object(subagents, "finish_subagent_activity", finish),
+            patch.object(subagents, "save_state"),
+            patch.object(subagents, "_queue_subagent_completion") as queued,
+        ):
+            queued.side_effect = lambda _record: order.append("completion") or True
+            await subagents.run_background_subagent(record)
+
+        self.assertEqual(order, ["completion", "activity"])
+
     async def test_spawn_cannot_cross_chat_boundaries(self) -> None:
         with session.bound_chat("telegram:parent"):
             result = await subagents.subagent_tool(
@@ -407,6 +903,7 @@ class BackgroundSubagentTests(unittest.IsolatedAsyncioTestCase):
             "status": "completed",
             "task_count": 4,
             "activity_surface_id": "telegram:42/77",
+            "activity_result_delivered": True,
         }
         with (
             patch.object(subagents, "append_item"),
@@ -426,7 +923,119 @@ class BackgroundSubagentTests(unittest.IsolatedAsyncioTestCase):
             record["activity_surface_id"],
             "telegram:42/77",
         )
+        self.assertFalse(record["activity_result_delivered"])
         self.assertNotIn("tasks", record)
+
+    def test_continuation_preserves_queued_inputs_in_transcript_order(self) -> None:
+        record = {
+            "session_id": "subagent-session",
+            "status": "interrupted",
+            "task_count": 1,
+            "pending_inputs": ["queued one", "queued two"],
+        }
+        appended: list[tuple[str, str]] = []
+
+        def append(_session_id, item, *, source):
+            appended.append((source, str(item["content"])))
+
+        with (
+            patch.object(subagents, "append_item", side_effect=append),
+            patch.object(subagents, "save_state"),
+        ):
+            subagents.continue_record(
+                record,
+                "new delegation",
+                chat_id="telegram:123",
+                depth=1,
+                background=False,
+                allow_subagents=False,
+            )
+
+        self.assertEqual(
+            appended,
+            [
+                ("steer", "queued one"),
+                ("steer", "queued two"),
+                ("delegation", "new delegation"),
+            ],
+        )
+        self.assertEqual(record["pending_inputs"], [])
+        self.assertEqual(record["run_generation"], 2)
+
+    async def test_nested_subagent_records_immediate_and_root_parent(self) -> None:
+        with (
+            patch.object(subagents, "run_subagent", AsyncMock(return_value="done")),
+            patch.object(subagents, "save_state"),
+            patch.object(subagents, "prune_subagent_records"),
+        ):
+            result = await subagents.subagent_tool(
+                {"task": "nested"},
+                chat_id="telegram:123",
+                execution_context={
+                    "depth": 1,
+                    "subagents_allowed": True,
+                    "session_id": "20260824-120000-11111111",
+                    "root_session_id": "20260824-120000-22222222",
+                },
+            )
+
+        record = session.subagent_records[result["agent_id"]]
+        self.assertEqual(
+            record["parent_session_id"],
+            "20260824-120000-11111111",
+        )
+        self.assertEqual(record["root_session_id"], "20260824-120000-22222222")
+
+    async def test_stale_completion_generation_cannot_clear_current_run(
+        self,
+    ) -> None:
+        live = {
+            "id": "worker-1",
+            "chat_id": "telegram:123",
+            "chat_key": "telegram:123",
+            "status": "completed",
+            "completion_pending": True,
+            "run_generation": 2,
+            "task_count": 2,
+        }
+        session.subagent_records["worker-1"] = live
+        stale = dict(live, run_generation=1)
+        controller = types.ModuleType("controller")
+        controller.enqueue_runtime_event = Mock()
+
+        with patch.dict(sys.modules, {"controller": controller}):
+            queued = subagents._queue_subagent_completion(stale)
+
+        self.assertFalse(queued)
+        controller.enqueue_runtime_event.assert_not_called()
+        self.assertTrue(live["completion_pending"])
+
+    async def test_task_count_change_does_not_suppress_completion(
+        self,
+    ) -> None:
+        live = {
+            "id": "worker-1",
+            "chat_id": "telegram:123",
+            "chat_key": "telegram:123",
+            "status": "completed",
+            "completion_pending": True,
+            "run_generation": 2,
+            "task_count": 3,
+        }
+        session.subagent_records["worker-1"] = live
+        stale = dict(live, task_count=2)
+        controller = types.ModuleType("controller")
+        completion = asyncio.get_running_loop().create_future()
+        completion.set_result(True)
+        controller.enqueue_runtime_event = Mock(return_value=completion)
+
+        with patch.dict(sys.modules, {"controller": controller}):
+            queued = subagents._queue_subagent_completion(stale)
+            await asyncio.sleep(0)
+
+        self.assertTrue(queued)
+        controller.enqueue_runtime_event.assert_called_once()
+        self.assertFalse(live["completion_pending"])
 
     def test_record_retention_excludes_protected_records_from_limit(self) -> None:
         records = {
@@ -438,11 +1047,19 @@ class BackgroundSubagentTests(unittest.IsolatedAsyncioTestCase):
                 "completed_at": 4,
                 "completion_pending": True,
             },
+            "topic": {
+                "status": "completed",
+                "completed_at": 5,
+                "activity_surface_id": "42/77",
+            },
         }
         with patch.object(session, "MAX_SUBAGENT_RECORDS", 1):
             removed = session._prune_subagent_mapping(records, [])
         self.assertEqual(removed, 1)
-        self.assertEqual(set(records), {"new", "running", "pending"})
+        self.assertEqual(
+            set(records),
+            {"new", "running", "pending", "topic"},
+        )
 
     def test_interrupted_subagent_checkpoints_are_bounded_and_unique(self) -> None:
         checkpoints = [
@@ -456,6 +1073,7 @@ class BackgroundSubagentTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_background_subagent_capacity_is_bounded(self) -> None:
         session.subagent_tasks["existing"] = AsyncMock()
+        record_count = len(session.subagent_records)
         try:
             with patch.object(subagents, "MAX_BACKGROUND_SUBAGENTS", 1):
                 result = await subagents.subagent_tool(
@@ -465,6 +1083,64 @@ class BackgroundSubagentTests(unittest.IsolatedAsyncioTestCase):
                 )
         finally:
             session.subagent_tasks.clear()
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["status"], "capacity_reached")
+        self.assertEqual(len(session.subagent_records), record_count)
+
+    async def test_rejected_background_continuation_preserves_record(self) -> None:
+        record = {
+            "id": "worker-1",
+            "chat_id": "telegram:123",
+            "chat_key": "telegram:123",
+            "session_id": "subagent-session",
+            "status": "completed",
+            "task_count": 1,
+            "pending_inputs": [],
+            "allow_subagents": False,
+            "run_generation": 1,
+        }
+        session.subagent_records["worker-1"] = record
+        session.subagent_tasks["existing"] = AsyncMock()
+        try:
+            with (
+                patch.object(subagents, "MAX_BACKGROUND_SUBAGENTS", 1),
+                patch.object(
+                    subagents,
+                    "finish_subagent_activity",
+                    AsyncMock(return_value=True),
+                ),
+                patch.object(subagents, "append_item") as append_item,
+            ):
+                result = await subagents.subagent_tool(
+                    {
+                        "agent_id": "worker-1",
+                        "task": "continue",
+                        "background": True,
+                    },
+                    chat_id="telegram:123",
+                    execution_context={"depth": 0},
+                )
+        finally:
+            session.subagent_tasks.pop("existing", None)
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["status"], "capacity_reached")
+        self.assertEqual(record["status"], "completed")
+        self.assertEqual(record["task_count"], 1)
+        self.assertEqual(record["run_generation"], 1)
+        append_item.assert_not_called()
+
+    async def test_persistent_topic_capacity_is_bounded(self) -> None:
+        session.subagent_records["existing"] = {
+            "activity_surface_id": "42/77",
+        }
+        with patch.object(subagents, "MAX_SUBAGENT_RECORDS", 1):
+            result = await subagents.subagent_tool(
+                {"task": "another", "background": True},
+                chat_id="telegram:123",
+                execution_context={"depth": 0},
+            )
 
         self.assertFalse(result["ok"])
         self.assertEqual(result["status"], "capacity_reached")
@@ -480,7 +1156,7 @@ class BackgroundSubagentTests(unittest.IsolatedAsyncioTestCase):
         }
         with session.bound_chat("telegram:123"):
             session.subagent_records["worker-1"] = record
-        delivered = AsyncMock(side_effect=RuntimeError("controller failed"))
+        delivered = Mock(side_effect=RuntimeError("controller failed"))
         controller = types.ModuleType("controller")
         controller.enqueue_runtime_event = delivered
 
@@ -489,39 +1165,39 @@ class BackgroundSubagentTests(unittest.IsolatedAsyncioTestCase):
             patch.object(subagents, "save_state"),
             patch.object(subagents, "log_event") as logged,
         ):
-            event_task = asyncio.create_task(subagents.completion_event_loop())
-            try:
-                await asyncio.wait_for(_wait_until_called(delivered), timeout=1)
-                await asyncio.sleep(0)
-            finally:
-                event_task.cancel()
-                with self.assertRaises(asyncio.CancelledError):
-                    await event_task
+            queued = subagents._queue_subagent_completion(record)
 
+        self.assertFalse(queued)
         self.assertEqual(record["completion_attempts"], 1)
         self.assertTrue(record["completion_pending"])
         self.assertEqual(
             [call.args[1] for call in logged.call_args_list],
-            ["completion_delivery_error", "completion_deferred"],
+            ["completion_delivery_error"],
         )
 
     async def test_deferred_completion_requeues_on_user_activity(self) -> None:
         record = {
             "id": "worker-1",
+            "chat_id": "telegram:123",
+            "chat_key": "telegram:123",
+            "run_generation": 1,
             "completion_pending": True,
             "completion_attempts": 1,
         }
         session.subagent_records["worker-1"] = record
+        completion = asyncio.get_running_loop().create_future()
+        controller = types.ModuleType("controller")
+        controller.enqueue_runtime_event = Mock(return_value=completion)
 
-        with patch.object(subagents, "save_state") as saved:
+        with (
+            patch.dict(sys.modules, {"controller": controller}),
+            patch.object(subagents, "save_state") as saved,
+        ):
             count = await subagents.requeue_deferred_subagent_completions()
 
         self.assertEqual(count, 1)
         self.assertEqual(record["completion_attempts"], 0)
-        self.assertEqual(
-            session.subagent_events.get_nowait()["id"],
-            "worker-1",
-        )
+        controller.enqueue_runtime_event.assert_called_once()
         saved.assert_called_once()
 
     async def test_explicit_stop_discards_deferred_completion(self) -> None:
@@ -543,8 +1219,8 @@ class BackgroundSubagentTests(unittest.IsolatedAsyncioTestCase):
         saved.assert_called_once()
 
 
-async def _wait_until_called(mock: AsyncMock) -> None:
-    while not mock.await_count:
+async def _wait_until(predicate: Callable[[], bool]) -> None:
+    while not predicate():
         await asyncio.sleep(0)
 
 

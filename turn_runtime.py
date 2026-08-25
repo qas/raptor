@@ -8,6 +8,8 @@ from enum import StrEnum
 from collections.abc import Callable, Coroutine
 from typing import Any
 
+from observability import log_event
+
 
 INTERRUPT_GRACE_SECONDS = 3.0
 
@@ -15,6 +17,7 @@ INTERRUPT_GRACE_SECONDS = 3.0
 class TurnKind(StrEnum):
     REGULAR = "regular"
     MANUAL_COMPACTION = "manual_compaction"
+    STATELESS_ASK = "stateless_ask"
 
 
 @dataclass(frozen=True)
@@ -95,8 +98,26 @@ class TurnCoordinator:
             coroutine.close()
             raise
         task = asyncio.create_task(coroutine)
+        task.add_done_callback(self._observe_task)
         self._active = _ActiveTurn(snapshot=snapshot, task=task)
         return task
+
+    @staticmethod
+    def _observe_task(task: asyncio.Task[None]) -> None:
+        """Consume and report failures from detached root tasks."""
+        if task.cancelled():
+            return
+        error = task.exception()
+        if error is None:
+            return
+        log_event(
+            "agent",
+            "root_task_error",
+            {
+                "type": type(error).__name__,
+                "message": str(error),
+            },
+        )
 
     def set_goal_id(self, goal_id: str | None) -> None:
         active = self._active

@@ -1,12 +1,7 @@
-# /// script
-# requires-python = ">=3.11"
-# dependencies = [
-#   "httpx>=0.28,<1",
-# ]
-# ///
 """Raptor process entry point."""
 
 import asyncio
+import os
 import sys
 
 from process_lock import acquire_runtime_lock, release_runtime_lock
@@ -34,16 +29,31 @@ def run() -> int:
         if args.stop_daemon:
             return stop_daemon()
 
+        ready_fd: int | None = None
         if args.daemon:
-            daemonize()
+            ready_fd = daemonize()
         set_runtime(daemon=args.daemon)
         try:
             import application
             import session
 
             session.DAEMON_MODE = args.daemon
-            asyncio.run(application.main())
+            if ready_fd is None:
+                asyncio.run(application.main())
+            else:
+                from runtime import signal_daemon_ready
+
+                def on_ready() -> None:
+                    nonlocal ready_fd
+                    assert ready_fd is not None
+                    owned_fd = ready_fd
+                    ready_fd = None
+                    signal_daemon_ready(owned_fd)
+
+                asyncio.run(application.main(on_ready=on_ready))
         finally:
+            if ready_fd is not None:
+                os.close(ready_fd)
             clear_runtime_if_ours()
         return 0
     except (KeyboardInterrupt, asyncio.CancelledError):

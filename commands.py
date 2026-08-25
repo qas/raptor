@@ -1,4 +1,5 @@
 """Provider-neutral text commands."""
+import asyncio
 import os
 from datetime import datetime, timezone
 from typing import Any
@@ -9,10 +10,11 @@ from chat_store import (
     append_meta,
     create_session,
     end_session,
+    iter_events,
     list_sessions,
-    read_events,
     session_contains_text,
     session_exists,
+    session_summary,
 )
 from config import (
     AGENT_WORKDIR,
@@ -59,7 +61,12 @@ from goals import (
     todo_store_for_display,
 )
 from runtime import runtime_uptime
-from chat_runtime import get_chat_provider, send
+from chat_runtime import (
+    bound_delivery_context,
+    capture_delivery_context,
+    get_chat_provider,
+    send,
+)
 from engine import (
     function_call_output,
     response_calls,
@@ -81,12 +88,60 @@ from threads import (
     start_thread,
 )
 from thread_state import current_thread, thread_active
-from turn_runtime import turns
+from turn_runtime import TurnKind, turns
 from todos import validate_plan
 
 # ---------------------------------------------------------------------------
 # Chat commands
 # ---------------------------------------------------------------------------
+
+
+async def _run_stateless_ask(
+    chat_id: ConversationId,
+    prompt: str,
+    delivery_context: object,
+) -> None:
+    current_task = asyncio.current_task()
+    try:
+        with bound_delivery_context(chat_id, delivery_context):
+            try:
+                work: list[dict] = [{"role": "user", "content": prompt}]
+                tool_rounds = 0
+                while True:
+                    response = await stateless_response(work)
+                    output = response_output(response)
+                    calls = response_calls(response)
+                    if not calls:
+                        answer = response_text(response)
+                        if not answer:
+                            raise RuntimeError("Model returned no text")
+                        break
+                    if MAX_TOOL_ROUNDS and tool_rounds >= MAX_TOOL_ROUNDS:
+                        raise RuntimeError("Configured tool-round limit reached")
+                    tool_rounds += 1
+                    work.extend(output)
+                    for call in calls:
+                        execution_context = dict(state)
+                        execution_context["session_id"] = state.get(
+                            "current_session_id"
+                        )
+                        execution_context["todo_state"] = state
+                        result = await execute_tool_with_approval(
+                            chat_id,
+                            call,
+                            execution_context=execution_context,
+                        )
+                        work.append(function_call_output(call, result))
+            except asyncio.CancelledError:
+                await send(chat_id, "Ask cancelled.")
+                raise
+            except Exception as exc:
+                await send(chat_id, f"Ask error: {type(exc).__name__}: {exc}")
+            else:
+                await send(chat_id, answer)
+    finally:
+        if turns.finish(current_task):
+            ensure_root_session(chat_id, None)
 
 
 def format_todos() -> str:
@@ -123,20 +178,34 @@ def _main_chat_sessions(
 ) -> list[dict[str, Any]]:
     needle = query.casefold()
     chat_key = session.current_runtime().key
+    discovery_limit = 100 if needle else 20
     rows = sorted(
         (
             row
-            for row in list_sessions()
-            if row.get("kind") == "main"
-            and row.get("chat_key") == chat_key
+            for row in list_sessions(
+                limit=discovery_limit,
+                chat_key=chat_key,
+                kinds={"main"},
+            )
         ),
         key=lambda row: float(row.get("started_at") or 0),
         reverse=True,
     )
     if not needle and current_id:
-        rows.sort(
-            key=lambda row: row.get("session_id") != current_id
-        )
+        current = session_summary(current_id)
+        if (
+            current is not None
+            and current.get("kind") == "main"
+            and current.get("chat_key") == chat_key
+        ):
+            rows = [
+                current,
+                *(
+                    row
+                    for row in rows
+                    if row.get("session_id") != current_id
+                ),
+            ][:20]
     matches: list[dict[str, Any]] = []
     for row in rows:
         if needle and not session_contains_text(
@@ -168,14 +237,17 @@ def _format_chat_sessions(
 
 
 def _archived_todos(session_id: str) -> list[dict[str, Any]]:
-    for event in reversed(read_events(session_id)):
+    archived: dict[str, Any] | None = None
+    for event in iter_events(session_id):
         if event.get("type") == "session_end":
-            try:
-                return validate_plan(event.get("todos"))
-            except ValueError as exc:
-                raise RuntimeError(
-                    f"Invalid archived plan in session {session_id}: {exc}"
-                ) from exc
+            archived = event
+    if archived is not None:
+        try:
+            return validate_plan(archived.get("todos"))
+        except ValueError as exc:
+            raise RuntimeError(
+                f"Invalid archived plan in session {session_id}: {exc}"
+            ) from exc
     return []
 
 
@@ -233,45 +305,14 @@ async def command(
         if not arg:
             await send(chat_id, "Usage: /ask <message>")
             return True
-        try:
-            work: list[dict] = [
-                {"role": "user", "content": arg}
-            ]
-            tool_rounds = 0
-            while True:
-                response = await stateless_response(work)
-                output = response_output(response)
-                calls = response_calls(response)
-                if not calls:
-                    answer = response_text(response)
-                    if not answer:
-                        raise RuntimeError("Model returned no text")
-                    break
-                if MAX_TOOL_ROUNDS and tool_rounds >= MAX_TOOL_ROUNDS:
-                    raise RuntimeError(
-                        "Configured tool-round limit reached"
-                    )
-                tool_rounds += 1
-                work.extend(output)
-                for call in calls:
-                    execution_context = dict(state)
-                    execution_context["session_id"] = state.get(
-                        "current_session_id"
-                    )
-                    execution_context["todo_state"] = state
-                    result = await execute_tool_with_approval(
-                        chat_id,
-                        call,
-                        execution_context=execution_context,
-                    )
-                    work.append(function_call_output(call, result))
-        except Exception as exc:
-            await send(
-                chat_id,
-                f"Ask error: {type(exc).__name__}: {exc}",
-            )
+        if turns.is_running():
+            await send(chat_id, "The agent is already running. Use /stop first.")
             return True
-        await send(chat_id, answer)
+        delivery_context = capture_delivery_context(chat_id)
+        turns.start(
+            _run_stateless_ask(chat_id, arg, delivery_context),
+            kind=TurnKind.STATELESS_ASK,
+        )
         return True
 
     if cmd == "/thread":
@@ -675,16 +716,12 @@ async def command(
         if session_transition_busy():
             await send(chat_id, "Busy. Use /stop all first.")
             return True
-        target = next(
-            (
-                row
-                for row in list_sessions()
-                if row.get("kind") == "main"
-                and row.get("chat_key") == session.current_runtime().key
-                and row.get("session_id") == arg
-            ),
-            None,
-        )
+        target = session_summary(arg)
+        if target is not None and (
+            target.get("kind") != "main"
+            or target.get("chat_key") != session.current_runtime().key
+        ):
+            target = None
         if target is None:
             await send(chat_id, f"Chat not found: {arg}")
             return True

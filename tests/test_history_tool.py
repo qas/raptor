@@ -12,7 +12,7 @@ os.environ["TG_BOT_TOKEN"] = "test-token"
 os.environ["TG_USER_ID"] = "1"
 os.environ["RAPTOR_HOME"] = str(_HOME)
 os.environ["AGENT_WORKDIR"] = str(_HOME)
-os.environ["MAX_TOOL_OUTPUT"] = "400"
+os.environ["MAX_TOOL_OUTPUT"] = "1024"
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 

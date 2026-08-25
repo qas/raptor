@@ -14,7 +14,7 @@ from chat_store import (
     append_meta,
     create_session,
     end_session,
-    item_events,
+    iter_events,
     session_exists,
 )
 from context import build_active_context
@@ -120,9 +120,10 @@ async def finish_thread(
                 str(origin.get("session_id") or ""),
                 int(origin.get("seq") or 0),
             )
-            for event in item_events(parent_id)
+            for event in iter_events(parent_id)
             if event.get("source") == "thread_merge"
             and isinstance((origin := event.get("origin")), dict)
+            and str(origin.get("session_id") or "") == branch_id
         }
         for event in active_item_events(branch_id):
             if event.get("source") == "thread_seed":

@@ -13,8 +13,8 @@ from chat_store import append_meta
 from commands import command
 from config import MAX_PENDING_STEERS
 from controller import start_root_session
-from presentation import steering_indicator
-from session import save_state, state, steer_queue
+from presentation import clear_steering_indicator, steering_indicator
+from session import StateCapacityError, state, steer_queue
 from steering import handle_steering_action
 from threads import handle_thread_action
 import session
@@ -119,18 +119,28 @@ async def handle_event(event: ChatEvent) -> None:
             "status": "queued",
             "delivery_context": capture_delivery_context(conversation_id),
         }
-        session.pending_steers[steer_id] = entry
         session_id = state.get("current_session_id")
         if session_id:
+            try:
+                session.queue_pending_steer(steer_id, text)
+            except StateCapacityError:
+                await clear_steering_indicator(
+                    conversation_id,
+                    indicator_id,
+                    steer_id,
+                )
+                await provider.send_text(
+                    conversation_id,
+                    "Steering input is too large to queue safely.",
+                )
+                log_agent_activity("rejected oversized steering input")
+                return
             append_meta(
                 str(session_id),
                 "steer_queued",
                 {"steer_id": steer_id},
             )
-            pending = state.setdefault("pending_inputs", [])
-            if isinstance(pending, list):
-                pending.append(text)
-            save_state()
+        session.pending_steers[steer_id] = entry
         await steer_queue.put(entry)
         await supersede_pending_approvals(conversation_id)
         await provider.acknowledge_queued_message(conversation_id)

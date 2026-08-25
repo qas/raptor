@@ -10,6 +10,8 @@ from chat_provider import ConversationId
 from chat_store import (
     append_item,
     append_meta,
+    event_at_seq,
+    next_event_seq,
     reset_model_context,
     session_exists,
 )
@@ -31,6 +33,7 @@ from engine import (
     function_call_output,
     interrupted_tool_result,
     run_agent,
+    response_text,
 )
 from goals import (
     combine_instructions,
@@ -43,6 +46,7 @@ from approval import execute_tool_with_approval
 from chat_runtime import (
     activate_delivery_context,
     capture_delivery_context,
+    detached_delivery_context,
     restore_delivery_context,
     send,
 )
@@ -100,6 +104,28 @@ def repair_interrupted_root_turn() -> bool:
     if not isinstance(marker, dict):
         return False
     session_id = str(marker.get("session_id") or "")
+    pending = state.get("pending_delivery")
+    if (
+        isinstance(pending, dict)
+        and str(pending.get("session_id") or "") == session_id
+    ):
+        delivery_seq = int(pending.get("seq") or 0)
+        delivery_event = event_at_seq(session_id, delivery_seq)
+        delivery_item = (
+            delivery_event.get("item")
+            if isinstance(delivery_event, dict)
+            else None
+        )
+        if delivery_event is None:
+            session.clear_pending_delivery(session_id, delivery_seq)
+        elif (
+            delivery_event.get("source") == "assistant"
+            and isinstance(delivery_item, dict)
+            and delivery_item.get("type") == "message"
+        ):
+            state["active_root_turn"] = None
+            save_state()
+            return False
     if session_id and session_exists(session_id):
         unmatched: dict[str, dict[str, Any]] = {}
         for item in build_active_context(session_id):
@@ -131,6 +157,50 @@ def current_session_id() -> str:
     if not session_id:
         raise RuntimeError("No current session")
     return str(session_id)
+
+
+async def flush_pending_delivery(chat_id: ConversationId) -> bool:
+    """Retry one archived response before admitting later chat work."""
+    reference = state.get("pending_delivery")
+    if not isinstance(reference, dict):
+        return True
+    session_id = str(reference.get("session_id") or "")
+    seq = int(reference.get("seq") or 0)
+    event = event_at_seq(session_id, seq)
+    if event is None:
+        session.clear_pending_delivery(session_id, seq)
+        log_event(
+            "agent",
+            "pending_delivery_abandoned",
+            {"session_id": session_id, "seq": seq},
+        )
+        return True
+    item = event.get("item") if isinstance(event, dict) else None
+    text = response_text({"output": [item]}) if isinstance(item, dict) else ""
+    if not text:
+        log_event(
+            "agent",
+            "pending_delivery_invalid",
+            {"session_id": session_id, "seq": seq},
+        )
+        return False
+    try:
+        with detached_delivery_context(chat_id):
+            await send(chat_id, text)
+    except Exception as exc:
+        log_event(
+            "agent",
+            "delivery_retry_error",
+            {"type": type(exc).__name__, "message": str(exc)},
+        )
+        return False
+    session.clear_pending_delivery(session_id, seq)
+    log_event(
+        "agent",
+        "delivery_retried",
+        {"session_id": session_id, "seq": seq},
+    )
+    return True
 
 
 def context_tokens() -> int:
@@ -285,16 +355,6 @@ async def maybe_auto_compact(chat_id: ConversationId) -> None:
     )
 
 
-def _remove_pending_input(text: str) -> None:
-    pending = state.get("pending_inputs")
-    if not isinstance(pending, list):
-        return
-    try:
-        pending.remove(text)
-    except ValueError:
-        pass
-
-
 async def agent_turn(
     chat_id: ConversationId,
     user_text: str,
@@ -302,12 +362,14 @@ async def agent_turn(
     internal: bool = False,
     source: str | None = None,
     allow_goal_creation: bool = False,
+    input_recorded: bool = False,
 ) -> bool | RetryableTurnFailure:
     typing_task = asyncio.create_task(typing_loop(chat_id))
     session_id = current_session_id()
     continue_pending = True
     response_delivered = False
     delivery_tokens: list[Any] = []
+    final_output_seq: int | None = None
     resumed_subagents = list(
         state.get("interrupted_subagents", [])
     )
@@ -323,11 +385,12 @@ async def agent_turn(
         "role": "user",
         "content": user_text,
     }
-    append_item(
-        session_id,
-        user_item,
-        source=turn_source,
-    )
+    if not input_recorded:
+        append_item(
+            session_id,
+            user_item,
+            source=turn_source,
+        )
     work = build_active_context(session_id)
 
     async def apply_pending_steers(
@@ -344,8 +407,6 @@ async def agent_turn(
             try:
                 if entry.get("status") != "queued":
                     continue
-                entry["status"] = "applied"
-                session.pending_steers.pop(str(entry["id"]), None)
                 text = str(entry["text"])
                 next_chat_id = entry["chat_id"]
                 next_delivery = entry.get("delivery_context")
@@ -369,18 +430,12 @@ async def agent_turn(
                     "role": "user",
                     "content": text,
                 }
-                append_item(
-                    session_id,
-                    steer_input,
-                    source="steer",
-                )
+                session.persist_steer_handoff(entry)
                 append_meta(
                     session_id,
                     "steer_applied",
                     {"steer_id": entry.get("id")},
                 )
-                _remove_pending_input(text)
-                save_state()
                 active_work.append(steer_input)
                 engine_inputs.append(steer_input)
                 applied += 1
@@ -401,20 +456,53 @@ async def agent_turn(
         for item in items:
             append_item(session_id, item, source=source)
 
+    def prepare_delivery(item: dict[str, Any]) -> int:
+        delivery_seq = next_event_seq(session_id)
+        session.set_pending_delivery(session_id, delivery_seq)
+        try:
+            append_item(
+                session_id,
+                item,
+                source="assistant",
+                expected_seq=delivery_seq,
+            )
+        except BaseException:
+            session.clear_pending_delivery(session_id, delivery_seq)
+            raise
+        return delivery_seq
+
+    def record_terminal_items(
+        items: list[dict[str, Any]],
+        text: str,
+    ) -> None:
+        nonlocal final_output_seq
+        messages = [item for item in items if item.get("type") == "message"]
+        if not messages:
+            raise RuntimeError("Agent terminal output contains no message")
+        delivery_item = (
+            messages[0]
+            if len(messages) == 1
+            else assistant_message(text)
+        )
+        message_recorded = False
+        for item in items:
+            if item.get("type") == "message":
+                if not message_recorded:
+                    final_output_seq = prepare_delivery(delivery_item)
+                    message_recorded = True
+                continue
+            append_item(session_id, item, source="assistant")
+
     async def deliver_terminal_failure(
         message: str,
         *,
         reset_context: bool = False,
     ) -> None:
-        outcome = append_item(
-            session_id,
-            assistant_message(message),
-            source="assistant",
-        )
+        delivery_seq = prepare_delivery(assistant_message(message))
         if reset_context:
             reset_model_context(
                 session_id,
-                through_seq=int(outcome["seq"]),
+                through_seq=delivery_seq,
             )
         try:
             await send(chat_id, message)
@@ -427,6 +515,8 @@ async def agent_turn(
                     "message": str(exc),
                 },
             )
+        else:
+            session.clear_pending_delivery(session_id, delivery_seq)
 
     try:
         extra_instructions = ""
@@ -634,7 +724,10 @@ async def agent_turn(
             drain_inputs=apply_pending_steers,
             compact_context=compact_work,
             record_items=record_items,
+            record_terminal_items=record_terminal_items,
         )
+        if final_output_seq is None:
+            raise RuntimeError("Final response was not archived")
         try:
             await send(chat_id, str(result["text"]))
         except Exception as send_exc:
@@ -656,6 +749,7 @@ async def agent_turn(
             ]
             save_state()
             return RetryableTurnFailure("response delivery failed")
+        session.clear_pending_delivery(session_id, final_output_seq)
         response_delivered = True
         resumed_ids = {
             str(item.get("id")) for item in resumed_subagents
@@ -666,7 +760,19 @@ async def agent_turn(
             if str(item.get("id")) not in resumed_ids
         ]
         save_state()
-        await maybe_auto_compact(chat_id)
+        try:
+            await maybe_auto_compact(chat_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            log_event(
+                "agent",
+                "post_delivery_compaction_error",
+                {
+                    "type": type(exc).__name__,
+                    "message": str(exc),
+                },
+            )
         return True
     except asyncio.CancelledError:
         continue_pending = False

@@ -42,6 +42,16 @@ class SessionRotationTests(unittest.IsolatedAsyncioTestCase):
         self._chat_patch.start()
         self.addCleanup(self._chat_patch.stop)
         chat_store._SEQ_CACHE.clear()
+        self._runtime_context = session.bound_chat(
+            f"rotation:{self._chat_dir.name}"
+        )
+        self._runtime_context.__enter__()
+        self.addCleanup(
+            self._runtime_context.__exit__,
+            None,
+            None,
+            None,
+        )
         session.state.clear()
         session.state.update(copy.deepcopy(session.DEFAULT_STATE))
         sid = chat_store.create_session(
@@ -103,6 +113,22 @@ class SessionRotationTests(unittest.IsolatedAsyncioTestCase):
             }
         )
         self.assertEqual(len(hits["hits"]), 1)
+
+    def test_bootstrap_replaces_current_ended_session(self) -> None:
+        ended = str(session.state["current_session_id"])
+        chat_store.end_session(ended, reason="interrupted_transition")
+
+        with patch.object(
+            session,
+            "all_chat_runtimes",
+            return_value=(session.current_runtime(),),
+        ):
+            result = session.bootstrap_runtime_storage()
+
+        current = str(session.state["current_session_id"])
+        self.assertNotEqual(current, ended)
+        self.assertTrue(chat_store.session_exists(current))
+        self.assertEqual(result["created_sessions"], 1)
 
     async def test_new_preserves_goal_owned_checklist(self) -> None:
         goal = replace_goal("Long-running goal")
@@ -274,6 +300,74 @@ class SessionRotationTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaisesRegex(RuntimeError, "Could not load state"):
                 session.load_state()
 
+    def test_oversized_state_is_rejected_before_json_decode(self) -> None:
+        state_path = Path(tempfile.mkdtemp()) / "state.json"
+        state_path.write_bytes(b" " * 65)
+        with (
+            patch.object(session, "STATE_PATH", state_path),
+            patch.object(session, "MAX_STATE_LOAD_BYTES", 64),
+            self.assertRaisesRegex(RuntimeError, "MAX_STATE_LOAD_BYTES"),
+        ):
+            session.load_state()
+
+    def test_persisted_chat_count_is_bounded(self) -> None:
+        state_path = Path(tempfile.mkdtemp()) / "state.json"
+        state_path.write_text(json.dumps({
+            "schema_version": session.STATE_SCHEMA_VERSION,
+            "model": None,
+            "runtime": {},
+            "chats": {
+                "one": {
+                    "conversation_id": "one",
+                    "state": session.CHAT_DEFAULT_STATE,
+                },
+                "two": {
+                    "conversation_id": "two",
+                    "state": session.CHAT_DEFAULT_STATE,
+                },
+            },
+        }))
+        with (
+            patch.object(session, "STATE_PATH", state_path),
+            patch.object(session, "MAX_CHAT_RUNTIMES", 1),
+            self.assertRaisesRegex(RuntimeError, "MAX_CHAT_RUNTIMES"),
+        ):
+            session.load_state()
+
+    def test_new_chat_admission_is_bounded(self) -> None:
+        root_state = copy.deepcopy(session.GLOBAL_DEFAULT_STATE)
+        chat_dir = Path(tempfile.mkdtemp(prefix="bounded-chats-"))
+        with (
+            patch.object(session, "_root_state", root_state),
+            patch.dict(session._runtimes, {}, clear=True),
+            patch.object(session, "_default_runtime_key", None),
+            patch.object(session, "MAX_CHAT_RUNTIMES", 1),
+            patch.object(chat_store, "CHAT_DIR", chat_dir),
+        ):
+            session.ensure_chat("one")
+            with self.assertRaisesRegex(RuntimeError, "capacity"):
+                session.ensure_chat("two")
+
+    def test_failed_chat_persistence_does_not_admit_runtime(self) -> None:
+        root_state = copy.deepcopy(session.GLOBAL_DEFAULT_STATE)
+        chat_dir = Path(tempfile.mkdtemp(prefix="failed-chat-"))
+        with (
+            patch.object(session, "_root_state", root_state),
+            patch.dict(session._runtimes, {}, clear=True),
+            patch.object(session, "_default_runtime_key", None),
+            patch.object(chat_store, "CHAT_DIR", chat_dir),
+            patch.object(
+                session,
+                "_write_root_state",
+                side_effect=OSError("disk full"),
+            ),
+        ):
+            with self.assertRaises(OSError):
+                session.ensure_chat("one")
+
+            self.assertNotIn("one", session._runtimes)
+            self.assertNotIn("one", root_state["chats"])
+
     def test_invalid_persisted_plan_is_reported(self) -> None:
         state_path = Path(tempfile.mkdtemp()) / "state.json"
         state_path.write_text(
@@ -334,6 +428,78 @@ class SessionRotationTests(unittest.IsolatedAsyncioTestCase):
                 "conversation does not match",
             ):
                 session.load_state()
+
+    def test_persisted_thread_with_orphaned_parent_is_not_promoted(self) -> None:
+        owner = session.current_runtime().key
+        branch = chat_store.create_session(
+            kind="thread",
+            chat_key=owner,
+            parent_session_id=session.state["current_session_id"],
+        )
+        missing_parent = "20260101-000000-deadbeef"
+        chat_state = copy.deepcopy(session.CHAT_DEFAULT_STATE)
+        chat_state["current_session_id"] = branch
+        chat_state["thread"] = {
+            "parent_session_id": missing_parent,
+            "session_id": branch,
+            "parent_interrupted_subagents": [],
+        }
+        state_path = Path(tempfile.mkdtemp()) / "state.json"
+        state_path.write_text(json.dumps({
+            "schema_version": session.STATE_SCHEMA_VERSION,
+            "model": None,
+            "runtime": {},
+            "chats": {
+                owner: {
+                    "conversation_id": owner,
+                    "state": chat_state,
+                }
+            },
+        }))
+
+        with patch.object(session, "STATE_PATH", state_path):
+            loaded = session.load_state()
+
+        repaired = loaded["chats"][owner]["state"]
+        self.assertIsNone(repaired["thread"])
+        self.assertIsNone(repaired["current_session_id"])
+
+    def test_interrupted_subagent_retains_acknowledged_pending_inputs(
+        self,
+    ) -> None:
+        state_path = Path(tempfile.mkdtemp()) / "state.json"
+        chat_state = copy.deepcopy(session.CHAT_DEFAULT_STATE)
+        chat_state["subagents"] = {
+            "worker": {
+                "id": "worker",
+                "chat_key": "local",
+                "chat_id": "local",
+                "status": "running",
+                "pending_inputs": ["first steer", "second steer"],
+                "todos": [],
+            }
+        }
+        state_path.write_text(json.dumps({
+            "schema_version": session.STATE_SCHEMA_VERSION,
+            "model": None,
+            "runtime": {},
+            "chats": {
+                "local": {
+                    "conversation_id": "local",
+                    "state": chat_state,
+                }
+            },
+        }))
+
+        with patch.object(session, "STATE_PATH", state_path):
+            loaded = session.load_state()
+
+        record = loaded["chats"]["local"]["state"]["subagents"]["worker"]
+        self.assertEqual(record["status"], "interrupted")
+        self.assertEqual(
+            record["pending_inputs"],
+            ["first steer", "second steer"],
+        )
 
 
 if __name__ == "__main__":

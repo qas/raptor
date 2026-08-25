@@ -1,5 +1,6 @@
 import asyncio
 import unittest
+from unittest.mock import patch
 
 from turn_runtime import TurnCoordinator, TurnKind
 
@@ -67,6 +68,21 @@ class TurnCoordinatorTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertFalse(coordinator.is_running())
         self.assertIsNone(coordinator.snapshot)
+
+    async def test_detached_turn_failure_is_observed(self) -> None:
+        coordinator = TurnCoordinator()
+
+        async def fail() -> None:
+            raise RuntimeError("controller failed")
+
+        with patch("turn_runtime.log_event") as logged:
+            task = coordinator.start(fail(), kind=TurnKind.REGULAR)
+            with self.assertRaisesRegex(RuntimeError, "controller failed"):
+                await task
+            await asyncio.sleep(0)
+
+        logged.assert_called_once()
+        self.assertEqual(logged.call_args.args[1], "root_task_error")
 
 
 if __name__ == "__main__":

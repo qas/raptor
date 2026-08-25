@@ -1,20 +1,37 @@
 """Append-only JSONL chat transcript store."""
+import heapq
 import json
 import os
 import re
 import secrets
 import time
+from collections.abc import Collection, Iterator
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from config import CHAT_DIR, COMPACTION_MAX_RECORD_CHARS
-from storage import fsync_directory, write_bytes_atomic
+from config import CHAT_DIR, COMPACTION_MAX_RECORD_CHARS, RAPTOR_HOME
+from storage import (
+    ensure_private_directory,
+    fsync_directory,
+)
 
 _SEQ_CACHE: dict[str, int] = {}
 _SESSION_ID_RE = re.compile(
     r"^[0-9]{8}-[0-9]{6}-[0-9a-f]{8}$"
 )
+_TAIL_SCAN_CHUNK_BYTES = 64 * 1024
+_SESSION_DISCOVERY_LIMIT = 1000
+
+
+@dataclass(frozen=True)
+class ActiveProjection:
+    """Bounded in-memory projection of one append-only transcript."""
+
+    items: list[dict[str, Any]]
+    checkpoint: dict[str, Any] | None
+    archive_events: int
 
 
 def _decode_event_line(
@@ -59,7 +76,8 @@ def chat_path(session_id: str) -> Path:
 
 
 def ensure_chat_dirs() -> None:
-    CHAT_DIR.mkdir(parents=True, exist_ok=True)
+    ensure_private_directory(RAPTOR_HOME)
+    ensure_private_directory(CHAT_DIR)
 
 
 def _chat_file_needs_tail_repair(path: Path) -> bool:
@@ -83,10 +101,23 @@ def repair_chat_file(session_id: str) -> bool:
     path = chat_path(session_id)
     if not _chat_file_needs_tail_repair(path):
         return False
-    data = path.read_bytes()
-    cut = data.rfind(b"\n")
-    repaired = data[: cut + 1] if cut >= 0 else b""
-    write_bytes_atomic(path, repaired)
+    size = path.stat().st_size
+    cut = 0
+    with path.open("r+b") as handle:
+        offset = size
+        while offset > 0:
+            chunk_start = max(0, offset - _TAIL_SCAN_CHUNK_BYTES)
+            handle.seek(chunk_start)
+            chunk = handle.read(offset - chunk_start)
+            newline = chunk.rfind(b"\n")
+            if newline >= 0:
+                cut = chunk_start + newline + 1
+                break
+            offset = chunk_start
+        handle.truncate(cut)
+        handle.flush()
+        os.fsync(handle.fileno())
+    fsync_directory(path.parent)
     _SEQ_CACHE.pop(session_id, None)
     return True
 
@@ -96,7 +127,9 @@ def repair_all_chat_files() -> int:
     fixed = 0
     for path in CHAT_DIR.glob("*.jsonl"):
         try:
-            if repair_chat_file(path.stem):
+            sid = validate_session_id(path.stem)
+            os.chmod(chat_path(sid), 0o600)
+            if repair_chat_file(sid):
                 fixed += 1
         except ValueError:
             continue
@@ -128,16 +161,18 @@ def _scan_max_seq(session_id: str) -> int:
     return max_seq
 
 
-def _next_seq(session_id: str) -> int:
+def next_event_seq(session_id: str) -> int:
+    """Return the next append sequence without consuming it."""
     if session_id not in _SEQ_CACHE:
         _SEQ_CACHE[session_id] = _scan_max_seq(session_id)
-    _SEQ_CACHE[session_id] += 1
-    return _SEQ_CACHE[session_id]
+    return _SEQ_CACHE[session_id] + 1
 
 
 def append_event(
     session_id: str,
     event: dict[str, Any],
+    *,
+    expected_seq: int | None = None,
 ) -> dict[str, Any]:
     sid = validate_session_id(session_id)
     ensure_chat_dirs()
@@ -148,14 +183,34 @@ def append_event(
     created = not path.exists()
     written = dict(event)
     written["v"] = int(written.get("v") or 1)
-    written["seq"] = _next_seq(sid)
+    seq = next_event_seq(sid)
+    if expected_seq is not None and seq != int(expected_seq):
+        raise RuntimeError(
+            f"Transcript sequence changed: expected {expected_seq}, got {seq}"
+        )
+    written["seq"] = seq
     written["ts"] = float(written.get("ts") or time.time())
     written["session_id"] = sid
-    with path.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(written, ensure_ascii=False))
-        f.write("\n")
-        f.flush()
-        os.fsync(f.fileno())
+    fd = os.open(
+        path,
+        os.O_WRONLY | os.O_CREAT | os.O_APPEND,
+        0o600,
+    )
+    try:
+        os.fchmod(fd, 0o600)
+    except BaseException:
+        os.close(fd)
+        raise
+    try:
+        with os.fdopen(fd, "a", encoding="utf-8") as f:
+            f.write(json.dumps(written, ensure_ascii=False))
+            f.write("\n")
+            f.flush()
+            os.fsync(f.fileno())
+    except BaseException:
+        _SEQ_CACHE.pop(sid, None)
+        raise
+    _SEQ_CACHE[sid] = seq
     if created:
         fsync_directory(path.parent)
     return written
@@ -195,15 +250,32 @@ def append_item(
     item: dict[str, Any],
     *,
     source: str,
+    data: dict[str, Any] | None = None,
+    expected_seq: int | None = None,
 ) -> dict[str, Any]:
-    return append_event(
-        session_id,
-        {
-            "type": "item",
-            "source": source,
-            "item": item,
-        },
-    )
+    event: dict[str, Any] = {
+        "type": "item",
+        "source": source,
+        "item": item,
+    }
+    if data is not None:
+        event["data"] = data
+    return append_event(session_id, event, expected_seq=expected_seq)
+
+
+def steer_is_recorded(session_id: str, steer_id: str) -> bool:
+    """Return whether one steer was transferred into the transcript."""
+    expected = str(steer_id)
+    for event in iter_events(session_id):
+        data = event.get("data")
+        if (
+            event.get("type") == "item"
+            and event.get("source") == "steer"
+            and isinstance(data, dict)
+            and str(data.get("steer_id") or "") == expected
+        ):
+            return True
+    return False
 
 
 def append_checkpoint(
@@ -274,62 +346,90 @@ def end_session(
     }
     if todos is not None:
         event["todos"] = todos
-    return append_event(session_id, event)
+    written = append_event(session_id, event)
+    _SEQ_CACHE.pop(session_id, None)
+    return written
+
+
+def iter_events(session_id: str) -> Iterator[dict[str, Any]]:
+    """Yield validated transcript events without retaining the archive."""
+    path = chat_path(session_id)
+    if not path.is_file():
+        return
+    with path.open("r", encoding="utf-8") as handle:
+        for line_number, line in enumerate(handle, start=1):
+            line = line.strip()
+            if line:
+                yield _decode_event_line(path, line, line_number)
 
 
 def read_events(session_id: str) -> list[dict[str, Any]]:
-    path = chat_path(session_id)
-    if not path.is_file():
-        return []
-    events: list[dict[str, Any]] = []
-    with path.open("r", encoding="utf-8") as f:
-        for line_number, line in enumerate(f, start=1):
-            line = line.strip()
-            if not line:
-                continue
-            events.append(_decode_event_line(path, line, line_number))
-    return events
+    return list(iter_events(session_id))
+
+
+def session_is_ended(session_id: str) -> bool:
+    """Return whether the transcript's latest durable event ends it."""
+    latest: dict[str, Any] | None = None
+    for event in iter_events(session_id):
+        latest = event
+    return bool(latest and latest.get("type") == "session_end")
 
 
 def item_events(session_id: str) -> list[dict[str, Any]]:
     return [
         event
-        for event in read_events(session_id)
+        for event in iter_events(session_id)
         if event.get("type") == "item"
     ]
+
+
+def active_projection(session_id: str) -> ActiveProjection:
+    """Build active items and checkpoint in one streaming archive pass."""
+    items: list[dict[str, Any]] = []
+    checkpoint: dict[str, Any] | None = None
+    archive_events = 0
+    for event in iter_events(session_id):
+        archive_events += 1
+        event_type = event.get("type")
+        if event_type == "item":
+            items.append(event)
+        elif event_type == "checkpoint":
+            checkpoint = event
+            through = int(event.get("through_seq") or 0)
+            items = [
+                item
+                for item in items
+                if int(item.get("seq") or 0) > through
+            ]
+        elif (
+            event_type == "meta"
+            and event.get("name") == "model_context_reset"
+        ):
+            data = event.get("data")
+            through = (
+                int(data.get("through_seq") or 0)
+                if isinstance(data, dict)
+                else 0
+            )
+            items = [
+                item
+                for item in items
+                if int(item.get("seq") or 0) > through
+            ]
+            checkpoint = None
+    return ActiveProjection(items, checkpoint, archive_events)
 
 
 def active_item_events(session_id: str) -> list[dict[str, Any]]:
     """Return transcript items eligible for model context."""
-    events = read_events(session_id)
-    reset = next(
-        (
-            event
-            for event in reversed(events)
-            if event.get("type") == "meta"
-            and event.get("name") == "model_context_reset"
-        ),
-        None,
-    )
-    data = reset.get("data") if reset is not None else None
-    through = (
-        int(data.get("through_seq") or 0)
-        if isinstance(data, dict)
-        else 0
-    )
-    return [
-        event
-        for event in events
-        if event.get("type") == "item"
-        and int(event.get("seq") or 0) > through
-    ]
+    return active_projection(session_id).items
 
 
 def latest_checkpoint(
     session_id: str,
 ) -> dict[str, Any] | None:
     latest: dict[str, Any] | None = None
-    for event in read_events(session_id):
+    for event in iter_events(session_id):
         if event.get("type") == "checkpoint":
             latest = event
     return latest
@@ -337,28 +437,7 @@ def latest_checkpoint(
 
 def active_checkpoint(session_id: str) -> dict[str, Any] | None:
     """Return the newest checkpoint valid for the active projection."""
-    events = read_events(session_id)
-    checkpoints = [
-        event for event in events if event.get("type") == "checkpoint"
-    ]
-    reset = next(
-        (
-            event
-            for event in reversed(events)
-            if event.get("type") == "meta"
-            and event.get("name") == "model_context_reset"
-        ),
-        None,
-    )
-    if reset is None:
-        return checkpoints[-1] if checkpoints else None
-    reset_seq = int(reset.get("seq") or 0)
-    later = [
-        checkpoint
-        for checkpoint in checkpoints
-        if int(checkpoint.get("seq") or 0) > reset_seq
-    ]
-    return later[-1] if later else None
+    return active_projection(session_id).checkpoint
 
 
 def _session_summary(path: Path) -> dict[str, Any] | None:
@@ -390,18 +469,84 @@ def _session_summary(path: Path) -> dict[str, Any] | None:
     }
 
 
-def list_sessions() -> list[dict[str, Any]]:
+def session_summary(session_id: str) -> dict[str, Any] | None:
+    """Read one exact transcript summary without archive discovery."""
+    path = chat_path(session_id)
+    if not path.is_file():
+        return None
+    return _session_summary(path)
+
+
+def _session_start(path: Path) -> dict[str, Any] | None:
+    with path.open("r", encoding="utf-8") as handle:
+        for line_number, line in enumerate(handle, start=1):
+            line = line.strip()
+            if not line:
+                continue
+            event = _decode_event_line(path, line, line_number)
+            return event if event.get("type") == "session_start" else None
+    return None
+
+
+def list_sessions(
+    *,
+    limit: int = 100,
+    chat_key: str | None = None,
+    kinds: Collection[str] | None = None,
+) -> list[dict[str, Any]]:
+    """Return summaries from a bounded window of newest transcripts."""
     ensure_chat_dirs()
     sessions: list[dict[str, Any]] = []
-    for path in sorted(CHAT_DIR.glob("*.jsonl")):
-        try:
-            validate_session_id(path.stem)
-        except ValueError:
-            continue
+    requested = max(1, min(_SESSION_DISCOVERY_LIMIT, int(limit)))
+    allowed_kinds = frozenset(kinds) if kinds is not None else None
+
+    def valid_paths() -> Iterator[Path]:
+        for path in CHAT_DIR.glob("*.jsonl"):
+            try:
+                validate_session_id(path.stem)
+            except ValueError:
+                continue
+            if chat_key is not None or allowed_kinds is not None:
+                start = _session_start(path)
+                if start is None:
+                    continue
+                if (
+                    chat_key is not None
+                    and str(start.get("chat_key")) != str(chat_key)
+                ):
+                    continue
+                if (
+                    allowed_kinds is not None
+                    and str(start.get("kind") or "main")
+                    not in allowed_kinds
+                ):
+                    continue
+            yield path
+
+    newest = heapq.nlargest(
+        requested,
+        valid_paths(),
+        key=lambda path: path.name,
+    )
+    for path in newest:
         summary = _session_summary(path)
         if summary is not None:
             sessions.append(summary)
     return sessions
+
+
+def event_at_seq(session_id: str, seq: int) -> dict[str, Any] | None:
+    """Return one exact transcript event without materializing the archive."""
+    expected = int(seq)
+    if expected <= 0:
+        return None
+    for event in iter_events(session_id):
+        current = int(event.get("seq") or 0)
+        if current == expected:
+            return event
+        if current > expected:
+            break
+    return None
 
 
 def session_chat_key(session_id: str) -> str | None:

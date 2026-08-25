@@ -8,9 +8,9 @@ from observability import log_event
 from chat_store import (
     active_checkpoint,
     active_item_events,
+    active_projection,
     append_checkpoint,
     append_meta,
-    read_events,
     render_compaction_records,
 )
 from config import (
@@ -128,8 +128,9 @@ def checkpoint_continuation_input() -> list[dict[str, Any]]:
 def build_active_context(
     session_id: str,
 ) -> list[dict[str, Any]]:
-    items = active_item_events(session_id)
-    checkpoint = active_checkpoint(session_id)
+    projection = active_projection(session_id)
+    items = projection.items
+    checkpoint = projection.checkpoint
     if not checkpoint:
         return [
             _chronological_input_item(event["item"])
@@ -395,7 +396,8 @@ def _fit_checkpoint_to_active_budget(
     native tail. It is a deterministic final bound after semantic model
     compaction, not a replacement for that compaction.
     """
-    checkpoint = active_checkpoint(session_id)
+    projection = active_projection(session_id)
+    checkpoint = projection.checkpoint
     if not checkpoint:
         return False
     summary = str(checkpoint.get("summary") or "")
@@ -403,7 +405,7 @@ def _fit_checkpoint_to_active_budget(
     through_seq = int(checkpoint.get("through_seq") or 0)
     tail = [
         _chronological_input_item(event["item"])
-        for event in active_item_events(session_id)
+        for event in projection.items
         if int(event.get("seq") or 0) > through_seq
         and isinstance(event.get("item"), dict)
     ]
@@ -518,10 +520,11 @@ async def compact_session(
     input_budget: int | None = None,
     generation_budget: int | None = None,
 ) -> bool:
-    items = active_item_events(session_id)
-    if not items:
+    projection = active_projection(session_id)
+    items = projection.items
+    previous = projection.checkpoint
+    if not items and not previous:
         return False
-    previous = active_checkpoint(session_id)
     through_seq = int(previous.get("through_seq") or 0) if previous else 0
     candidates = [
         event
@@ -693,7 +696,7 @@ async def compact_session(
         else through_seq
     )
     anchors = _select_user_anchors(
-        items,
+        [*_checkpoint_anchors(previous), *items],
         through_seq=through,
         max_tokens=COMPACTION_USER_ANCHOR_TOKENS,
     )
@@ -950,15 +953,15 @@ async def request_with_checkpoint_retry(
 
 
 def session_context_stats(session_id: str) -> dict[str, Any]:
-    events = read_events(session_id)
-    items = active_item_events(session_id)
-    checkpoint = active_checkpoint(session_id)
+    projection = active_projection(session_id)
+    items = projection.items
+    checkpoint = projection.checkpoint
     through = int(checkpoint.get("through_seq") or 0) if checkpoint else 0
     active_native = [
         event for event in items if int(event.get("seq") or 0) > through
     ]
     return {
-        "archive_events": len(events),
+        "archive_events": projection.archive_events,
         "checkpoint": bool(checkpoint),
         "checkpoint_through": through if checkpoint else None,
         "active_native_events": len(active_native),

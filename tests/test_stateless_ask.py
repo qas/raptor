@@ -1,5 +1,7 @@
 """Tests for the transcript-free ``/ask`` side channel."""
 import copy
+import contextlib
+import asyncio
 import os
 import sys
 import tempfile
@@ -118,8 +120,17 @@ class StatelessAskTests(unittest.IsolatedAsyncioTestCase):
                 AsyncMock(return_value=reply),
             ) as create,
             patch.object(commands, "send", send),
+            patch.object(commands, "capture_delivery_context", return_value=None),
+            patch.object(
+                commands,
+                "bound_delivery_context",
+                side_effect=lambda *_args: contextlib.nullcontext(),
+            ),
         ):
             handled = await commands.command(1, "/ask side question")
+            task = session.current_runtime().turns.task
+            self.assertIsNotNone(task)
+            await task
 
         self.assertTrue(handled)
         create.assert_awaited_once_with(
@@ -154,8 +165,17 @@ class StatelessAskTests(unittest.IsolatedAsyncioTestCase):
             patch.object(commands, "stateless_response", create),
             patch.object(commands, "execute_tool_with_approval", execute),
             patch.object(commands, "send", send),
+            patch.object(commands, "capture_delivery_context", return_value=None),
+            patch.object(
+                commands,
+                "bound_delivery_context",
+                side_effect=lambda *_args: contextlib.nullcontext(),
+            ),
         ):
             handled = await commands.command(1, "/ask inspect the readme")
+            task = session.current_runtime().turns.task
+            self.assertIsNotNone(task)
+            await task
 
         self.assertTrue(handled)
         execute.assert_awaited_once()
@@ -165,6 +185,41 @@ class StatelessAskTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(second_work[2]["type"], "function_call_output")
         send.assert_awaited_once_with(1, "tool-backed answer")
         self.assertEqual(chat_store.read_events(session_id), before_events)
+
+    async def test_command_returns_before_stateless_request_finishes(self) -> None:
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def respond(_work):
+            started.set()
+            await release.wait()
+            return {
+                "output": [{
+                    "type": "message",
+                    "content": [{"type": "output_text", "text": "done"}],
+                }]
+            }
+
+        with (
+            patch.object(commands, "stateless_response", respond),
+            patch.object(commands, "send", AsyncMock()),
+            patch.object(commands, "capture_delivery_context", return_value=None),
+            patch.object(
+                commands,
+                "bound_delivery_context",
+                side_effect=lambda *_args: contextlib.nullcontext(),
+            ),
+        ):
+            handled = await asyncio.wait_for(
+                commands.command(1, "/ask side question"), timeout=0.1
+            )
+            await started.wait()
+            task = session.current_runtime().turns.task
+            self.assertTrue(handled)
+            self.assertIsNotNone(task)
+            self.assertFalse(task.done())
+            release.set()
+            await task
 
 
 if __name__ == "__main__":

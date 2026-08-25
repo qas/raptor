@@ -13,6 +13,10 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
+_HOME = Path(tempfile.mkdtemp(prefix="raptor-runtime-tests-"))
+os.environ["RAPTOR_HOME"] = str(_HOME)
+os.environ["AGENT_WORKDIR"] = str(_HOME)
+
 import process_lock
 import raptor
 import runtime
@@ -79,6 +83,15 @@ class RuntimeLockTests(unittest.TestCase):
 
         self.assertEqual(completed.returncode, 0, completed.stderr)
 
+    def test_runtime_info_rejects_oversized_state(self) -> None:
+        state_path = Path(self.temp_dir.name) / "state.json"
+        state_path.write_bytes(b"x" * 1025)
+        with (
+            patch.object(runtime, "STATE_PATH", state_path),
+            patch.dict(os.environ, {"MAX_STATE_LOAD_BYTES": "1024"}),
+        ):
+            self.assertEqual(runtime.runtime_info(), {})
+
     @unittest.skipUnless(hasattr(os, "fork"), "requires fork")
     def test_daemon_owner_survives_launcher_exit(self) -> None:
         home = Path(self.temp_dir.name) / "daemon-home"
@@ -98,15 +111,16 @@ import signal
 from pathlib import Path
 
 from process_lock import acquire_runtime_lock, release_runtime_lock
-from runtime import daemonize
+from runtime import daemonize, signal_daemon_ready
 
 def raise_exit():
     raise SystemExit(0)
 
 assert acquire_runtime_lock()
-daemonize()
+ready_fd = daemonize()
 signal.signal(signal.SIGTERM, lambda *_args: raise_exit())
 Path(os.environ["TEST_DAEMON_MARKER"]).write_text(str(os.getpid()))
+signal_daemon_ready(ready_fd)
 try:
     signal.pause()
 finally:
@@ -261,6 +275,106 @@ finally:
             ["parse", "lock", "publish", "application", "clear"],
         )
 
+    def test_daemon_entrypoint_signals_after_application_ready(self) -> None:
+        order: list[str] = []
+        runtime_module = types.ModuleType("runtime")
+        runtime_module.parse_args = lambda: Namespace(
+            status=False,
+            stop_daemon=False,
+            daemon=True,
+        )
+        runtime_module.cli_runtime_status = lambda: 0
+        runtime_module.stop_daemon = lambda: 0
+        runtime_module.daemonize = lambda: order.append("detach") or 99
+        runtime_module.set_runtime = lambda **_kw: order.append("publish")
+        runtime_module.clear_runtime_if_ours = lambda: order.append("clear")
+        runtime_module.signal_daemon_ready = (
+            lambda fd: order.append(f"ready:{fd}")
+        )
+        application_module = types.ModuleType("application")
+
+        async def application_main(*, on_ready) -> None:
+            order.append("initialized")
+            on_ready()
+            order.append("running")
+
+        application_module.main = application_main
+        session_module = types.ModuleType("session")
+        session_module.DAEMON_MODE = False
+
+        with (
+            patch.object(sys, "argv", ["raptor.py", "--daemon"]),
+            patch.object(raptor, "acquire_runtime_lock", return_value=True),
+            patch.object(raptor, "release_runtime_lock"),
+            patch.dict(
+                sys.modules,
+                {
+                    "runtime": runtime_module,
+                    "application": application_module,
+                    "session": session_module,
+                },
+            ),
+        ):
+            result = raptor.run()
+
+        self.assertEqual(result, 0)
+        self.assertEqual(
+            order,
+            [
+                "detach",
+                "publish",
+                "initialized",
+                "ready:99",
+                "running",
+                "clear",
+            ],
+        )
+
+    def test_daemon_entrypoint_transfers_readiness_fd_ownership(self) -> None:
+        runtime_module = types.ModuleType("runtime")
+        runtime_module.parse_args = lambda: Namespace(
+            status=False,
+            stop_daemon=False,
+            daemon=True,
+        )
+        runtime_module.cli_runtime_status = lambda: 0
+        runtime_module.stop_daemon = lambda: 0
+        runtime_module.daemonize = lambda: 99
+        runtime_module.set_runtime = lambda **_kw: None
+        runtime_module.clear_runtime_if_ours = lambda: None
+
+        def fail_ready(_fd: int) -> None:
+            raise BrokenPipeError("launcher exited")
+
+        runtime_module.signal_daemon_ready = fail_ready
+        application_module = types.ModuleType("application")
+
+        async def application_main(*, on_ready) -> None:
+            on_ready()
+
+        application_module.main = application_main
+        session_module = types.ModuleType("session")
+        session_module.DAEMON_MODE = False
+
+        with (
+            patch.object(sys, "argv", ["raptor.py", "--daemon"]),
+            patch.object(raptor, "acquire_runtime_lock", return_value=True),
+            patch.object(raptor, "release_runtime_lock"),
+            patch.object(raptor.os, "close") as close,
+            patch.dict(
+                sys.modules,
+                {
+                    "runtime": runtime_module,
+                    "application": application_module,
+                    "session": session_module,
+                },
+            ),
+        ):
+            with self.assertRaises(BrokenPipeError):
+                raptor.run()
+
+        close.assert_not_called()
+
     def test_status_does_not_acquire_application_ownership(self) -> None:
         runtime_module = types.ModuleType("runtime")
         runtime_module.parse_args = lambda: Namespace(
@@ -287,7 +401,11 @@ finally:
         with (
             patch.object(runtime.os, "pipe", return_value=(10, 11)),
             patch.object(runtime.os, "fork", return_value=123),
-            patch.object(runtime.os, "read", return_value=b"1") as read,
+            patch.object(
+                runtime,
+                "_await_daemon_ready",
+                return_value=(True, 456),
+            ) as ready,
             patch.object(runtime.os, "close"),
             patch.object(runtime, "detach_runtime_lock") as detach,
             redirect_stdout(io.StringIO()),
@@ -296,15 +414,20 @@ finally:
                 runtime.daemonize()
 
         self.assertEqual(stopped.exception.code, 0)
-        read.assert_called_once_with(10, 1)
+        ready.assert_called_once_with(10)
         detach.assert_called_once_with()
 
     def test_daemon_parent_rejects_failed_child_startup(self) -> None:
         with (
             patch.object(runtime.os, "pipe", return_value=(10, 11)),
             patch.object(runtime.os, "fork", return_value=123),
-            patch.object(runtime.os, "read", return_value=b""),
+            patch.object(
+                runtime,
+                "_await_daemon_ready",
+                return_value=(False, 456),
+            ),
             patch.object(runtime.os, "close"),
+            patch.object(runtime.os, "kill") as kill,
             patch.object(runtime, "release_runtime_lock") as release,
             redirect_stdout(io.StringIO()),
             redirect_stderr(io.StringIO()),
@@ -313,7 +436,23 @@ finally:
                 runtime.daemonize()
 
         self.assertEqual(stopped.exception.code, 1)
+        kill.assert_called_once_with(456, signal.SIGTERM)
         release.assert_called_once_with()
+
+    def test_daemon_readiness_deadline_covers_silent_pid_handshake(self) -> None:
+        read_fd, write_fd = os.pipe()
+        try:
+            started = time.monotonic()
+            with patch.object(runtime, "DAEMON_START_TIMEOUT_SECONDS", 0.01):
+                ready, pid = runtime._await_daemon_ready(read_fd)
+            elapsed = time.monotonic() - started
+        finally:
+            os.close(read_fd)
+            os.close(write_fd)
+
+        self.assertFalse(ready)
+        self.assertIsNone(pid)
+        self.assertLess(elapsed, 0.2)
 
     def test_status_uses_lock_owner_without_rewriting_live_state(self) -> None:
         session.state["runtime"] = {"pid": 9999, "daemon": True}

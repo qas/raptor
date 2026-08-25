@@ -8,6 +8,36 @@ from engine import function_call_output, run_agent
 
 
 class AgentEngineTests(unittest.IsolatedAsyncioTestCase):
+    async def test_terminal_output_uses_distinct_recording_boundary(
+        self,
+    ) -> None:
+        output = {
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": "done"}],
+        }
+        ordinary: list[dict] = []
+        terminal: list[tuple[list[dict], str]] = []
+
+        async def create_response(_work):
+            return {"output": [output]}
+
+        result = await run_agent(
+            work=[],
+            create_response=create_response,
+            execute_call=lambda _call: None,
+            source="test",
+            max_tool_rounds=1,
+            record_items=lambda items, _source: ordinary.extend(items),
+            record_terminal_items=lambda items, text: terminal.append(
+                (items, text)
+            ),
+        )
+
+        self.assertEqual(result["text"], "done")
+        self.assertEqual(ordinary, [])
+        self.assertEqual(terminal, [([output], "done")])
+
     def test_function_output_bounds_oversized_result_as_valid_json(self) -> None:
         item = function_call_output(
             {"call_id": "call-1"},

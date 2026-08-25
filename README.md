@@ -18,20 +18,21 @@ boundaries.
   truth. Checkpoint compaction changes the model window, not the archive.
 - **Provider-neutral.** The core operates on normalized events and opaque
   identifiers; adapters own transport behavior.
-- **Recoverable.** Interrupted work, goals, shell completions, and subagent
-  completions retain enough state to continue safely.
+- **Recoverable.** Interrupted turns, goals, and subagent work retain enough
+  durable state to continue safely. Managed shells are process-owned and are
+  terminated if the daemon exits.
 - **Bounded.** Context, tool output, subagent records, and recovery events have
   explicit limits.
 - **Observable.** Structured lifecycle events record requests, compaction,
-  retries, tools, and completion delivery without logging prompt or tool-result
-  bodies.
+  retries, tools, and completion delivery. Automatic diagnostics redact
+  credentials; deliberate shell audit events preserve the exact command.
 - **Extensible.** Providers and workspace-local skills use small explicit
   contracts.
 
 ## Quick start
 
 Raptor requires Python 3.11 or newer and a Responses-compatible model backend.
-The entry point declares its Python dependency for `uv`.
+Project metadata declares its Python dependency for `uv`.
 
 ```bash
 export RESPONSES_BASE_URL=http://127.0.0.1:8000/v1
@@ -55,9 +56,12 @@ curl http://127.0.0.1:8787/v1/responses \
 To accept remote connections, set both a non-loopback bind address and a
 secret bearer token. Raptor refuses a non-loopback bind without a token.
 
-Model discovery is available at `GET /v1/models`. Live status surfaces are
-available at `GET /v1/status` for `default`, or at
-`GET /v1/status?conversation=project-a` for a named conversation.
+Model discovery is available at `GET /v1/models`. Live status surfaces and
+bounded asynchronous completion messages are available at `GET /v1/status`
+for `default`, or at `GET /v1/status?conversation=project-a` for a named
+conversation. Asynchronous records have `asynchronous: true`; retention is
+bounded independently per conversation and process lifetime. The canonical
+assistant turn remains durable in the conversation transcript.
 
 Process commands:
 
@@ -96,7 +100,9 @@ the daemon (the launch workspace's `.raptor` directory by default).
 
 `/ask` has no prior conversation, goal, or base instructions. It may use normal
 tools for multiple in-memory rounds, but neither its model exchange nor answer
-is added to the canonical transcript. Tool side effects remain real.
+is added to the canonical transcript. Tool side effects remain real. The query
+runs as the chat's owned turn, so provider polling stays responsive and `/stop`
+can cancel it.
 
 `/thread` creates a separate crash-safe transcript. Clearing a thread restores
 the parent unchanged. Merging copies only post-fork user, assistant,
@@ -107,6 +113,7 @@ side effects are not reversible.
 
 | Path | Responsibility |
 |---|---|
+| `pyproject.toml` | Python runtime requirements for development and tests |
 | `raptor.py` | Ownership-first process entry point and CLI |
 | `application.py` | Long-running provider and agent application lifecycle |
 | `process_lock.py` | State-independent atomic process ownership |
@@ -133,7 +140,8 @@ side effects are not reversible.
 | `thread_state.py` | Temporary-thread state queries |
 | `thread_status.py` | Temporary-thread status projection |
 | `subagents.py` | Isolated foreground and background subagents |
-| `shell_sessions.py` | Managed shell processes, PTYs, polling, and completion |
+| `shell_supervisor.py` | Child process-group ownership and exit enforcement |
+| `shell_sessions.py` | Managed shell state, PTYs, polling, and completion |
 | `skills.py` | Progressive `.skills` discovery and loading |
 | `commands.py` | Provider-neutral slash commands |
 | `threads.py` | Temporary branch lifecycle and merge policy |
@@ -156,9 +164,13 @@ chat using the returned identifier. Targeted cancellation suppresses completion
 delivery; `/stop all` cancels the current chat's root turn, queued work,
 subagents, and shells without disturbing other chats.
 
-Request-only providers never discard an out-of-band completion. If no request
-is open when background work finishes, delivery remains pending and is retried
-when the user next addresses that conversation.
+Managed shells run beneath a supervisor-owned process group. Cancellation,
+timeout, normal command exit, and daemon loss all terminate remaining child
+processes; a command cannot start until its exact audit event is recorded.
+
+Request-only providers never discard an out-of-band completion. The inbound
+Responses adapter retains it in the conversation's bounded asynchronous inbox,
+where clients can retrieve it through `GET /v1/status`.
 
 Each queued request retains its originating conversation and provider delivery
 context. A Responses HTTP request that becomes steering remains open and
@@ -195,7 +207,10 @@ is paused instead of blocked. Providers may show a temporary animated
 Transient transport errors include connection failures, disconnects such as
 `RemoteProtocolError`, incomplete streams, and retryable HTTP statuses (`408`,
 `429`, `500`, `502`, `503`, and `504`). The initial request is followed by up
-to `RESPONSES_MAX_RETRIES` exponential-backoff retries.
+to `RESPONSES_MAX_RETRIES` exponential-backoff retries. A valid HTTP
+`Retry-After` delay takes precedence over a shorter local delay. Once a stream
+has exposed public output, Raptor does not replay it automatically after a
+disconnect because doing so could duplicate visible output or tool effects.
 
 If a provider rejects malformed model-generated tool arguments, Raptor
 executes nothing, archives the rejected turn and terminal outcome, and retires
@@ -233,7 +248,9 @@ a Telegram forum, Raptor creates a persistent `Subagent: <id>` topic. The
 delegated task, public reasoning summary, streamed reply, and final assistant
 message appear as ordinary messages without exposing the child's transcript or
 tool payloads. Raptor removes user input from that topic because the parent owns
-steering; the completed topic remains as a read-only record.
+steering. The topic remains open across completed runs and is reused when the
+same subagent is continued. Deleting a stopped subagent removes its topic and
+durable runtime record.
 
 ### Telegram chats and forums
 
@@ -242,8 +259,8 @@ or supergroups. The first entry is the default chat. Every configured chat is
 an independent main-agent chat; in a forum, the General topic and every normal
 topic are independent chats as well. The bot must be an administrator with
 **Manage Topics** and **Delete Messages** permissions in each configured
-forum so it can manage subagent topics and remove input from their read-only
-records. Only `TG_USER_ID` is accepted as interactive input.
+forum so it can manage subagent topics and remove input from them. Only
+`TG_USER_ID` is accepted as interactive input.
 
 Create and name normal topics with Telegram's standard UI. Raptor discovers a
 topic on its first message and persists its runtime. Activity topics are
@@ -261,6 +278,12 @@ $AGENT_WORKDIR/.raptor/
   chats/
     <session-id>.jsonl
 ```
+
+In daemon mode, `raptor.log` is an operator-owned audit record created with
+mode `0600`; foreground event output inherits the destination chosen by the
+operator. Shell start events include the exact command that Raptor executed,
+including any values the operator intentionally placed in it. Automatic
+transport and exception events continue to redact recognized credentials.
 
 `/new` creates a new transcript without deleting the old one. Archived sessions
 remain searchable with the `chat_history` tool, but only from their owning main
@@ -358,8 +381,10 @@ outside the documented ranges stop startup with a configuration error.
 | `CHAT_STREAM_INTERVAL` | `0.35` | Minimum seconds between draft snapshots |
 | `MAX_TOOL_ROUNDS` | `0` | Tool-round cap; `0` is uncapped |
 | `SHELL_TIMEOUT` | `0` | Default shell deadline in seconds; `0` disables it |
-| `MAX_TOOL_OUTPUT` | `30000` | Retained tool-output characters |
+| `MAX_TOOL_OUTPUT` | `30000` | Tool text, output, shell-input, and audit-command character budget |
 | `MAX_PENDING_STEERS` | `64` | Maximum queued root steering inputs |
+| `MAX_CHAT_RUNTIMES` | `1024` | Maximum provider conversations admitted per process |
+| `MAX_STATE_LOAD_BYTES` | `16777216` | Maximum state file bytes accepted at startup |
 
 ### Telegram
 
@@ -368,6 +393,7 @@ outside the documented ranges stop startup with a configuration error.
 | `TG_BOT_TOKEN` | empty | Bot token; required when Telegram is enabled |
 | `TG_USER_ID` | `0` | Authorized Telegram user ID |
 | `TG_CHAT_IDS` | `TG_USER_ID` | Ordered, comma-separated chats served by the bot |
+| `TG_MAX_RETRIES` | `3` | Retries after a Telegram flood-control response |
 | `TELEGRAM_MARKDOWN` | `1` | Enable Telegram Markdown rendering |
 
 ### Inbound Responses API
@@ -378,6 +404,11 @@ outside the documented ranges stop startup with a configuration error.
 | `RESPONSES_SERVER_PORT` | `8787` | Bind port |
 | `RESPONSES_SERVER_API_KEY` | empty | Bearer token; required off loopback |
 | `RESPONSES_SERVER_MAX_BODY` | `1048576` | Maximum request body bytes; minimum 1024 |
+| `RESPONSES_SERVER_MAX_CONNECTIONS` | `128` | Maximum simultaneous HTTP connections |
+| `RESPONSES_SERVER_MAX_PENDING` | `64` | Maximum queued or active requests |
+| `RESPONSES_SERVER_MAX_STATUS_MESSAGES` | `256` | Live and asynchronous records retained per conversation |
+| `RESPONSES_SERVER_MAX_STREAM_EVENTS` | `256` | Buffered SSE events per active response |
+| `RESPONSES_SERVER_READ_TIMEOUT` | `10.0` | Header and body read deadline in seconds |
 
 ### Main model backend
 
@@ -403,7 +434,7 @@ outside the documented ranges stop startup with a configuration error.
 | `SUBAGENT_RESPONSES_MAX_RETRIES` | `3` | Independent retries after the initial request |
 | `SUBAGENT_RESPONSES_RETRY_BASE_SECONDS` | `0.5` | Independent initial backoff delay |
 | `MAX_SUBAGENT_DEPTH` | `3` | Maximum recursive delegation depth; minimum 1 |
-| `MAX_SUBAGENT_RECORDS` | `100` | Completed records retained in addition to protected records |
+| `MAX_SUBAGENT_RECORDS` | `100` | Retained subagent records and persistent activity surfaces |
 | `MAX_SUBAGENT_TOOL_EVENTS` | `500` | Recent recovery tool events retained per record |
 | `MAX_SUBAGENT_PENDING_INPUTS` | `64` | Maximum queued inputs for a running subagent |
 | `MAX_BACKGROUND_SUBAGENTS` | `16` | Maximum concurrently running background subagents |

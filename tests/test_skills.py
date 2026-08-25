@@ -1,8 +1,13 @@
 import asyncio
+import os
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
+
+_HOME = Path(tempfile.mkdtemp(prefix="raptor-skills-tests-"))
+os.environ["RAPTOR_HOME"] = str(_HOME)
+os.environ["AGENT_WORKDIR"] = str(_HOME)
 
 import skills
 from config import TOOLS
@@ -100,6 +105,53 @@ class SkillsTests(unittest.IsolatedAsyncioTestCase):
                 )
             self.assertTrue(result["ok"])
             self.assertIn("body", result["contents"])
+
+    async def test_discovery_reads_frontmatter_without_loading_large_body(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / ".skills"
+            skill_dir = root / "large"
+            skill_dir.mkdir(parents=True)
+            (skill_dir / "SKILL.md").write_text(
+                "---\nname: large\ndescription: Large workflow\n---\n"
+                + "x" * 20_000
+            )
+            with patch.object(skills, "SKILLS_ROOT", root):
+                snapshot = await skills.refresh_skills()
+
+            self.assertEqual([item.name for item in snapshot.skills], ["large"])
+
+    async def test_read_skill_rejects_content_above_tool_budget(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / ".skills"
+            skill_dir = root / "large"
+            skill_dir.mkdir(parents=True)
+            (skill_dir / "SKILL.md").write_text(
+                "---\nname: large\ndescription: Large workflow\n---\nbody"
+            )
+            with (
+                patch.object(skills, "SKILLS_ROOT", root),
+                patch.object(skills, "MAX_TOOL_OUTPUT", 16),
+            ):
+                result = await skills.read_skill_tool({"name": "large"})
+
+            self.assertFalse(result["ok"])
+            self.assertIn("tool-output limit", result["error"])
+
+    async def test_discovery_rejects_oversized_frontmatter(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / ".skills"
+            skill_dir = root / "large"
+            skill_dir.mkdir(parents=True)
+            (skill_dir / "SKILL.md").write_text(
+                "---\ndescription: " + "x" * 20_000
+            )
+            with patch.object(skills, "SKILLS_ROOT", root):
+                snapshot = await skills.refresh_skills()
+
+            self.assertEqual(snapshot.skills, ())
+            self.assertIn("frontmatter exceeds", snapshot.errors[0])
 
 
 if __name__ == "__main__":

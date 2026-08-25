@@ -4,7 +4,24 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from storage import write_text_atomic
+from storage import FileTooLargeError, read_bytes_bounded, write_text_atomic
+
+
+class BoundedReadTests(unittest.TestCase):
+    def test_rejects_content_beyond_limit(self) -> None:
+        root = Path(tempfile.mkdtemp(prefix="raptor-storage-"))
+        path = root / "input"
+        path.write_bytes(b"12345")
+
+        with self.assertRaises(FileTooLargeError):
+            read_bytes_bounded(path, 4)
+
+    def test_accepts_content_at_limit(self) -> None:
+        root = Path(tempfile.mkdtemp(prefix="raptor-storage-"))
+        path = root / "input"
+        path.write_bytes(b"1234")
+
+        self.assertEqual(read_bytes_bounded(path, 4), b"1234")
 
 
 class AtomicWriteTests(unittest.TestCase):

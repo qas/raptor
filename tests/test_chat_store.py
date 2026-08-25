@@ -40,6 +40,41 @@ class ChatStoreTests(unittest.TestCase):
         self.assertEqual(events[0]["kind"], "main")
         self.assertEqual(events[0]["seq"], 1)
 
+    def test_transcript_and_runtime_directories_are_private(self) -> None:
+        home = Path(tempfile.mkdtemp(prefix="private-home-"))
+        chats = home / "chats"
+        home.chmod(0o777)
+        old_umask = os.umask(0)
+        try:
+            with (
+                patch.object(chat_store, "RAPTOR_HOME", home),
+                patch.object(chat_store, "CHAT_DIR", chats),
+            ):
+                sid = chat_store.create_session(
+                    kind="main",
+                    chat_key="local",
+                )
+                transcript = chat_store.chat_path(sid)
+                self.assertEqual(home.stat().st_mode & 0o777, 0o700)
+                self.assertEqual(chats.stat().st_mode & 0o777, 0o700)
+                self.assertEqual(
+                    transcript.stat().st_mode & 0o777,
+                    0o600,
+                )
+        finally:
+            os.umask(old_umask)
+
+    def test_boot_repair_tightens_existing_transcript_mode(self) -> None:
+        sid = chat_store.create_session(kind="main", chat_key="local")
+        path = chat_store.chat_path(sid)
+        self._chat_dir.chmod(0o755)
+        path.chmod(0o644)
+
+        chat_store.repair_all_chat_files()
+
+        self.assertEqual(self._chat_dir.stat().st_mode & 0o777, 0o700)
+        self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+
     def test_context_reset_preserves_archive_and_discards_old_checkpoint(
         self,
     ) -> None:
@@ -206,6 +241,64 @@ class ChatStoreTests(unittest.TestCase):
         self.assertTrue(chat_store.session_contains_text(sid, "firefly"))
         self.assertFalse(chat_store.session_contains_text(sid, "saturn"))
 
+    def test_session_listing_summarizes_only_requested_newest(self) -> None:
+        for _ in range(5):
+            chat_store.create_session(kind="main", chat_key="local")
+        original = chat_store._session_summary
+        seen: list[Path] = []
+
+        def summarize(path: Path):
+            seen.append(path)
+            return original(path)
+
+        with patch.object(chat_store, "_session_summary", summarize):
+            sessions = chat_store.list_sessions(limit=2)
+
+        self.assertEqual(len(sessions), 2)
+        self.assertEqual(len(seen), 2)
+
+    def test_filtered_listing_is_not_starved_by_noisy_chats(self) -> None:
+        session_ids = iter(
+            f"20260824-000000-{index:08x}"
+            for index in range(102)
+        )
+        with patch.object(
+            chat_store,
+            "new_session_id",
+            side_effect=lambda: next(session_ids),
+        ):
+            quiet = chat_store.create_session(
+                kind="main",
+                chat_key="quiet",
+            )
+            for _ in range(101):
+                chat_store.create_session(
+                    kind="main",
+                    chat_key="noisy",
+                )
+
+        sessions = chat_store.list_sessions(
+            limit=20,
+            chat_key="quiet",
+            kinds={"main"},
+        )
+
+        self.assertEqual(
+            [row["session_id"] for row in sessions],
+            [quiet],
+        )
+
+    def test_exact_session_summary_does_not_discover_archive(self) -> None:
+        sid = chat_store.create_session(kind="main", chat_key="local")
+        with patch.object(
+            Path,
+            "glob",
+            side_effect=AssertionError("archive discovery is not allowed"),
+        ):
+            summary = chat_store.session_summary(sid)
+
+        self.assertEqual(summary["session_id"], sid)
+
     def test_invalid_session_id_rejected(self) -> None:
         with self.assertRaises(ValueError):
             chat_store.chat_path("../escape")
@@ -241,6 +334,76 @@ class ChatStoreTests(unittest.TestCase):
             "after-repair",
             lines[-1],
         )
+
+    def test_large_partial_tail_is_repaired_without_full_file_read(self) -> None:
+        sid = chat_store.create_session(kind="main", chat_key="local")
+        path = chat_store.chat_path(sid)
+        valid_size = path.stat().st_size
+        with path.open("ab") as handle:
+            handle.write(b"x" * (2 * 1024 * 1024))
+
+        with patch.object(
+            Path,
+            "read_bytes",
+            side_effect=AssertionError("full-file read"),
+        ):
+            self.assertTrue(chat_store.repair_chat_file(sid))
+
+        self.assertEqual(path.stat().st_size, valid_size)
+
+    def test_active_projection_does_not_materialize_archive(self) -> None:
+        sid = chat_store.create_session(kind="main", chat_key="local")
+        retired = chat_store.append_item(
+            sid,
+            {"role": "user", "content": "retired"},
+            source="user",
+        )
+        chat_store.append_checkpoint(
+            sid,
+            summary="old",
+            through_seq=int(retired["seq"]),
+        )
+        chat_store.reset_model_context(
+            sid,
+            through_seq=int(retired["seq"]),
+        )
+        active = chat_store.append_item(
+            sid,
+            {"role": "user", "content": "active"},
+            source="user",
+        )
+        chat_store.append_checkpoint(
+            sid,
+            summary="current",
+            through_seq=int(active["seq"]),
+        )
+        chat_store.append_item(
+            sid,
+            {"role": "user", "content": "tail"},
+            source="user",
+        )
+
+        with patch.object(
+            chat_store,
+            "read_events",
+            side_effect=AssertionError("archive materialized"),
+        ):
+            projection = chat_store.active_projection(sid)
+
+        self.assertEqual(
+            [event["item"]["content"] for event in projection.items],
+            ["tail"],
+        )
+        self.assertEqual(projection.checkpoint["summary"], "current")
+        self.assertEqual(projection.archive_events, 7)
+
+    def test_ending_session_releases_sequence_cache_entry(self) -> None:
+        sid = chat_store.create_session(kind="main", chat_key="local")
+        self.assertIn(sid, chat_store._SEQ_CACHE)
+
+        chat_store.end_session(sid, reason="archived")
+
+        self.assertNotIn(sid, chat_store._SEQ_CACHE)
 
     def test_append_repairs_crash_tail_automatically(
         self,

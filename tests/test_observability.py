@@ -2,7 +2,7 @@ import json
 import unittest
 from unittest.mock import patch
 
-from observability import log_event, redact_sensitive
+from observability import log_event, log_shell_start, redact_sensitive
 
 
 class ObservabilityTests(unittest.TestCase):
@@ -46,6 +46,50 @@ class ObservabilityTests(unittest.TestCase):
         message = record["data"]["message"]
         self.assertLess(len(message), 2_100)
         self.assertIn("chars omitted", message)
+
+    def test_audit_event_preserves_intentional_payload(self) -> None:
+        command = "RESPONSES_API_KEY=operator-secret run-model"
+        with patch("builtins.print") as output:
+            log_shell_start(
+                session_id="shell-1",
+                command=command,
+                chat_id="telegram:123",
+                parent_session_id="main-1",
+                pid=1234,
+                timeout=None,
+                tty=False,
+            )
+
+        record = json.loads(output.call_args.args[0])
+        self.assertTrue(record["audit"])
+        self.assertEqual(record["event"], "authorized")
+        self.assertEqual(record["data"]["command"], command)
+
+    def test_shell_audit_rejects_oversized_command(self) -> None:
+        with patch("observability.MAX_TOOL_OUTPUT", 10):
+            with self.assertRaisesRegex(ValueError, "exceeds 10"):
+                log_shell_start(
+                    session_id="shell-1",
+                    command="x" * 11,
+                    chat_id="telegram:123",
+                    parent_session_id=None,
+                    pid=1234,
+                    timeout=None,
+                    tty=False,
+                )
+
+    def test_redacts_environment_and_header_credentials(self) -> None:
+        value = (
+            "RESPONSES_API_KEY=backend-secret "
+            "TG_BOT_TOKEN=telegram-secret "
+            "X-API-Key: proxy-secret"
+        )
+
+        redacted = redact_sensitive(value)
+
+        self.assertNotIn("backend-secret", redacted)
+        self.assertNotIn("telegram-secret", redacted)
+        self.assertNotIn("proxy-secret", redacted)
 
 
 if __name__ == "__main__":

@@ -2,6 +2,7 @@
 import asyncio
 import os
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
@@ -10,6 +11,9 @@ import httpx
 from response_errors import MalformedToolCallError
 
 _ROOT = Path(__file__).resolve().parent.parent
+_HOME = Path(tempfile.mkdtemp(prefix="raptor-response-retry-tests-"))
+os.environ["RAPTOR_HOME"] = str(_HOME)
+os.environ["AGENT_WORKDIR"] = str(_HOME)
 os.environ.setdefault("TG_BOT_TOKEN", "test-token")
 os.environ.setdefault("TG_USER_ID", "1")
 if str(_ROOT) not in sys.path:
@@ -190,6 +194,51 @@ class ResponseRetryTests(unittest.IsolatedAsyncioTestCase):
                 await responses.responses_create_stream(1, [])
         self.assertEqual(request.await_count, 4)
 
+    async def test_retry_after_delays_retry_without_extending_attempts(
+        self,
+    ) -> None:
+        request_value = httpx.Request(
+            "POST",
+            "http://backend/v1/responses",
+        )
+        error = httpx.HTTPStatusError(
+            "rate limited",
+            request=request_value,
+            response=httpx.Response(
+                429,
+                headers={"Retry-After": "7"},
+                request=request_value,
+            ),
+        )
+        request = AsyncMock(side_effect=[error, "done"])
+        sleep = AsyncMock()
+
+        with patch.object(responses.asyncio, "sleep", sleep):
+            result = await responses.retry_transient_response(
+                request,
+                operation="test",
+                max_retries=1,
+                retry_base_seconds=0.5,
+            )
+
+        self.assertEqual(result, "done")
+        sleep.assert_awaited_once_with(7.0)
+
+    async def test_partial_public_stream_is_not_replayed(self) -> None:
+        async def request(*_args, replay_guard, **_kwargs):
+            replay_guard.public_output_seen = True
+            raise responses.IncompleteResponsesStreamError("disconnected")
+
+        attempt = AsyncMock(side_effect=request)
+        with (
+            patch.object(responses, "RESPONSES_MAX_RETRIES", 3),
+            patch.object(responses, "_responses_create_stream_once", attempt),
+        ):
+            with self.assertRaises(responses.PartialResponsesStreamError):
+                await responses.responses_create_stream(1, [])
+
+        self.assertEqual(attempt.await_count, 1)
+
     async def test_model_listing_uses_common_retry_policy(self) -> None:
         request = AsyncMock(
             side_effect=[httpx.ConnectError("offline"), ["model-a"]]
@@ -273,6 +322,35 @@ class ResponseRetryTests(unittest.IsolatedAsyncioTestCase):
             result = await asyncio.wait_for(task, timeout=1)
 
         self.assertEqual(result["status"], "completed")
+
+    async def test_failed_stream_cancels_owned_draft_task(self) -> None:
+        draft_started = asyncio.Event()
+        draft_cancelled = asyncio.Event()
+
+        async def fail_stream(*_args, on_text, **_kwargs):
+            await on_text("partial")
+            await draft_started.wait()
+            raise httpx.ReadError("disconnected")
+
+        async def blocked_draft(*_args):
+            draft_started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                draft_cancelled.set()
+                raise
+
+        with (
+            patch.object(responses, "stream_response_payload", fail_stream),
+            patch.object(responses, "ensure_model", AsyncMock(return_value="m")),
+            patch.object(responses, "send_draft", blocked_draft),
+            patch.object(responses, "CHAT_STREAMING", True),
+            patch.object(responses, "CHAT_STREAM_INTERVAL", 0),
+        ):
+            with self.assertRaises(httpx.ReadError):
+                await responses._responses_create_stream_once(1, [])
+
+        self.assertTrue(draft_cancelled.is_set())
 
     async def test_stream_exposes_cumulative_public_output(self) -> None:
         class FakeResponse:

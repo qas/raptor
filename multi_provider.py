@@ -15,7 +15,11 @@ from chat_provider import (
     ProviderCapabilities,
 )
 from observability import log_exception
-from activity import ActivitySnapshot, ActivitySurfaceProvider
+from activity import (
+    ActivityFinishResult,
+    ActivitySnapshot,
+    ActivitySurfaceProvider,
+)
 
 
 class MultiProvider:
@@ -121,6 +125,11 @@ class MultiProvider:
         value: Any | None,
     ) -> tuple[ChatProvider, Any | None]:
         provider, raw_id = self._route_conversation(conversation_id)
+        if value is None:
+            return (
+                provider,
+                provider.activate_delivery_context(raw_id, None),
+            )
         if not isinstance(value, tuple) or len(value) != 2:
             raise ValueError("invalid multiplexed delivery context")
         provider_name, nested = value
@@ -167,10 +176,17 @@ class MultiProvider:
             task.cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
-        await asyncio.gather(
+        results = await asyncio.gather(
             *(provider.close() for provider in self.providers),
             return_exceptions=True,
         )
+        for provider, result in zip(self.providers, results):
+            if isinstance(result, BaseException):
+                log_exception(
+                    provider.name,
+                    "shutdown_error",
+                    result,
+                )
 
     def _start_polls(self, timeout: int) -> None:
         for provider in self.providers:
@@ -412,17 +428,44 @@ class MultiProvider:
         )
         await provider.update_activity_surface(raw_id, nested_id, snapshot)
 
-    async def close_activity_surface(
+    async def append_activity_message(
         self,
         conversation_id: ConversationId,
         surface_id: str,
-        snapshot: ActivitySnapshot,
+        text: str,
     ) -> None:
         provider, raw_id, nested_id = self._route_activity_surface(
             conversation_id,
             surface_id,
         )
-        await provider.close_activity_surface(raw_id, nested_id, snapshot)
+        await provider.append_activity_message(raw_id, nested_id, text)
+
+    async def finish_activity_surface(
+        self,
+        conversation_id: ConversationId,
+        surface_id: str,
+        snapshot: ActivitySnapshot,
+    ) -> ActivityFinishResult:
+        provider, raw_id, nested_id = self._route_activity_surface(
+            conversation_id,
+            surface_id,
+        )
+        return await provider.finish_activity_surface(
+            raw_id,
+            nested_id,
+            snapshot,
+        )
+
+    async def delete_activity_surface(
+        self,
+        conversation_id: ConversationId,
+        surface_id: str,
+    ) -> None:
+        provider, raw_id, nested_id = self._route_activity_surface(
+            conversation_id,
+            surface_id,
+        )
+        await provider.delete_activity_surface(raw_id, nested_id)
 
     def restore_activity_surface(
         self,

@@ -44,6 +44,8 @@ same contribution.
 - Keep domain policy independent from transport adapters.
 - Make task, process, file, and network-resource ownership explicit.
 - Bound every retry loop and retained in-memory collection.
+- Enforce memory and queue limits at acquisition; truncating only the returned
+  representation does not establish a bound.
 - Preserve cancellation; never convert `CancelledError` into an ordinary
   failure.
 - Use crash-safe persistence for durable control state.
@@ -51,8 +53,10 @@ same contribution.
 - Do not silently swallow unexpected exceptions.
 - Avoid broad exception handling unless the boundary can recover, report, or
   re-raise deterministically.
-- Never log credentials, authorization headers, private model payloads, or
-  other secrets.
+- Redact credentials, authorization headers, and private model payloads from
+  automatic diagnostics. Deliberate audit events may preserve an operator's
+  exact action only when the payload is already bounded and the local log is
+  access-restricted.
 - Keep source lines at or below 88 characters unless syntax makes that less
   readable.
 - Do not leave dead code, commented-out implementations, TODO markers, or

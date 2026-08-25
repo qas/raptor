@@ -32,6 +32,14 @@ from tools import (
 
 class UpdatePlanTests(unittest.TestCase):
     def setUp(self) -> None:
+        self.runtime_context = session.bound_chat("telegram:todos")
+        self.runtime_context.__enter__()
+        self.addCleanup(
+            self.runtime_context.__exit__,
+            None,
+            None,
+            None,
+        )
         session.state.clear()
         session.state.update(copy.deepcopy(session.DEFAULT_STATE))
 

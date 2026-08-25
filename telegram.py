@@ -21,10 +21,11 @@ from config import (
     TG_API,
     TG_BOT_TOKEN,
     TG_CHAT_IDS,
+    TG_MAX_RETRIES,
     TG_USER_ID,
 )
 from observability import log_event, log_exception
-from activity import ActivitySnapshot
+from activity import ActivityFinishResult, ActivitySnapshot
 
 _client: httpx.AsyncClient | None = None
 
@@ -34,9 +35,13 @@ _MESSAGE_PREVIEW_LIMIT = 3900
 _PACED_CHAT_METHODS = frozenset(
     {
         "deletemessage",
+        "closeforumtopic",
+        "createforumtopic",
+        "deleteforumtopic",
         "editmessagereplymarkup",
         "editmessagetext",
         "pinchatmessage",
+        "reopenforumtopic",
         "sendchataction",
         "sendmessage",
         "sendmessagedraft",
@@ -124,12 +129,45 @@ async def _delete_forum_topic(chat_id: int, topic_id: int) -> None:
         )
     except TelegramApiError as exc:
         description = exc.description.casefold()
-        if exc.is_bad_request and "topic" in description and any(
+        missing_topic = any(
+            resource in description for resource in ("topic", "message thread")
+        ) and any(
             marker in description
             for marker in ("not found", "deleted", "does not exist")
-        ):
+        )
+        if exc.is_bad_request and missing_topic:
             return
         raise
+
+
+async def _reopen_forum_topic(
+    chat_id: int,
+    topic_id: int,
+) -> bool:
+    try:
+        await tg_call(
+            "reopenForumTopic",
+            {"chat_id": chat_id, "message_thread_id": topic_id},
+        )
+    except TelegramApiError as exc:
+        description = exc.description.casefold()
+        if exc.is_bad_request:
+            if any(
+                marker in description
+                for marker in ("not closed", "already open", "topic_not_modified")
+            ):
+                return True
+            missing_topic = any(
+                resource in description
+                for resource in ("topic", "message thread")
+            ) and any(
+                marker in description
+                for marker in ("not found", "deleted", "does not exist")
+            )
+            if missing_topic:
+                return False
+        raise
+    return True
 
 
 class TelegramApiError(RuntimeError):
@@ -275,7 +313,7 @@ async def tg_call(
     )
 
     async def perform() -> Any:
-        while True:
+        for attempt in range(TG_MAX_RETRIES + 1):
             await _reserve_telegram_request(method, chat_id)
             response = await _client.post(
                 f"{TG_API}/{method}",
@@ -295,15 +333,20 @@ async def tg_call(
                         "method": method,
                         "chat_id": chat_id,
                         "retry_after": retry_after,
+                        "attempt": attempt + 1,
+                        "max_retries": TG_MAX_RETRIES,
                     },
                 )
                 await _defer_telegram_requests(chat_id, retry_after)
+                if attempt >= TG_MAX_RETRIES:
+                    raise error
                 continue
             if not response.is_success:
                 raise error
             if not isinstance(data, dict) or not data.get("ok"):
                 raise error
             return data.get("result")
+        raise AssertionError("unreachable Telegram retry state")
 
     if chat_id is None:
         return await perform()
@@ -675,6 +718,13 @@ def _is_unchanged_message_error(exc: TelegramApiError) -> bool:
     return (
         exc.is_bad_request
         and "message is not modified" in exc.description.casefold()
+    )
+
+
+def _is_missing_message_error(exc: TelegramApiError) -> bool:
+    return (
+        exc.is_bad_request
+        and "message to delete not found" in exc.description.casefold()
     )
 
 
@@ -1187,12 +1237,14 @@ class TelegramProvider:
             topic_id, _task_message_id = _parse_activity_surface_id(
                 existing_surface_id
             )
-            chat.activity_topics[topic_id] = _TelegramActivityTopic()
-            await send(
-                _telegram_conversation_id(chat_id, topic_id),
-                snapshot.title,
-            )
-            return existing_surface_id
+            if await _reopen_forum_topic(chat_id, topic_id):
+                chat.activity_topics[topic_id] = _TelegramActivityTopic()
+                await send(
+                    _telegram_conversation_id(chat_id, topic_id),
+                    snapshot.title,
+                )
+                return existing_surface_id
+            chat.activity_topics.pop(topic_id, None)
         topic_name = f"Subagent: {snapshot.activity_id}"
         topic = await tg_call(
             "createForumTopic",
@@ -1259,6 +1311,19 @@ class TelegramProvider:
             include_reply=True,
         )
 
+    async def append_activity_message(
+        self,
+        conversation_id: ConversationId,
+        surface_id: str,
+        text: str,
+    ) -> None:
+        chat_id, _parent_thread_id = _telegram_destination(conversation_id)
+        topic_id, _task_message_id = _parse_activity_surface_id(surface_id)
+        chat = self._chats.get(chat_id)
+        if chat is None or topic_id not in chat.activity_topics:
+            raise ValueError("activity surface belongs to another Telegram chat")
+        await send(_telegram_conversation_id(chat_id, topic_id), text)
+
     async def _update_activity_topic_output(
         self,
         chat_id: int,
@@ -1292,12 +1357,12 @@ class TelegramProvider:
             )
             topic.reply_text = snapshot.reply
 
-    async def close_activity_surface(
+    async def finish_activity_surface(
         self,
         conversation_id: ConversationId,
         surface_id: str,
         snapshot: ActivitySnapshot,
-    ) -> None:
+    ) -> ActivityFinishResult:
         chat_id, _parent_thread_id = _telegram_destination(conversation_id)
         topic_id, _task_message_id = _parse_activity_surface_id(surface_id)
         chat = self._chats.get(chat_id)
@@ -1319,20 +1384,32 @@ class TelegramProvider:
                 await self.delete_message(chat_id, topic.reply_message_id)
             except asyncio.CancelledError:
                 raise
-            except Exception as exc:
-                log_exception(
-                    "telegram",
-                    "activity_preview_cleanup_error",
-                    exc,
-                    {"chat_id": chat_id, "topic_id": topic_id},
-                )
+            except TelegramApiError as exc:
+                if not _is_missing_message_error(exc):
+                    raise
             topic.reply_message_id = None
             topic.reply_text = ""
+        result_delivered = False
         if snapshot.result:
             await send(
                 _telegram_conversation_id(chat_id, topic_id),
                 snapshot.result,
             )
+            result_delivered = True
+        return ActivityFinishResult(True, result_delivered)
+
+    async def delete_activity_surface(
+        self,
+        conversation_id: ConversationId,
+        surface_id: str,
+    ) -> None:
+        chat_id, _parent_thread_id = _telegram_destination(conversation_id)
+        topic_id, _task_message_id = _parse_activity_surface_id(surface_id)
+        chat = self._chats.get(chat_id)
+        if chat is None:
+            raise ValueError("activity surface belongs to another Telegram chat")
+        await _delete_forum_topic(chat_id, topic_id)
+        chat.activity_topics.pop(topic_id, None)
 
     def restore_activity_surface(
         self,

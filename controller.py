@@ -3,10 +3,15 @@ import asyncio
 from collections.abc import Callable
 from typing import Any, Literal
 
-from chat_provider import ConversationId
-
 import session
-from agent import RetryableTurnFailure, agent_turn, compact_context
+from agent import (
+    RetryableTurnFailure,
+    agent_turn,
+    compact_context,
+    flush_pending_delivery,
+)
+from chat_provider import ConversationId
+from chat_runtime import bound_delivery_context, send
 from goals import (
     GOAL_BLOCKED,
     GOAL_COMPLETE,
@@ -19,11 +24,10 @@ from goals import (
     pause_goal,
     sync_goal_pin,
 )
-from session import save_state
-from chat_runtime import bound_delivery_context, send
-from presentation import clear_steering_indicator
 from observability import log_event
+from presentation import clear_steering_indicator
 from runtime_events import RuntimeEvent, RuntimeEventKind
+from session import save_state
 from thread_state import thread_active
 from turn_runtime import InterruptResult, TurnKind, TurnSnapshot, turns
 
@@ -93,6 +97,7 @@ async def _dequeue_steer() -> dict[str, Any] | None:
             session.pending_steers[steer_id] = entry
             session.steer_queue.put_nowait(entry)
             raise
+        session.persist_steer_handoff(entry)
         return entry
 
 
@@ -111,7 +116,11 @@ def _dequeue_runtime_event() -> RuntimeEvent | None:
 
 
 def _pending_controller_work() -> bool:
-    if goal_is_active() and not thread_active():
+    if (
+        goal_is_active()
+        and not thread_active()
+        and not session.subagent_tasks
+    ):
         return True
     if session.runtime_event_queue.qsize() > 0:
         return True
@@ -153,7 +162,11 @@ async def _select_next_work(
             "runtime",
             runtime_event,
         )
-    if goal_is_active() and not thread_active():
+    if (
+        goal_is_active()
+        and not thread_active()
+        and not session.subagent_tasks
+    ):
         goal_id = current_goal_id()
         if (
             captured_goal_id
@@ -234,6 +247,7 @@ async def run_root_session(
     initial_input: str | None,
     *,
     internal: bool = False,
+    input_recorded: bool = False,
     delivery_context: Any | None = None,
 ) -> None:
     next_input = initial_input
@@ -252,7 +266,11 @@ async def run_root_session(
         if goal_is_active() and not thread_active()
         else None
     )
+    delivery_blocked = False
     try:
+        if not await flush_pending_delivery(chat_id):
+            delivery_blocked = True
+            return
         if initial_input is not None and not internal:
             await requeue_deferred_completions()
         await ensure_goal_pin(chat_id)
@@ -269,10 +287,10 @@ async def run_root_session(
                     break
             if isinstance(work_entry, RuntimeEvent):
                 chat_id = work_entry.conversation_id
-                delivery_context = work_entry.delivery_context
             elif isinstance(work_entry, dict):
                 chat_id = work_entry.get("chat_id", chat_id)
                 delivery_context = work_entry.get("delivery_context")
+                input_recorded = True
             _mark_goal_continuation(next_source)
             if next_source == "goal":
                 await ensure_goal_pin(chat_id)
@@ -281,12 +299,17 @@ async def run_root_session(
             )
             try:
                 with bound_delivery_context(chat_id, delivery_context):
+                    turn_options = {
+                        "internal": next_source != "user",
+                        "source": next_source or "user",
+                        "allow_goal_creation": allow_goal_creation,
+                    }
+                    if input_recorded:
+                        turn_options["input_recorded"] = True
                     delivered = await agent_turn(
                         chat_id,
                         next_input,
-                        internal=(next_source != "user"),
-                        source=next_source or "user",
-                        allow_goal_creation=allow_goal_creation,
+                        **turn_options,
                     )
             except asyncio.CancelledError:
                 _finish_runtime_event(
@@ -303,6 +326,12 @@ async def run_root_session(
                 delivered is True,
             )
             work_entry = None
+            delivery_context = None
+            input_recorded = False
+            if session.state.get("pending_delivery") is not None:
+                if isinstance(delivered, RetryableTurnFailure):
+                    pause_goal()
+                break
             if isinstance(delivered, RetryableTurnFailure) or delivered is None:
                 reason = (
                     delivered.reason
@@ -332,6 +361,13 @@ async def run_root_session(
                     )
             await _announce_goal_terminal(chat_id)
             await sync_goal_pin(chat_id)
+            if (
+                captured_goal_id
+                and goal_is_active()
+                and current_goal_id()
+                != captured_goal_id
+            ):
+                break
             (
                 next_input,
                 next_source,
@@ -340,13 +376,6 @@ async def run_root_session(
                 captured_goal_id
             )
             if next_input is None:
-                break
-            if (
-                captured_goal_id
-                and goal_is_active()
-                and current_goal_id()
-                != captured_goal_id
-            ):
                 break
     except Exception:
         _finish_runtime_event(
@@ -368,7 +397,7 @@ async def run_root_session(
                 save_state()
             # Lost-wakeup guard: work may have arrived after the idle
             # decision and before turn ownership was released.
-            if _pending_controller_work():
+            if not delivery_blocked and _pending_controller_work():
                 start_root_session(chat_id, None)
 
 
@@ -377,24 +406,23 @@ def start_root_session(
     text: str | None,
     *,
     internal: bool = False,
+    input_recorded: bool = False,
     delivery_context: Any | None = None,
 ) -> asyncio.Task[None]:
     def persist_turn(snapshot: TurnSnapshot) -> None:
-        session.state["active_root_turn"] = {
-            "id": snapshot.id,
-            "session_id": session.state.get("current_session_id"),
-        }
-        try:
-            save_state()
-        except Exception:
-            session.state["active_root_turn"] = None
-            raise
+        session.set_active_root_turn(
+            {
+                "id": snapshot.id,
+                "session_id": session.state.get("current_session_id"),
+            }
+        )
 
     return turns.start(
         run_root_session(
             chat_id,
             text,
             internal=internal,
+            input_recorded=input_recorded,
             delivery_context=delivery_context,
         ),
         kind=TurnKind.REGULAR,
@@ -407,6 +435,7 @@ def ensure_root_session(
     text: str | None = None,
     *,
     internal: bool = False,
+    input_recorded: bool = False,
     delivery_context: Any | None = None,
 ) -> asyncio.Task | None:
     if turns.is_running():
@@ -415,6 +444,7 @@ def ensure_root_session(
         chat_id,
         text,
         internal=internal,
+        input_recorded=input_recorded,
         delivery_context=delivery_context,
     )
 
@@ -468,13 +498,13 @@ async def interrupt_active_goal_controller(
     return result.interrupted
 
 
-async def enqueue_runtime_event(
+def enqueue_runtime_event(
     chat_id: ConversationId,
     kind: RuntimeEventKind,
     text: str,
     *,
     is_active: Callable[[], bool] | None = None,
-) -> bool:
+) -> asyncio.Future[bool]:
     with session.bound_chat(chat_id):
         done: asyncio.Future[bool] = (
             asyncio.get_running_loop().create_future()
@@ -486,6 +516,6 @@ async def enqueue_runtime_event(
             done=done,
             is_active=is_active,
         )
-        await session.runtime_event_queue.put(event)
+        session.runtime_event_queue.put_nowait(event)
         ensure_root_session(chat_id, None)
-        return bool(await done)
+        return done

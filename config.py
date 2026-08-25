@@ -115,6 +115,31 @@ RESPONSES_SERVER_MAX_BODY = _env_int(
     1_048_576,
     minimum=1024,
 )
+RESPONSES_SERVER_MAX_CONNECTIONS = _env_int(
+    "RESPONSES_SERVER_MAX_CONNECTIONS",
+    128,
+    minimum=1,
+)
+RESPONSES_SERVER_MAX_PENDING = _env_int(
+    "RESPONSES_SERVER_MAX_PENDING",
+    64,
+    minimum=1,
+)
+RESPONSES_SERVER_MAX_STATUS_MESSAGES = _env_int(
+    "RESPONSES_SERVER_MAX_STATUS_MESSAGES",
+    256,
+    minimum=1,
+)
+RESPONSES_SERVER_MAX_STREAM_EVENTS = _env_int(
+    "RESPONSES_SERVER_MAX_STREAM_EVENTS",
+    256,
+    minimum=4,
+)
+RESPONSES_SERVER_READ_TIMEOUT = _env_float(
+    "RESPONSES_SERVER_READ_TIMEOUT",
+    10.0,
+    minimum=0.1,
+)
 
 # Telegram adapter configuration. These are optional at framework import
 # time and validated only when the Telegram provider is initialized.
@@ -123,6 +148,11 @@ TG_USER_ID = _env_int("TG_USER_ID", 0, minimum=0)
 TG_CHAT_IDS = _env_int_tuple(
     "TG_CHAT_IDS",
     (TG_USER_ID,) if TG_USER_ID else (),
+)
+TG_MAX_RETRIES = _env_int(
+    "TG_MAX_RETRIES",
+    3,
+    minimum=0,
 )
 
 RESPONSES_BASE_URL = os.getenv(
@@ -225,6 +255,16 @@ MAX_PENDING_STEERS = _env_int(
     "MAX_PENDING_STEERS",
     64,
     minimum=1,
+)
+MAX_CHAT_RUNTIMES = _env_int(
+    "MAX_CHAT_RUNTIMES",
+    1024,
+    minimum=1,
+)
+MAX_STATE_LOAD_BYTES = _env_int(
+    "MAX_STATE_LOAD_BYTES",
+    16 * 1024 * 1024,
+    minimum=1024,
 )
 
 SHELL_TIMEOUT = _env_int(
@@ -406,6 +446,9 @@ WORKFLOW:
 - Use the subagent tool only when the user explicitly requests delegation.
   Subagents share your workspace but have isolated context. You are the only
   agent that communicates with the user.
+- After starting a background subagent, acknowledge the start and end your
+  turn. Do not poll it or run wait/sleep commands; its completion starts a new
+  parent turn automatically.
 - Use set_goal only when the current user explicitly requests
   persistent/autonomous goal execution. Never infer goal creation merely
   from a difficult, long, or multi-step task. If the user declines or does
@@ -562,6 +605,7 @@ TOOLS = [
                 },
                 "chars": {
                     "type": "string",
+                    "maxLength": MAX_TOOL_OUTPUT,
                 },
                 "yield_time_ms": {
                     "type": "integer",
@@ -618,6 +662,7 @@ TOOLS = [
                 },
                 "content": {
                     "type": "string",
+                    "maxLength": MAX_TOOL_OUTPUT,
                 },
             },
             "required": [
@@ -643,9 +688,11 @@ TOOLS = [
                 },
                 "old_text": {
                     "type": "string",
+                    "maxLength": MAX_TOOL_OUTPUT,
                 },
                 "new_text": {
                     "type": "string",
+                    "maxLength": MAX_TOOL_OUTPUT,
                 },
                 "replace_all": {
                     "type": "boolean",
@@ -846,9 +893,10 @@ TOOLS = [
             "configured subagent Responses host and model. Call without "
             "arguments to list threads, agent_id alone to inspect stored "
             "public status and final result, task to start a new thread, or "
-            "task plus agent_id to continue one. If that thread is running, the "
-            "task steers it at the next safe model boundary. Use only when "
-            "the user explicitly requests delegation."
+            "task plus agent_id to continue one, or agent_id plus delete to "
+            "delete a stopped thread. If that thread is running, the task "
+            "steers it at the next safe model boundary. Use only when the "
+            "user explicitly requests delegation."
         ),
         "parameters": {
             "type": "object",
@@ -867,8 +915,16 @@ TOOLS = [
                 "background": {
                     "type": "boolean",
                     "description": (
-                        "Return immediately and notify the parent agent "
-                        "when complete."
+                        "Return immediately. A successful background start "
+                        "automatically starts a new parent turn when the "
+                        "subagent completes; do not poll or wait for it."
+                    ),
+                },
+                "delete": {
+                    "type": "boolean",
+                    "description": (
+                        "Delete a stopped subagent and its activity surface. "
+                        "Requires agent_id and cannot be combined with task."
                     ),
                 },
                 "allow_subagents": {

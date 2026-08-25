@@ -4,11 +4,9 @@ import asyncio
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Any
 
 from chat_provider import ConversationId
 from config import MAX_TOOL_OUTPUT
-
 
 _TRUNCATION_MARKER = "\n... [runtime event truncated] ...\n"
 
@@ -25,7 +23,6 @@ class RuntimeEvent:
     content: str
     done: asyncio.Future[bool]
     is_active: Callable[[], bool] | None = None
-    delivery_context: Any | None = None
 
     def prompt(self) -> str:
         prefix = f'<runtime_event type="{self.kind.value}">\n'

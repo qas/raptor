@@ -2,6 +2,7 @@
 import argparse
 import json
 import os
+import select
 import signal
 import sys
 import time
@@ -14,16 +15,35 @@ from process_lock import (
     runtime_lock_status,
 )
 from runtime_paths import AGENT_WORKDIR, LOG_PATH, STATE_PATH
+from storage import (
+    FileTooLargeError,
+    ensure_private_directory,
+    read_bytes_bounded,
+)
 
 # ---------------------------------------------------------------------------
 # Runtime / daemon metadata
 # ---------------------------------------------------------------------------
 
 
+def _runtime_state_load_limit() -> int:
+    """Honor the state bound without importing application configuration."""
+    try:
+        return max(1024, int(os.getenv("MAX_STATE_LOAD_BYTES", "16777216")))
+    except ValueError:
+        return 16_777_216
+
+
 def runtime_info() -> dict[str, Any]:
     try:
-        persisted = json.loads(STATE_PATH.read_text())
-    except (OSError, UnicodeError, json.JSONDecodeError):
+        encoded = read_bytes_bounded(STATE_PATH, _runtime_state_load_limit())
+        persisted = json.loads(encoded)
+    except (
+        OSError,
+        UnicodeError,
+        FileTooLargeError,
+        json.JSONDecodeError,
+    ):
         return {}
     if not isinstance(persisted, dict):
         return {}
@@ -70,6 +90,56 @@ def runtime_uptime(info: dict[str, Any] | None = None) -> int:
 # ---------------------------------------------------------------------------
 # Daemon CLI
 # ---------------------------------------------------------------------------
+
+DAEMON_START_TIMEOUT_SECONDS = 60.0
+
+
+def _read_with_deadline(read_fd: int, deadline: float) -> bytes | None:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        return None
+    readable, _writable, _exceptional = select.select(
+        [read_fd],
+        [],
+        [],
+        remaining,
+    )
+    if not readable:
+        return None
+    return os.read(read_fd, 1)
+
+
+def _read_daemon_pid(read_fd: int, deadline: float) -> int | None:
+    payload = bytearray()
+    while len(payload) < 32:
+        chunk = _read_with_deadline(read_fd, deadline)
+        if not chunk:
+            return None
+        if chunk == b"\n":
+            break
+        payload.extend(chunk)
+    try:
+        pid = int(payload)
+    except ValueError:
+        return None
+    return pid if pid > 0 else None
+
+
+def _await_daemon_ready(read_fd: int) -> tuple[bool, int | None]:
+    deadline = time.monotonic() + DAEMON_START_TIMEOUT_SECONDS
+    pid = _read_daemon_pid(read_fd, deadline)
+    if pid is None:
+        return False, None
+    return _read_with_deadline(read_fd, deadline) == b"1", pid
+
+
+def signal_daemon_ready(write_fd: int) -> None:
+    """Release the launcher only after application initialization succeeds."""
+    try:
+        os.write(write_fd, b"1")
+    finally:
+        os.close(write_fd)
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -147,20 +217,25 @@ def stop_daemon() -> int:
     return 0
 
 
-def daemonize() -> None:
-    """Classic Unix double-fork daemonization."""
+def daemonize() -> int:
+    """Detach and return the application-readiness pipe in the daemon."""
 
-    LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    ensure_private_directory(LOG_PATH.parent)
     ready_read_fd, ready_write_fd = os.pipe()
     first_pid = os.fork()
 
     if first_pid > 0:
         os.close(ready_write_fd)
         try:
-            ready = os.read(ready_read_fd, 1)
+            ready, daemon_pid = _await_daemon_ready(ready_read_fd)
         finally:
             os.close(ready_read_fd)
-        if ready != b"1":
+        if not ready:
+            if daemon_pid is not None:
+                try:
+                    os.kill(daemon_pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
             release_runtime_lock()
             print("Raptor daemon failed to start", file=sys.stderr)
             raise SystemExit(1)
@@ -178,6 +253,7 @@ def daemonize() -> None:
         os._exit(0)
 
     try:
+        os.write(ready_write_fd, f"{os.getpid()}\n".encode("ascii"))
         os.chdir(str(AGENT_WORKDIR))
         os.umask(0o027)
         stdin_fd = os.open(os.devnull, os.O_RDONLY)
@@ -186,6 +262,7 @@ def daemonize() -> None:
             os.O_WRONLY | os.O_CREAT | os.O_APPEND,
             0o600,
         )
+        os.fchmod(log_fd, 0o600)
 
         os.dup2(stdin_fd, sys.stdin.fileno())
         os.dup2(log_fd, sys.stdout.fileno())
@@ -193,6 +270,7 @@ def daemonize() -> None:
         os.close(stdin_fd)
         os.close(log_fd)
         refresh_runtime_lock_owner()
-        os.write(ready_write_fd, b"1")
-    finally:
+    except BaseException:
         os.close(ready_write_fd)
+        raise
+    return ready_write_fd

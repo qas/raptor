@@ -2,6 +2,7 @@
 import asyncio
 import os
 import sys
+import tempfile
 import types
 import unittest
 from pathlib import Path
@@ -10,6 +11,9 @@ from unittest.mock import AsyncMock, patch
 import httpx
 
 _ROOT = Path(__file__).resolve().parent.parent
+_HOME = Path(tempfile.mkdtemp(prefix="raptor-chat-provider-tests-"))
+os.environ["RAPTOR_HOME"] = str(_HOME)
+os.environ["AGENT_WORKDIR"] = str(_HOME)
 os.environ.setdefault("TG_BOT_TOKEN", "test-token")
 os.environ.setdefault("TG_USER_ID", "1")
 os.environ.setdefault("TG_CHAT_IDS", "1")
@@ -264,7 +268,9 @@ class ChatProviderContractTests(unittest.IsolatedAsyncioTestCase):
     async def test_cancel_steering_deletes_user_message(self) -> None:
         from steering import handle_steering_action
 
-        session.state["pending_inputs"] = ["cancel me"]
+        session.state["pending_inputs"] = [
+            {"id": "abcd", "text": "cancel me"}
+        ]
         session.pending_steers["abcd"] = {
             "id": "abcd",
             "chat_id": "!room:example.org",
@@ -307,6 +313,9 @@ class ChatProviderContractTests(unittest.IsolatedAsyncioTestCase):
             "message_id": "$steering-controls",
             "status": "queued",
         }
+        session.state["pending_inputs"] = [
+            {"id": entry["id"], "text": entry["text"]}
+        ]
         session.pending_steers["abcd"] = entry
         await session.steer_queue.put(entry)
         event = IncomingAction(
@@ -339,6 +348,53 @@ class ChatProviderContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(selected, entry)
         self.assertEqual(entry["status"], "applied")
         self.assertNotIn("abcd", session.pending_steers)
+        self.assertEqual(session.state["pending_inputs"], [])
+
+    async def test_forced_steer_consumes_durable_pending_input(self) -> None:
+        from steering import handle_steering_action
+
+        entry = {
+            "id": "abcd",
+            "chat_id": "!room:example.org",
+            "text": "apply now",
+            "message_id": "$steering-controls",
+            "status": "queued",
+        }
+        session.state["pending_inputs"] = [
+            {"id": entry["id"], "text": entry["text"]}
+        ]
+        session.pending_steers["abcd"] = entry
+        event = IncomingAction(
+            action_id="$apply-action",
+            conversation_id="!room:example.org",
+            sender_id="@operator:example.org",
+            message_id="$steering-controls",
+            data="steer:abcd:apply",
+        )
+
+        with (
+            patch(
+                "steering.interrupt_root_turn",
+                AsyncMock(
+                    return_value=types.SimpleNamespace(
+                        completed=True,
+                        error=None,
+                    )
+                ),
+            ),
+            patch("steering.start_root_session") as start,
+        ):
+            handled = await handle_steering_action(event)
+
+        self.assertTrue(handled)
+        self.assertEqual(session.state["pending_inputs"], [])
+        self.assertNotIn("abcd", session.pending_steers)
+        start.assert_called_once_with(
+            "!room:example.org",
+            "apply now",
+            input_recorded=True,
+            delivery_context=None,
+        )
 
     async def test_cancelled_steer_claim_returns_to_queue(self) -> None:
         from controller import _dequeue_steer
@@ -371,7 +427,9 @@ class ChatProviderContractTests(unittest.IsolatedAsyncioTestCase):
     async def test_global_stop_discards_queued_steering(self) -> None:
         from steering import cancel_pending_steers
 
-        session.state["pending_inputs"] = ["queued"]
+        session.state["pending_inputs"] = [
+            {"id": "queued-id", "text": "queued"}
+        ]
         session.pending_steers["abcd"] = {
             "id": "abcd",
             "chat_id": "!room:example.org",
@@ -417,7 +475,10 @@ class ChatProviderContractTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(cancelled, 1)
         self.assertEqual(session.pending_steers, {"forced": forced})
-        self.assertEqual(session.state["pending_inputs"], ["keep me"])
+        self.assertEqual(
+            session.state["pending_inputs"],
+            [{"id": "forced", "text": "keep me"}],
+        )
         self.assertIs(await session.steer_queue.get(), forced)
         session.steer_queue.task_done()
 
@@ -880,7 +941,7 @@ class TelegramMultiChatTests(unittest.IsolatedAsyncioTestCase):
 
         delivery = AsyncMock()
         with patch.object(telegram, "send", delivery):
-            await provider.close_activity_surface(
+            await provider.finish_activity_surface(
                 "-1001/10",
                 "42/77",
                 snapshot,
@@ -996,7 +1057,7 @@ class TelegramTransportTests(unittest.IsolatedAsyncioTestCase):
             patch.object(telegram, "send", delivery),
         ):
             surface_id = await provider.open_activity_surface("1/10", snapshot)
-            await provider.close_activity_surface(
+            await provider.finish_activity_surface(
                 "1/10",
                 str(surface_id),
                 ActivitySnapshot(
@@ -1008,10 +1069,10 @@ class TelegramTransportTests(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertEqual(surface_id, "42/77")
-        call.assert_awaited_once()
-        self.assertEqual(call.await_args.args[0], "createForumTopic")
+        self.assertEqual(call.await_count, 1)
+        self.assertEqual(call.await_args_list[0].args[0], "createForumTopic")
         self.assertEqual(
-            call.await_args.args[1]["name"],
+            call.await_args_list[0].args[1]["name"],
             "Subagent: worker",
         )
         self.assertEqual(
@@ -1068,7 +1129,7 @@ class TelegramTransportTests(unittest.IsolatedAsyncioTestCase):
             patch.object(provider, "delete_message", cleanup),
             patch.object(telegram, "send", delivery),
         ):
-            await provider.close_activity_surface(
+            await provider.finish_activity_surface(
                 "1/10",
                 "42/77",
                 ActivitySnapshot(
@@ -1085,6 +1146,86 @@ class TelegramTransportTests(unittest.IsolatedAsyncioTestCase):
             "I found the complete issue",
         )
         self.assertIn(42, provider._chats[1].activity_topics)
+
+    async def test_activity_finish_retries_failed_preview_cleanup(self) -> None:
+        import telegram
+        from activity import ActivitySnapshot
+
+        provider = telegram.TelegramProvider()
+        provider._chats[1].is_forum = True
+        provider._chats[1].activity_topics[42] = (
+            telegram._TelegramActivityTopic(
+                reply_message_id=71,
+                reply_text="partial reply",
+            )
+        )
+        error = telegram.TelegramApiError(
+            "deleteMessage",
+            status_code=500,
+            error_code=500,
+            description="Internal Server Error",
+        )
+        delivery = AsyncMock()
+        with (
+            patch.object(provider, "delete_message", AsyncMock(side_effect=error)),
+            patch.object(telegram, "send", delivery),
+            self.assertRaises(telegram.TelegramApiError),
+        ):
+            await provider.finish_activity_surface(
+                "1/10",
+                "42/77",
+                ActivitySnapshot(
+                    activity_id="worker",
+                    title="Inspect target",
+                    status="completed",
+                    result="complete reply",
+                ),
+            )
+
+        topic = provider._chats[1].activity_topics[42]
+        self.assertEqual(topic.reply_message_id, 71)
+        delivery.assert_not_awaited()
+
+    async def test_missing_activity_preview_is_already_clean(self) -> None:
+        import telegram
+        from activity import ActivitySnapshot
+
+        provider = telegram.TelegramProvider()
+        provider._chats[1].is_forum = True
+        provider._chats[1].activity_topics[42] = (
+            telegram._TelegramActivityTopic(
+                reply_message_id=71,
+                reply_text="partial reply",
+            )
+        )
+        missing = telegram.TelegramApiError(
+            "deleteMessage",
+            status_code=400,
+            error_code=400,
+            description="Bad Request: message to delete not found",
+        )
+        delivery = AsyncMock()
+        with (
+            patch.object(provider, "delete_message", AsyncMock(side_effect=missing)),
+            patch.object(telegram, "send", delivery),
+        ):
+            result = await provider.finish_activity_surface(
+                "1/10",
+                "42/77",
+                ActivitySnapshot(
+                    activity_id="worker",
+                    title="Inspect target",
+                    status="completed",
+                    result="complete reply",
+                ),
+            )
+
+        self.assertTrue(result.finished)
+        self.assertTrue(result.result_delivered)
+        self.assertIsNone(
+            provider._chats[1].activity_topics[42].reply_message_id
+        )
+        delivery.assert_awaited_once_with("1/42", "complete reply")
 
     async def test_existing_subagent_topic_is_reused(self) -> None:
         import telegram
@@ -1111,8 +1252,130 @@ class TelegramTransportTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(surface_id, "42/77")
         delivery.assert_awaited_once_with("1/42", "Continue the review")
-        call.assert_not_awaited()
+        call.assert_awaited_once_with(
+            "reopenForumTopic",
+            {"chat_id": 1, "message_thread_id": 42},
+        )
         self.assertIn(42, provider._chats[1].activity_topics)
+
+    async def test_deleted_subagent_topic_is_replaced_on_continuation(
+        self,
+    ) -> None:
+        import telegram
+        from activity import ActivitySnapshot
+
+        provider = telegram.TelegramProvider()
+        provider._chats[1].is_forum = True
+        provider._chats[1].activity_topics[42] = (
+            telegram._TelegramActivityTopic()
+        )
+        deleted = telegram.TelegramApiError(
+            "reopenForumTopic",
+            status_code=400,
+            error_code=400,
+            description="Bad Request: topic not found",
+        )
+        task_delivery = AsyncMock(return_value=88)
+        with (
+            patch.object(
+                telegram,
+                "tg_call",
+                AsyncMock(
+                    side_effect=[deleted, {"message_thread_id": 43}],
+                ),
+            ),
+            patch.object(telegram, "_send_messages", task_delivery),
+        ):
+            surface_id = await provider.open_activity_surface(
+                "1/10",
+                ActivitySnapshot(
+                    activity_id="worker",
+                    title="Continue the review",
+                    status="running",
+                ),
+                "42/77",
+            )
+
+        self.assertEqual(surface_id, "43/88")
+        self.assertNotIn(42, provider._chats[1].activity_topics)
+        self.assertIn(43, provider._chats[1].activity_topics)
+
+    async def test_finishing_activity_keeps_topic_open(self) -> None:
+        import telegram
+        from activity import ActivitySnapshot
+
+        provider = telegram.TelegramProvider()
+        provider._chats[1].is_forum = True
+        provider._chats[1].activity_topics[42] = (
+            telegram._TelegramActivityTopic()
+        )
+        delivery = AsyncMock()
+        with patch.object(telegram, "send", delivery):
+            result = await provider.finish_activity_surface(
+                "1/10",
+                "42/77",
+                ActivitySnapshot(
+                    activity_id="worker",
+                    title="Task",
+                    status="completed",
+                    result="done",
+                ),
+            )
+        self.assertTrue(result.result_delivered)
+        delivery.assert_awaited_once_with("1/42", "done")
+        self.assertIn(42, provider._chats[1].activity_topics)
+
+    async def test_activity_input_is_appended_as_plain_message(self) -> None:
+        import telegram
+
+        provider = telegram.TelegramProvider()
+        provider._chats[1].is_forum = True
+        provider._chats[1].activity_topics[42] = (
+            telegram._TelegramActivityTopic()
+        )
+        delivery = AsyncMock()
+        with patch.object(telegram, "send", delivery):
+            await provider.append_activity_message(
+                "1/10",
+                "42/77",
+                "check the logs",
+            )
+
+        delivery.assert_awaited_once_with("1/42", "check the logs")
+
+    async def test_deleting_activity_removes_topic_mapping(self) -> None:
+        import telegram
+
+        provider = telegram.TelegramProvider()
+        provider._chats[1].is_forum = True
+        provider._chats[1].activity_topics[42] = (
+            telegram._TelegramActivityTopic()
+        )
+        delete = AsyncMock()
+        with patch.object(telegram, "_delete_forum_topic", delete):
+            await provider.delete_activity_surface("1/10", "42/77")
+
+        delete.assert_awaited_once_with(1, 42)
+        self.assertNotIn(42, provider._chats[1].activity_topics)
+
+    async def test_topic_open_state_is_idempotent(self) -> None:
+        import telegram
+
+        error = telegram.TelegramApiError(
+            "reopenForumTopic",
+            status_code=400,
+            error_code=400,
+            description="Bad Request: TOPIC_NOT_MODIFIED",
+        )
+
+        with patch.object(
+            telegram,
+            "tg_call",
+            AsyncMock(side_effect=error),
+        ):
+            reopened = await telegram._reopen_forum_topic(1, 42)
+
+        self.assertTrue(reopened)
 
     async def test_activity_update_propagates_real_edit_errors(self) -> None:
         import telegram
@@ -1217,6 +1480,46 @@ class TelegramTransportTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result, "sent")
         self.assertEqual(request_count, 2)
         defer.assert_awaited_once_with(1, 9.0)
+
+    async def test_429_retries_are_bounded(self) -> None:
+        import telegram
+
+        response = httpx.Response(
+            429,
+            json={
+                "ok": False,
+                "error_code": 429,
+                "description": "Too Many Requests",
+                "parameters": {"retry_after": 2},
+            },
+        )
+        client = httpx.AsyncClient(
+            transport=httpx.MockTransport(lambda _request: response)
+        )
+        try:
+            with (
+                patch.object(telegram, "_client", client),
+                patch.object(telegram, "TG_MAX_RETRIES", 1),
+                patch.object(
+                    telegram,
+                    "_reserve_telegram_request",
+                    AsyncMock(),
+                ),
+                patch.object(
+                    telegram,
+                    "_defer_telegram_requests",
+                    AsyncMock(),
+                ) as defer,
+                self.assertRaises(telegram.TelegramApiError),
+            ):
+                await telegram.tg_call(
+                    "sendMessage",
+                    {"chat_id": 1, "text": "hello"},
+                )
+        finally:
+            await client.aclose()
+
+        self.assertEqual(defer.await_count, 2)
 
     async def test_rich_text_does_not_retry_rate_limit_as_plain_text(
         self,

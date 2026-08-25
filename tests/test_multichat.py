@@ -1,15 +1,126 @@
 """Main-chat ownership and concurrency invariants."""
 
 import asyncio
+import copy
+import json
+import os
+import tempfile
 import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+_HOME = Path(tempfile.mkdtemp(prefix="raptor-multichat-tests-"))
+os.environ["RAPTOR_HOME"] = str(_HOME)
+os.environ["AGENT_WORKDIR"] = str(_HOME)
 
 import session
 from chat_store import append_item, list_sessions, session_chat_key
+from engine import assistant_message
 from tools import chat_history_tool
 from turn_runtime import TurnKind, turns
 
 
 class MultichatTests(unittest.IsolatedAsyncioTestCase):
+    def test_recovery_markers_fit_after_state_reaches_admission_limit(
+        self,
+    ) -> None:
+        runtime = session.current_runtime()
+        initial_state = copy.deepcopy(runtime.state)
+        candidate_state = copy.deepcopy(initial_state)
+        candidate_state["pending_inputs"] = [
+            {"id": "near-limit", "text": "x" * 512}
+        ]
+        entry = session._root_state["chats"][runtime.key]
+        candidate_root = {
+            **session._root_state,
+            "chats": {
+                **session._root_state["chats"],
+                runtime.key: {**entry, "state": candidate_state},
+            },
+        }
+        admitted_size = len(
+            json.dumps(
+                session._state_without_recovery_markers(candidate_root),
+                indent=2,
+                ensure_ascii=False,
+            ).encode("utf-8")
+        )
+        max_bytes = admitted_size + session._state_recovery_reserve(
+            candidate_root
+        )
+        state_path = Path(tempfile.mkdtemp()) / "state.json"
+        session_id = str(runtime.state["current_session_id"])
+        try:
+            with (
+                patch.object(session, "STATE_PATH", state_path),
+                patch.object(
+                    session,
+                    "MAX_STATE_LOAD_BYTES",
+                    max_bytes,
+                ),
+            ):
+                session.queue_pending_steer("near-limit", "x" * 512)
+                session.set_active_root_turn(
+                    {"id": "turn-1", "session_id": session_id}
+                )
+                answer = append_item(
+                    session_id,
+                    assistant_message("answer"),
+                    source="assistant",
+                )
+                session.set_pending_delivery(
+                    session_id,
+                    int(answer["seq"]),
+                )
+                with self.assertRaises(session.StateCapacityError):
+                    session.queue_pending_steer("overflow", "y" * 8192)
+
+                self.assertLessEqual(
+                    len(state_path.read_bytes()),
+                    max_bytes,
+                )
+                self.assertEqual(
+                    runtime.state["pending_delivery"],
+                    {"session_id": session_id, "seq": answer["seq"]},
+                )
+        finally:
+            runtime.state.clear()
+            runtime.state.update(initial_state)
+
+    def test_oversized_steer_is_rejected_without_mutating_state(self) -> None:
+        runtime = session.current_runtime()
+        initial_pending = list(runtime.state["pending_inputs"])
+        root_bytes = len(
+            json.dumps(
+                session._state_without_recovery_markers(
+                    session._root_state
+                ),
+                indent=2,
+                ensure_ascii=False,
+            ).encode("utf-8")
+        )
+        state_path = Path(tempfile.mkdtemp()) / "state.json"
+        max_bytes = (
+            root_bytes
+            + 128
+            + session._state_recovery_reserve(session._root_state)
+        )
+        with (
+            patch.object(session, "STATE_PATH", state_path),
+            patch.object(
+                session,
+                "MAX_STATE_LOAD_BYTES",
+                max_bytes,
+            ),
+        ):
+            session.save_state()
+            before = state_path.read_bytes()
+            with self.assertRaises(session.StateCapacityError):
+                session.queue_pending_steer("large", "x" * 1024)
+
+        self.assertEqual(runtime.state["pending_inputs"], initial_pending)
+        self.assertEqual(state_path.read_bytes(), before)
+
     async def test_chat_state_and_turns_are_isolated(self) -> None:
         first = session.ensure_chat("test-provider:first")
         second = session.ensure_chat("test-provider:second")

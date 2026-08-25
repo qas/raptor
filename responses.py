@@ -1,8 +1,11 @@
 """OpenAI-compatible Responses API client."""
 import asyncio
 import json
+import math
 import time
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
+from email.utils import parsedate_to_datetime
 from typing import Any, TypeVar
 
 import httpx
@@ -30,12 +33,49 @@ from response_errors import (
     ContextLengthError,
     IncompleteResponsesStreamError,
     MalformedToolCallError,
+    PartialResponsesStreamError,
     TransientResponsesError,
 )
 
 
 _RETRYABLE_HTTP_STATUSES = {408, 429, 500, 502, 503, 504}
 _ResponseT = TypeVar("_ResponseT")
+
+
+@dataclass
+class ResponsesStreamReplayGuard:
+    """Prevent replay after a stream has projected public output."""
+
+    public_output_seen: bool = False
+
+    def observe(self, snapshot: str) -> None:
+        if snapshot:
+            self.public_output_seen = True
+
+    def wrap(
+        self,
+        callback: Callable[[str], Awaitable[None]] | None,
+    ) -> Callable[[str], Awaitable[None]] | None:
+        if callback is None:
+            return None
+
+        async def project(snapshot: str) -> None:
+            self.observe(snapshot)
+            await callback(snapshot)
+
+        return project
+
+    def reject_unsafe_replay(
+        self,
+        exc: Exception,
+        *,
+        operation: str,
+    ) -> None:
+        if self.public_output_seen and is_transient_responses_error(exc):
+            raise PartialResponsesStreamError(
+                f"{operation} interrupted after public output; "
+                "automatic replay was suppressed"
+            ) from exc
 
 
 def _error_text(payload: Any) -> str:
@@ -122,6 +162,25 @@ def is_transient_responses_error(exc: BaseException) -> bool:
     return False
 
 
+def retry_after_seconds(exc: BaseException) -> float | None:
+    """Return a valid HTTP Retry-After delay from a failed response."""
+    if not isinstance(exc, httpx.HTTPStatusError):
+        return None
+    raw = exc.response.headers.get("Retry-After", "").strip()
+    if not raw:
+        return None
+    try:
+        delay = float(raw)
+    except ValueError:
+        try:
+            delay = parsedate_to_datetime(raw).timestamp() - time.time()
+        except (TypeError, ValueError, OverflowError):
+            return None
+    if not math.isfinite(delay):
+        return None
+    return max(0.0, delay)
+
+
 async def retry_transient_response(
     request: Callable[[], Awaitable[_ResponseT]],
     *,
@@ -163,6 +222,10 @@ async def retry_transient_response(
                     f"{operation} failed after {max_retries} retries: {exc}"
                 ) from exc
             delay = retry_base_seconds * (2 ** (attempt - 1))
+            retry_after = retry_after_seconds(exc)
+            if retry_after is not None:
+                delay = max(delay, retry_after)
+                payload["retry_after_seconds"] = retry_after
             payload["delay_seconds"] = delay
             log_event("responses", "retrying", payload)
             if delay:
@@ -614,6 +677,7 @@ async def _responses_create_stream_once(
     | None = None,
     reasoning_effort: str | None = RESPONSES_REASONING_EFFORT,
     reasoning_summary: str | None = RESPONSES_REASONING_SUMMARY,
+    replay_guard: ResponsesStreamReplayGuard | None = None,
 ) -> dict[str, Any]:
     payload = build_response_payload(
         input_items,
@@ -678,6 +742,8 @@ async def _responses_create_stream_once(
     async def collect_text(snapshot: str) -> None:
         nonlocal text_buffer, last_draft, last_draft_text, draft_task
         text_buffer = snapshot
+        if replay_guard is not None:
+            replay_guard.observe(snapshot)
         now = time.monotonic()
         if (
             CHAT_STREAMING
@@ -697,15 +763,24 @@ async def _responses_create_stream_once(
         )
         reasoning_text = snapshot
         if delta:
+            if replay_guard is not None:
+                replay_guard.observe(delta)
             await publish_reasoning_summary(delta)
 
-    final_response = await stream_response_payload(
-        url=f"{RESPONSES_BASE_URL}/responses",
-        headers=auth_headers(),
-        payload=payload,
-        on_text=collect_text,
-        on_reasoning_summary=collect_reasoning,
-    )
+    try:
+        final_response = await stream_response_payload(
+            url=f"{RESPONSES_BASE_URL}/responses",
+            headers=auth_headers(),
+            payload=payload,
+            on_text=collect_text,
+            on_reasoning_summary=collect_reasoning,
+        )
+    except BaseException:
+        if draft_task is not None and not draft_task.done():
+            draft_task.cancel()
+        if draft_task is not None:
+            await asyncio.gather(draft_task, return_exceptions=True)
+        raise
 
     if (
         CHAT_STREAMING
@@ -729,16 +804,26 @@ async def responses_create_stream(
     reasoning_effort: str | None = RESPONSES_REASONING_EFFORT,
     reasoning_summary: str | None = RESPONSES_REASONING_SUMMARY,
 ) -> dict[str, Any]:
+    replay_guard = ResponsesStreamReplayGuard()
+
     async def request() -> dict[str, Any]:
-        return await _responses_create_stream_once(
-            chat_id,
-            input_items,
-            tools=tools,
-            extra_instructions=extra_instructions,
-            max_output_tokens=max_output_tokens,
-            reasoning_effort=reasoning_effort,
-            reasoning_summary=reasoning_summary,
-        )
+        try:
+            return await _responses_create_stream_once(
+                chat_id,
+                input_items,
+                tools=tools,
+                extra_instructions=extra_instructions,
+                max_output_tokens=max_output_tokens,
+                reasoning_effort=reasoning_effort,
+                reasoning_summary=reasoning_summary,
+                replay_guard=replay_guard,
+            )
+        except Exception as exc:
+            replay_guard.reject_unsafe_replay(
+                exc,
+                operation="Responses stream",
+            )
+            raise
 
     return await retry_transient_response(
         request,

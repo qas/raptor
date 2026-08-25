@@ -2,10 +2,15 @@
 import asyncio
 import os
 import sys
+import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import AsyncMock, patch
 
 _ROOT = Path(__file__).resolve().parent.parent
+_HOME = Path(tempfile.mkdtemp(prefix="raptor-multi-provider-tests-"))
+os.environ["RAPTOR_HOME"] = str(_HOME)
+os.environ["AGENT_WORKDIR"] = str(_HOME)
 os.environ.setdefault("TG_BOT_TOKEN", "test-token")
 os.environ.setdefault("TG_USER_ID", "1")
 if str(_ROOT) not in sys.path:
@@ -19,7 +24,7 @@ from chat_provider import (
 )
 from multi_provider import MultiProvider
 from responses_provider import ResponsesApiProvider
-from activity import ActivitySnapshot
+from activity import ActivityFinishResult, ActivitySnapshot
 
 
 class QueueProvider:
@@ -150,15 +155,33 @@ class QueueProvider:
             ("activity_update", conversation_id, surface_id, snapshot)
         )
 
-    async def close_activity_surface(
+    async def append_activity_message(
+        self,
+        conversation_id,
+        surface_id,
+        text,
+    ) -> None:
+        self.calls.append(
+            ("activity_message", conversation_id, surface_id, text)
+        )
+
+    async def finish_activity_surface(
         self,
         conversation_id,
         surface_id,
         snapshot,
-    ) -> None:
+    ):
         self.calls.append(
-            ("activity_close", conversation_id, surface_id, snapshot)
+            ("activity_finish", conversation_id, surface_id, snapshot)
         )
+        return ActivityFinishResult(True, bool(snapshot.result))
+
+    async def delete_activity_surface(
+        self,
+        conversation_id,
+        surface_id,
+    ) -> None:
+        self.calls.append(("activity_delete", conversation_id, surface_id))
 
     def restore_activity_surface(self, conversation_id, surface_id) -> None:
         self.calls.append(("activity_restore", conversation_id, surface_id))
@@ -179,6 +202,23 @@ class MultiProviderTests(unittest.IsolatedAsyncioTestCase):
 
     async def asyncTearDown(self) -> None:
         await self.multi.close()
+
+    async def test_close_logs_each_provider_failure(self) -> None:
+        with (
+            patch.object(
+                self.telegram,
+                "close",
+                AsyncMock(side_effect=RuntimeError("failed")),
+            ),
+            patch("multi_provider.log_exception") as log_exception,
+        ):
+            await self.multi.close()
+
+        log_exception.assert_called_once()
+        self.assertEqual(log_exception.call_args.args[:2], (
+            "telegram",
+            "shutdown_error",
+        ))
 
     async def test_routes_message_and_reply_to_origin_provider(self) -> None:
         await self.api.events.put(
@@ -213,6 +253,22 @@ class MultiProviderTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIn(
             ("reasoning", "api:default", "Safe summary"),
+            self.api.calls,
+        )
+
+    def test_detached_delivery_context_routes_to_origin_provider(self) -> None:
+        token = self.multi.activate_delivery_context(
+            "responses_api:api:default",
+            None,
+        )
+        self.multi.restore_delivery_context(token)
+
+        self.assertIn(
+            ("activate_delivery_context", "api:default", None),
+            self.api.calls,
+        )
+        self.assertIn(
+            ("restore_delivery_context", "responses_api:token"),
             self.api.calls,
         )
 
@@ -321,17 +377,32 @@ class MultiProviderTests(unittest.IsolatedAsyncioTestCase):
             str(surface_id),
             snapshot,
         )
-        await self.multi.close_activity_surface(
+        await self.multi.append_activity_message(
+            conversation_id,
+            str(surface_id),
+            "next task",
+        )
+        await self.multi.finish_activity_surface(
             conversation_id,
             str(surface_id),
             snapshot,
+        )
+        await self.multi.delete_activity_surface(
+            conversation_id,
+            str(surface_id),
         )
 
         self.assertEqual(surface_id, "telegram:topic/message")
         operations = [call[0] for call in self.telegram.calls]
         self.assertEqual(
-            operations[-3:],
-            ["activity_open", "activity_update", "activity_close"],
+            operations[-5:],
+            [
+                "activity_open",
+                "activity_update",
+                "activity_message",
+                "activity_finish",
+                "activity_delete",
+            ],
         )
         self.assertFalse(
             any(call[0].startswith("activity_") for call in self.api.calls)

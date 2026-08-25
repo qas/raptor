@@ -1,10 +1,12 @@
 """Transcript durability during agent turns."""
 import asyncio
 import copy
+import json
 import os
 import sys
 import tempfile
 import unittest
+from contextlib import nullcontext
 from pathlib import Path
 from unittest.mock import patch
 
@@ -135,6 +137,51 @@ class TranscriptDurabilityTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("function_call_output", types)
         self.assertIn("message", types)
 
+    async def test_post_delivery_compaction_failure_keeps_success(self) -> None:
+        sent: list[str] = []
+
+        async def answer(*_args, **_kwargs):
+            return {
+                "output": [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [
+                            {"type": "output_text", "text": "done"}
+                        ],
+                    }
+                ]
+            }
+
+        async def capture(_chat_id, text, **_kwargs):
+            sent.append(text)
+
+        async def fail_maintenance(_chat_id):
+            raise RuntimeError("checkpoint backend unavailable")
+
+        with (
+            patch.object(agent_mod, "responses_create_stream", answer),
+            patch.object(agent_mod, "send", capture),
+            patch.object(agent_mod, "typing_loop", _noop),
+            patch.object(
+                agent_mod,
+                "maybe_auto_compact",
+                fail_maintenance,
+            ),
+            patch.object(agent_mod, "log_event") as logged,
+        ):
+            result = await agent_mod.agent_turn(1, "finish")
+
+        self.assertTrue(result)
+        self.assertEqual(sent, ["done"])
+        self.assertIsNone(session.state["pending_delivery"])
+        self.assertTrue(
+            any(
+                call.args[1] == "post_delivery_compaction_error"
+                for call in logged.call_args_list
+            )
+        )
+
     async def test_malformed_tool_call_closes_the_durable_turn(self) -> None:
         sid = str(session.state["current_session_id"])
         sent: list[str] = []
@@ -231,6 +278,24 @@ class TranscriptDurabilityTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsNone(session.state["active_root_turn"])
 
+    async def test_delivery_failure_does_not_spin_controller(self) -> None:
+        with (
+            patch.object(
+                controller,
+                "flush_pending_delivery",
+                return_value=False,
+            ),
+            patch.object(
+                controller,
+                "_pending_controller_work",
+                return_value=True,
+            ),
+            patch.object(controller, "start_root_session") as restart,
+        ):
+            await controller.run_root_session(1, None)
+
+        restart.assert_not_called()
+
     async def test_failed_telegram_send_keeps_assistant_transcript(
         self,
     ) -> None:
@@ -272,6 +337,95 @@ class TranscriptDurabilityTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIn("reply-text", texts)
         self.assertIn("hello", texts)
+        reference = session.state["pending_delivery"]
+        self.assertEqual(reference["session_id"], sid)
+        restart_state = self._chat_dir / "restart-state.json"
+        restart_state.write_text(
+            json.dumps(
+                {
+                    "schema_version": session.STATE_SCHEMA_VERSION,
+                    "model": session.state.get("model"),
+                    "runtime": {},
+                    "chats": {
+                        session.current_runtime().key: {
+                            "conversation_id": 1,
+                            "state": dict(session.state),
+                        }
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        with patch.object(session, "STATE_PATH", restart_state):
+            restarted = session.load_state()
+        restarted_chat = restarted["chats"][session.current_runtime().key]
+        self.assertEqual(
+            restarted_chat["state"]["pending_delivery"],
+            reference,
+        )
+
+        delivered: list[str] = []
+
+        async def recover(_chat_id, text):
+            delivered.append(text)
+
+        with (
+            patch.object(agent_mod, "send", recover),
+            patch.object(
+                agent_mod,
+                "detached_delivery_context",
+                return_value=nullcontext(),
+            ),
+        ):
+            recovered = await agent_mod.flush_pending_delivery(1)
+
+        self.assertTrue(recovered)
+        self.assertEqual(delivered, ["reply-text"])
+        self.assertIsNone(session.state["pending_delivery"])
+
+    async def test_prepared_delivery_without_event_is_abandoned(self) -> None:
+        sid = str(session.state["current_session_id"])
+        seq = chat_store.next_event_seq(sid)
+        session.set_pending_delivery(sid, seq)
+        restart_state = self._chat_dir / "prepared-state.json"
+        restart_state.write_text(
+            json.dumps(
+                {
+                    "schema_version": session.STATE_SCHEMA_VERSION,
+                    "model": session.state.get("model"),
+                    "runtime": {},
+                    "chats": {
+                        session.current_runtime().key: {
+                            "conversation_id": 1,
+                            "state": dict(session.state),
+                        }
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        with chat_store.chat_path(sid).open("ab") as handle:
+            handle.write(b'{"type":"item","seq":')
+        chat_store._SEQ_CACHE.clear()
+        with patch.object(session, "STATE_PATH", restart_state):
+            restarted = session.load_state()
+        restarted_chat = restarted["chats"][session.current_runtime().key]
+        self.assertEqual(
+            restarted_chat["state"]["pending_delivery"],
+            {"session_id": sid, "seq": seq},
+        )
+
+        sent: list[str] = []
+
+        async def capture(_chat_id, text):
+            sent.append(text)
+
+        with patch.object(agent_mod, "send", capture):
+            recovered = await agent_mod.flush_pending_delivery(1)
+
+        self.assertTrue(recovered)
+        self.assertEqual(sent, [])
+        self.assertIsNone(session.state["pending_delivery"])
 
     async def test_recovery_prompt_does_not_embed_raw_tool_events(
         self,

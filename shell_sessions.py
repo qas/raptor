@@ -8,15 +8,16 @@ import os
 import pty
 import secrets
 import signal
+import sys
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
+import session as runtime_session
 from chat_provider import ConversationId
 from config import AGENT_WORKDIR, MAX_TOOL_OUTPUT, SHELL_TIMEOUT
-from observability import log_event
-import session as runtime_session
-
+from observability import log_event, log_shell_start
 
 MAX_YIELD_TIME_MS = 30_000
 MAX_POLL_TIME_MS = 300_000
@@ -26,9 +27,12 @@ MIN_POLL_TIME_MS = 5_000
 DEFAULT_YIELD_TIME_MS = 10_000
 DEFAULT_POLL_TIME_MS = 5_000
 DEFAULT_WRITE_TIME_MS = 250
-TERMINATION_GRACE_SECONDS = 1.0
+# The supervisor gives its child group one second to exit before SIGKILL.
+# The owner must wait longer so it never kills the supervisor mid-cleanup.
+TERMINATION_GRACE_SECONDS = 2.0
 MAX_RETAINED_SESSIONS = 50
 MAX_LIVE_SESSIONS = 64
+_SUPERVISOR_PATH = Path(__file__).with_name("shell_supervisor.py")
 
 
 class HeadTailBuffer:
@@ -81,6 +85,7 @@ class ShellSession:
     timeout: int | None
     tty: bool = False
     pty_write_fd: int | None = None
+    liveness_write_fd: int | None = None
     started_at: float = field(default_factory=time.time)
     status: str = "running"
     exit_code: int | None = None
@@ -100,7 +105,6 @@ class ShellSession:
 
 
 _sessions: dict[str, ShellSession] = {}
-_completion_events: asyncio.Queue[str] = asyncio.Queue()
 _spawning_sessions = 0
 
 
@@ -173,7 +177,7 @@ async def _terminate(session: ShellSession) -> None:
     process = session.process
     if process.returncode is not None:
         return
-    _signal_process_group(process, signal.SIGTERM)
+    _close_liveness_guard(session)
     try:
         await asyncio.wait_for(
             process.wait(),
@@ -182,6 +186,43 @@ async def _terminate(session: ShellSession) -> None:
     except asyncio.TimeoutError:
         _signal_process_group(process, signal.SIGKILL)
         await process.wait()
+
+
+def _close_liveness_guard(session: ShellSession) -> None:
+    fd = session.liveness_write_fd
+    if fd is None:
+        return
+    try:
+        os.close(fd)
+    except OSError:
+        pass
+    session.liveness_write_fd = None
+
+
+def _release_start_gate(fd: int) -> None:
+    os.write(fd, b"1")
+
+
+async def _abort_unstarted_shell(
+    shell_session: ShellSession,
+    start_fd: int,
+    *,
+    stage: str,
+    error: BaseException,
+) -> dict[str, Any]:
+    try:
+        os.close(start_fd)
+    except OSError:
+        pass
+    shell_session.detached = False
+    shell_session.initial_decided.set()
+    await _terminate(shell_session)
+    await shell_session.done.wait()
+    _sessions.pop(shell_session.id, None)
+    return {
+        "ok": False,
+        "error": f"shell {stage} failed: {type(error).__name__}",
+    }
 
 
 async def _monitor(
@@ -236,6 +277,7 @@ async def _monitor(
             except OSError:
                 pass
             session.pty_write_fd = None
+        _close_liveness_guard(session)
         session.completed_at = time.time()
         session.done.set()
         await session.initial_decided.wait()
@@ -245,7 +287,7 @@ async def _monitor(
             and session.status != "cancelled"
         ):
             session.completion_pending = True
-            await _completion_events.put(session.id)
+            _queue_shell_completion(session.id)
         log_event(
             "shell",
             "completed",
@@ -335,7 +377,7 @@ def _prune_sessions() -> None:
         (
             item
             for item in _sessions.values()
-            if item.status != "running"
+            if item.status != "running" and not item.completion_pending
         ),
         key=lambda item: item.completed_at or item.started_at,
     )
@@ -391,22 +433,42 @@ async def run_shell(
             "ok": False,
             "error": f"too many live shell sessions (limit {MAX_LIVE_SESSIONS})",
         }
+    pending_completions = sum(
+        item.completion_pending for item in _sessions.values()
+    )
+    if pending_completions >= MAX_RETAINED_SESSIONS:
+        return {
+            "ok": False,
+            "error": (
+                "pending shell completions must be delivered before more "
+                "shell sessions can start"
+            ),
+        }
     _spawning_sessions += 1
     pty_write_fd: int | None = None
+    liveness_read_fd: int | None = None
+    liveness_write_fd: int | None = None
+    start_read_fd: int | None = None
+    start_write_fd: int | None = None
     try:
+        liveness_read_fd, liveness_write_fd = os.pipe()
+        start_read_fd, start_write_fd = os.pipe()
         if tty:
             master_fd, slave_fd = pty.openpty()
             try:
                 try:
                     process = await asyncio.create_subprocess_exec(
-                        "/bin/bash",
-                        "-c",
+                        sys.executable,
+                        str(_SUPERVISOR_PATH),
+                        str(liveness_read_fd),
+                        str(start_read_fd),
                         command,
                         cwd=str(AGENT_WORKDIR),
                         stdin=slave_fd,
                         stdout=slave_fd,
                         stderr=slave_fd,
                         start_new_session=True,
+                        pass_fds=(liveness_read_fd, start_read_fd),
                     )
                 except BaseException:
                     os.close(master_fd)
@@ -432,18 +494,31 @@ async def run_shell(
             stderr_stream: asyncio.StreamReader | None = None
         else:
             process = await asyncio.create_subprocess_exec(
-                "/bin/bash",
-                "-c",
+                sys.executable,
+                str(_SUPERVISOR_PATH),
+                str(liveness_read_fd),
+                str(start_read_fd),
                 command,
                 cwd=str(AGENT_WORKDIR),
                 stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 start_new_session=True,
+                pass_fds=(liveness_read_fd, start_read_fd),
             )
             stdout_stream = process.stdout
             stderr_stream = process.stderr
+    except BaseException:
+        if liveness_write_fd is not None:
+            os.close(liveness_write_fd)
+        if start_write_fd is not None:
+            os.close(start_write_fd)
+        raise
     finally:
+        if liveness_read_fd is not None:
+            os.close(liveness_read_fd)
+        if start_read_fd is not None:
+            os.close(start_read_fd)
         _spawning_sessions -= 1
     shell_session = ShellSession(
         id=_new_session_id(),
@@ -455,6 +530,7 @@ async def run_shell(
         timeout=timeout,
         tty=tty,
         pty_write_fd=pty_write_fd,
+        liveness_write_fd=liveness_write_fd,
     )
     _sessions[shell_session.id] = shell_session
     stdout_task = asyncio.create_task(
@@ -466,6 +542,34 @@ async def run_shell(
     shell_session.monitor_task = asyncio.create_task(
         _monitor(shell_session, stdout_task, stderr_task)
     )
+    try:
+        log_shell_start(
+            session_id=shell_session.id,
+            command=command,
+            chat_id=shell_session.chat_id,
+            parent_session_id=parent_session_id,
+            pid=process.pid,
+            timeout=timeout,
+            tty=tty,
+        )
+    except Exception as exc:
+        return await _abort_unstarted_shell(
+            shell_session,
+            start_write_fd,
+            stage="audit",
+            error=exc,
+        )
+    try:
+        _release_start_gate(start_write_fd)
+    except OSError as exc:
+        return await _abort_unstarted_shell(
+            shell_session,
+            start_write_fd,
+            stage="start",
+            error=exc,
+        )
+    else:
+        os.close(start_write_fd)
     try:
         if yield_ms:
             await asyncio.wait_for(
@@ -490,6 +594,11 @@ async def write_stdin(args: dict[str, Any]) -> dict[str, Any]:
     if shell_session is None:
         return {"ok": False, "error": f"unknown shell session: {session_id}"}
     chars = str(args.get("chars") or "")
+    if len(chars) > MAX_TOOL_OUTPUT:
+        return {
+            "ok": False,
+            "error": f"shell input exceeds {MAX_TOOL_OUTPUT} characters",
+        }
     requested_yield = int(
         args.get("yield_time_ms")
         if args.get("yield_time_ms") is not None
@@ -555,7 +664,7 @@ async def requeue_deferred_shell_completions() -> int:
     ]
     for item in items:
         item.completion_attempts = 0
-        await _completion_events.put(item.id)
+        _queue_shell_completion(item.id)
     return len(items)
 
 
@@ -647,66 +756,83 @@ def _completion_prompt(session: ShellSession) -> str:
     )
 
 
-async def shell_completion_event_loop() -> None:
+def _queue_shell_completion(session_id: str) -> bool:
     from controller import enqueue_runtime_event
     from runtime_events import RuntimeEventKind
-    while True:
-        session_id = await _completion_events.get()
+
+    item = _sessions.get(session_id)
+    if item is None or not item.completion_pending:
+        return False
+    with runtime_session.bound_chat(item.chat_id):
+        current_session_id = runtime_session.state.get("current_session_id")
+        if (
+            item.parent_session_id is not None
+            and str(current_session_id) != item.parent_session_id
+        ):
+            item.completion_pending = False
+            return False
         try:
-            item = _sessions.get(session_id)
-            if item is None or not item.completion_pending:
-                continue
-            with runtime_session.bound_chat(item.chat_id):
-                current_session_id = runtime_session.state.get(
-                    "current_session_id"
-                )
-                if (
-                    item.parent_session_id is not None
-                    and str(current_session_id) != item.parent_session_id
-                ):
-                    item.completion_pending = False
-                    continue
-                try:
-                    delivered = await enqueue_runtime_event(
-                        item.chat_id,
-                        RuntimeEventKind.SHELL_COMPLETED,
-                        _completion_prompt(item),
-                        is_active=lambda: item.completion_pending,
-                    )
-                except asyncio.CancelledError:
-                    raise
-                except Exception as exc:
-                    delivered = False
-                    log_event(
-                        "shell",
-                        "completion_delivery_error",
-                        {
-                            "session_id": item.id,
-                            "type": type(exc).__name__,
-                            "message": str(exc),
-                        },
-                    )
-            if delivered:
-                item.completion_pending = False
-                item.completion_attempts = 0
-            else:
-                item.completion_attempts += 1
-                log_event(
-                    "shell",
-                    "completion_deferred",
-                    {
-                        "session_id": item.id,
-                        "attempts": item.completion_attempts,
-                    },
-                )
-        finally:
-            _completion_events.task_done()
+            completion = enqueue_runtime_event(
+                item.chat_id,
+                RuntimeEventKind.SHELL_COMPLETED,
+                _completion_prompt(item),
+                is_active=lambda: item.completion_pending,
+            )
+        except Exception as exc:
+            log_event(
+                "shell",
+                "completion_delivery_error",
+                {
+                    "session_id": item.id,
+                    "type": type(exc).__name__,
+                    "message": str(exc),
+                },
+            )
+            item.completion_attempts = 1
+            return False
+
+    def completed(done: asyncio.Future[bool]) -> None:
+        current = _sessions.get(session_id)
+        if current is None or not current.completion_pending:
+            return
+        try:
+            delivered = not done.cancelled() and bool(done.result())
+        except Exception as exc:
+            delivered = False
+            log_event(
+                "shell",
+                "completion_delivery_error",
+                {
+                    "session_id": session_id,
+                    "type": type(exc).__name__,
+                    "message": str(exc),
+                },
+            )
+        if delivered:
+            current.completion_pending = False
+            current.completion_attempts = 0
+            log_event(
+                "shell",
+                "completion_delivered",
+                {"session_id": session_id},
+            )
+        else:
+            current.completion_attempts += 1
+            log_event(
+                "shell",
+                "completion_deferred",
+                {
+                    "session_id": session_id,
+                    "attempts": current.completion_attempts,
+                },
+            )
+
+    completion.add_done_callback(completed)
+    return True
 
 
 async def reset_shell_sessions_for_tests() -> None:
-    global _completion_events
     for item in tuple(_sessions.values()):
         with runtime_session.bound_chat(item.chat_id):
             await cancel_shell_sessions()
     _sessions.clear()
-    _completion_events = asyncio.Queue()

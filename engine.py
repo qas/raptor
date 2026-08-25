@@ -100,6 +100,10 @@ RecordItems = Callable[
     [list[dict[str, Any]], str],
     None,
 ]
+RecordTerminalItems = Callable[
+    [list[dict[str, Any]], str],
+    None,
+]
 ReportActivity = Callable[[str], None]
 
 
@@ -184,6 +188,7 @@ async def run_agent(
     checkpoint: Checkpoint | None = None,
     compact_context: CompactContext | None = None,
     record_items: RecordItems | None = None,
+    record_terminal_items: RecordTerminalItems | None = None,
     report_activity: ReportActivity | None = None,
 ) -> dict[str, Any]:
     turn_inputs: list[dict[str, Any]] = []
@@ -231,7 +236,9 @@ async def run_agent(
             if not text:
                 raise RuntimeError("Agent returned no text")
             final_output = response_output(response)
-            if record_items and final_output:
+            if record_terminal_items and final_output:
+                record_terminal_items(final_output, text)
+            elif record_items and final_output:
                 record_items(final_output, "assistant")
             result = {
                 "text": text,

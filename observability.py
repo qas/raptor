@@ -5,6 +5,8 @@ import re
 import time
 from typing import Any
 
+from config import MAX_TOOL_OUTPUT
+
 
 _REDACTED = "[REDACTED]"
 _MAX_LOG_STRING = 2_000
@@ -21,6 +23,12 @@ _SECRET_TEXT_PATTERNS = (
     re.compile(
         r'(?i)(["\'](?:api[_-]?key|access[_-]?token|token|secret|password)'
         r'["\']\s*:\s*["\'])[^"\']+'
+    ),
+    re.compile(
+        r"(?i)((?<![A-Za-z0-9_])(?:[A-Za-z0-9_-]*"
+        r"(?:api[-_]?key|access[-_]?token|bot[-_]?token|secret|password)"
+        r"|authorization|token)\s*[:=]\s*(?:bearer\s+)?)"
+        r"[^\s,;\"']+"
     ),
 )
 
@@ -126,16 +134,61 @@ def log_exception(
 
 
 def log_event(source: str, event: str, data: Any = None) -> None:
+    """Write a bounded diagnostic event with credential redaction."""
+    _write_record(source, event, data, audit=False)
+
+
+def log_shell_start(
+    *,
+    session_id: str,
+    command: str,
+    chat_id: object,
+    parent_session_id: str | None,
+    pid: int,
+    timeout: int | None,
+    tty: bool,
+) -> None:
+    """Record authorization for one bounded, exact shell command."""
+    if len(command) > MAX_TOOL_OUTPUT:
+        raise ValueError(
+            f"shell audit command exceeds {MAX_TOOL_OUTPUT} characters"
+        )
+    _write_record(
+        "shell",
+        "authorized",
+        {
+            "session_id": session_id,
+            "command": command,
+            "chat_id": chat_id,
+            "parent_session_id": parent_session_id,
+            "pid": pid,
+            "timeout": timeout,
+            "tty": tty,
+        },
+        audit=True,
+    )
+
+
+def _write_record(
+    source: str,
+    event: str,
+    data: Any,
+    *,
+    audit: bool,
+) -> None:
     record: dict[str, Any] = {
         "timestamp": time.time(),
         "source": source,
         "event": event,
     }
+    if audit:
+        record["audit"] = True
     if data is not None:
         record["data"] = data
+    serialized = record if audit else bound_log_value(redact_sensitive(record))
     print(
         json.dumps(
-            bound_log_value(redact_sensitive(record)),
+            serialized,
             ensure_ascii=False,
             default=str,
         ),

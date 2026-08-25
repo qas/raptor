@@ -2,13 +2,17 @@
 import asyncio
 import os
 import sys
+import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import httpx
 
 _ROOT = Path(__file__).resolve().parent.parent
+_HOME = Path(tempfile.mkdtemp(prefix="raptor-responses-provider-tests-"))
+os.environ["RAPTOR_HOME"] = str(_HOME)
+os.environ["AGENT_WORKDIR"] = str(_HOME)
 os.environ.setdefault("TG_BOT_TOKEN", "test-token")
 os.environ.setdefault("TG_USER_ID", "1")
 if str(_ROOT) not in sys.path:
@@ -157,6 +161,187 @@ class ResponsesApiProviderTests(unittest.IsolatedAsyncioTestCase):
             "agent answer",
         )
 
+    async def test_background_output_is_retained_without_active_request(
+        self,
+    ) -> None:
+        await self.provider.send_text("background", "finished later")
+
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                self.base_url + "/v1/status",
+                params={"conversation": "background"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["data"][0]["text"], "finished later")
+        self.assertTrue(response.json()["data"][0]["asynchronous"])
+
+    async def test_async_inbox_does_not_evict_live_status(self) -> None:
+        await self.provider.close()
+        self.provider = ResponsesApiProvider(
+            host="127.0.0.1",
+            port=0,
+            max_status_messages=1,
+        )
+        await self.provider.initialize(())
+        message_id = await self.provider.create_message("alpha", "live")
+        await self.provider.pin_message("alpha", message_id)
+
+        await self.provider.send_text("alpha", "background one")
+        await self.provider.send_text("alpha", "background two")
+        await self.provider.send_text("beta", "other conversation")
+
+        self.assertIn(message_id, self.provider.messages)
+        self.assertEqual(len(self.provider.inbox["alpha"]), 1)
+        self.assertEqual(len(self.provider.inbox["beta"]), 1)
+
+    async def test_stream_event_buffer_is_bounded_and_keeps_completion(
+        self,
+    ) -> None:
+        await self.provider.close()
+        self.provider = ResponsesApiProvider(
+            host="127.0.0.1",
+            port=0,
+            max_stream_events=4,
+        )
+        await self.provider.initialize(())
+        pending = await self.provider._queue_message({
+            "input": "hello",
+            "stream": True,
+        })
+        await self._poll()
+        for index in range(20):
+            await self.provider.send_reasoning_summary("default", str(index))
+        await self.provider.send_text("default", "done")
+
+        self.assertLessEqual(pending.events.qsize(), 4)
+        events = []
+        while not pending.events.empty():
+            events.append(pending.events.get_nowait())
+            pending.events.task_done()
+        self.assertIn("response.output_text.done", [item["type"] for item in events])
+        self.assertEqual(events[-1]["type"], "response.completed")
+
+    async def test_pending_request_capacity_returns_stable_overload(
+        self,
+    ) -> None:
+        await self.provider.close()
+        self.provider = ResponsesApiProvider(
+            host="127.0.0.1",
+            port=0,
+            api_key="",
+            max_pending=1,
+        )
+        await self.provider.initialize(())
+        self.base_url = f"http://127.0.0.1:{self.provider.bound_port}"
+
+        async with httpx.AsyncClient() as client:
+            first = asyncio.create_task(
+                client.post(
+                    self.base_url + "/v1/responses",
+                    json={"input": "first"},
+                )
+            )
+            batch = await self._poll()
+            overloaded = await client.post(
+                self.base_url + "/v1/responses",
+                json={"input": "second"},
+            )
+            await self.provider.send_text(
+                batch.events[0].conversation_id,
+                "done",
+            )
+            await first
+
+        self.assertEqual(overloaded.status_code, 429)
+        self.assertEqual(
+            overloaded.json()["error"]["code"],
+            "agent_overloaded",
+        )
+
+    async def test_request_types_are_not_silently_coerced(self) -> None:
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                self.base_url + "/v1/responses",
+                json={"input": "hello", "stream": "false"},
+            )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("stream must be a boolean", response.text)
+
+    async def test_request_read_timeout_is_bounded(self) -> None:
+        await self.provider.close()
+        self.provider = ResponsesApiProvider(
+            host="127.0.0.1",
+            port=0,
+            api_key="",
+            read_timeout=0.01,
+        )
+        await self.provider.initialize(())
+        reader, writer = await asyncio.open_connection(
+            "127.0.0.1",
+            self.provider.bound_port,
+        )
+        try:
+            response = await reader.read()
+        finally:
+            writer.close()
+            await writer.wait_closed()
+
+        self.assertIn(b"408 Request Timeout", response)
+
+    async def test_connection_capacity_returns_service_unavailable(self) -> None:
+        self.provider._active_connections = self.provider.max_connections
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.get(self.base_url + "/healthz")
+        finally:
+            self.provider._active_connections = 0
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(
+            response.json()["error"]["code"],
+            "server_overloaded",
+        )
+
+    async def test_internal_errors_are_correlated_but_not_exposed(
+        self,
+    ) -> None:
+        with patch.object(
+            self.provider,
+            "_queue_message",
+            AsyncMock(side_effect=RuntimeError("private filesystem path")),
+        ):
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
+                    self.base_url + "/v1/responses",
+                    json={"input": "hello"},
+                )
+
+        self.assertEqual(response.status_code, 500)
+        self.assertNotIn("private filesystem path", response.text)
+        self.assertRegex(response.json()["error"]["request_id"], r"^req_")
+
+    async def test_status_message_retention_is_bounded(self) -> None:
+        await self.provider.close()
+        self.provider = ResponsesApiProvider(
+            host="127.0.0.1",
+            port=0,
+            api_key="",
+            max_status_messages=2,
+        )
+        await self.provider.initialize(())
+        self.base_url = f"http://127.0.0.1:{self.provider.bound_port}"
+
+        await self.provider.create_message("default", "one")
+        await self.provider.create_message("default", "two")
+        await self.provider.create_message("default", "three")
+
+        self.assertEqual(
+            [message["text"] for message in self.provider.messages.values()],
+            ["two", "three"],
+        )
+
     async def test_stream_emits_deltas_status_and_completion(self) -> None:
         async def answer() -> None:
             batch = await self._poll()
@@ -233,8 +418,7 @@ class ResponsesApiProviderTests(unittest.IsolatedAsyncioTestCase):
                 "response": {"status": "completed"},
             })
             await task
-        assert pending.completed is not None
-        pending.completed.set_result({"status": "completed"})
+        self.assertIsNone(pending.completed)
         self.assertIn(b": keep-alive\n\n", writer.data)
 
     async def test_action_endpoint_queues_provider_action(self) -> None:
@@ -273,11 +457,19 @@ class ResponsesApiProviderTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["output_text"], "answer")
 
-    async def test_send_requires_an_active_request_for_the_conversation(
+    async def test_send_without_active_request_is_retained_as_status(
         self,
     ) -> None:
-        with self.assertRaisesRegex(RuntimeError, "no active Responses"):
-            await self.provider.send_text("default", "orphaned")
+        await self.provider.send_text("default", "orphaned")
+
+        self.assertEqual(self.provider.messages, {})
+        self.assertEqual(
+            [
+                message["text"]
+                for message in self.provider.inbox["default"].values()
+            ],
+            ["orphaned"],
+        )
 
     async def test_delivery_context_is_scoped_to_its_conversation(self) -> None:
         pending = await self.provider._queue_message({
@@ -436,9 +628,17 @@ class ResponsesApiProviderTests(unittest.IsolatedAsyncioTestCase):
             if event["type"] == "response.completed":
                 break
         self.assertEqual(events[-1]["response"]["output_text"], "final")
+        self.assertIsNone(pending.completed)
+
+    async def test_undelivered_event_fails_instead_of_hanging(self) -> None:
+        pending = await self.provider._queue_message({"input": "hello"})
+        batch = await self._poll()
+
+        await self.provider.finish_event(batch.events[0])
+
         assert pending.completed is not None
-        result = await pending.completed
-        self.assertEqual(result["status"], "completed")
+        with self.assertRaisesRegex(RuntimeError, "without a response"):
+            await pending.completed
 
     async def test_status_snapshot_preserves_pin_and_actions(self) -> None:
         message_id = await self.provider.create_message(

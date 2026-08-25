@@ -5,6 +5,7 @@ import os
 from dataclasses import dataclass
 
 from runtime_paths import RAPTOR_HOME
+from storage import ensure_private_directory
 
 
 RUNTIME_LOCK_PATH = RAPTOR_HOME / "runtime.lock"
@@ -32,13 +33,17 @@ def acquire_runtime_lock() -> bool:
     global _runtime_lock_fd
     if _runtime_lock_fd is not None:
         return True
-    RUNTIME_LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
+    ensure_private_directory(RUNTIME_LOCK_PATH.parent)
     fd = os.open(RUNTIME_LOCK_PATH, os.O_RDWR | os.O_CREAT, 0o600)
     try:
+        os.fchmod(fd, 0o600)
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
         os.close(fd)
         return False
+    except BaseException:
+        os.close(fd)
+        raise
     _runtime_lock_fd = fd
     try:
         refresh_runtime_lock_owner()
@@ -84,9 +89,10 @@ def runtime_lock_status() -> RuntimeLockStatus:
     """Inspect process ownership and its diagnostic PID atomically."""
     if _runtime_lock_fd is not None:
         return RuntimeLockStatus(True, _lock_owner(_runtime_lock_fd))
-    RUNTIME_LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
+    ensure_private_directory(RUNTIME_LOCK_PATH.parent)
     fd = os.open(RUNTIME_LOCK_PATH, os.O_RDWR | os.O_CREAT, 0o600)
     try:
+        os.fchmod(fd, 0o600)
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:

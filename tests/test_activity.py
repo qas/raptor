@@ -1,4 +1,4 @@
-"""Provider-neutral background activity projection tests."""
+"""Provider-neutral subagent activity projection tests."""
 
 import asyncio
 import os
@@ -21,7 +21,10 @@ class RecordingActivityProvider:
     def __init__(self) -> None:
         self.opened: list[activity.ActivitySnapshot] = []
         self.updates: list[activity.ActivitySnapshot] = []
-        self.closed: list[activity.ActivitySnapshot] = []
+        self.finished: list[activity.ActivitySnapshot] = []
+        self.messages: list[str] = []
+        self.deleted: list[str] = []
+        self.restored: list[str] = []
 
     async def open_activity_surface(
         self,
@@ -40,23 +43,87 @@ class RecordingActivityProvider:
     ) -> None:
         self.updates.append(snapshot)
 
-    async def close_activity_surface(
+    async def append_activity_message(
+        self,
+        _conversation_id,
+        _surface_id,
+        text,
+    ) -> None:
+        self.messages.append(text)
+
+    async def finish_activity_surface(
         self,
         _conversation_id,
         _surface_id,
         snapshot,
+    ) -> activity.ActivityFinishResult:
+        self.finished.append(snapshot)
+        return activity.ActivityFinishResult(True, bool(snapshot.result))
+
+    async def delete_activity_surface(
+        self,
+        _conversation_id,
+        surface_id,
     ) -> None:
-        self.closed.append(snapshot)
+        self.deleted.append(surface_id)
 
     def restore_activity_surface(
         self,
         _conversation_id,
-        _surface_id,
+        surface_id,
     ) -> None:
-        return None
+        self.restored.append(surface_id)
+
+
+class FailingUpdateProvider(RecordingActivityProvider):
+    async def update_activity_surface(
+        self,
+        _conversation_id,
+        _surface_id,
+        _snapshot,
+    ) -> None:
+        raise RuntimeError("temporary update failure")
+
+
+class PartialFinishProvider(RecordingActivityProvider):
+    async def finish_activity_surface(
+        self,
+        _conversation_id,
+        _surface_id,
+        snapshot,
+    ) -> activity.ActivityFinishResult:
+        self.finished.append(snapshot)
+        if len(self.finished) == 1:
+            return activity.ActivityFinishResult(False, True)
+        return activity.ActivityFinishResult(True, False)
+
+
+class PartiallyBrokenRestoreProvider(RecordingActivityProvider):
+    def restore_activity_surface(
+        self,
+        _conversation_id,
+        surface_id,
+    ) -> None:
+        self.restored.append(surface_id)
+        if surface_id == "broken-surface":
+            raise RuntimeError("surface unavailable")
 
 
 class ActivityProjectionTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self) -> None:
+        runtime = activity.session.set_default_chat("conversation")
+        self.runtime_context = activity.session.bound_runtime(runtime)
+        self.runtime_context.__enter__()
+        self.addCleanup(
+            self.runtime_context.__exit__,
+            None,
+            None,
+            None,
+        )
+
+    async def asyncTearDown(self) -> None:
+        await activity.close_activity_projections()
+
     async def test_duplicate_snapshots_do_not_repeat_provider_edits(self) -> None:
         provider = RecordingActivityProvider()
         initial = activity.ActivitySnapshot(
@@ -75,7 +142,6 @@ class ActivityProjectionTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(activity, "ACTIVITY_UPDATE_INTERVAL_SECONDS", 0):
             projection.publish(initial)
             self.assertIsNone(projection.task)
-
             changed = activity.ActivitySnapshot(
                 activity_id="worker",
                 title="Inspect target",
@@ -90,9 +156,7 @@ class ActivityProjectionTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(provider.updates, [changed])
 
-    async def test_metadata_and_messages_use_their_respective_bounds(
-        self,
-    ) -> None:
+    async def test_metadata_and_messages_use_separate_bounds(self) -> None:
         provider = RecordingActivityProvider()
         message = "x" * (activity.MAX_ACTIVITY_MESSAGE_CHARS + 1)
         record = {
@@ -102,11 +166,9 @@ class ActivityProjectionTests(unittest.IsolatedAsyncioTestCase):
             "result": message,
             "chat_id": "conversation",
             "activity_surface_id": None,
-            "activity_surface_closed": True,
         }
 
         with (
-            activity.session.bound_chat("conversation"),
             patch.object(activity, "get_chat_provider", return_value=provider),
             patch.object(activity.session, "save_state"),
             patch.object(activity, "ACTIVITY_UPDATE_INTERVAL_SECONDS", 0),
@@ -117,11 +179,10 @@ class ActivityProjectionTests(unittest.IsolatedAsyncioTestCase):
                 if provider.updates:
                     break
                 await asyncio.sleep(0)
-            await activity.close_subagent_activity(record)
+            await activity.finish_subagent_activity(record)
 
-        self.assertTrue(provider.updates)
         snapshot = provider.updates[0]
-
+        final = provider.finished[0]
         self.assertLessEqual(
             len(snapshot.activity_id),
             activity.MAX_ACTIVITY_FIELD_CHARS,
@@ -135,15 +196,11 @@ class ActivityProjectionTests(unittest.IsolatedAsyncioTestCase):
             activity.MAX_ACTIVITY_FIELD_CHARS,
         )
         self.assertEqual(
-            len(snapshot.result),
+            len(final.result),
             activity.MAX_ACTIVITY_MESSAGE_CHARS,
         )
-        self.assertGreater(
-            len(snapshot.result),
-            activity.MAX_ACTIVITY_FIELD_CHARS,
-        )
 
-    async def test_model_output_survives_activity_updates_and_close(self) -> None:
+    async def test_finish_preserves_output_and_keeps_surface_open(self) -> None:
         provider = RecordingActivityProvider()
         record = {
             "id": "worker",
@@ -151,11 +208,9 @@ class ActivityProjectionTests(unittest.IsolatedAsyncioTestCase):
             "status": "running",
             "chat_id": "conversation",
             "activity_surface_id": None,
-            "activity_surface_closed": True,
         }
 
         with (
-            activity.session.bound_chat("conversation"),
             patch.object(activity, "get_chat_provider", return_value=provider),
             patch.object(activity.session, "save_state"),
             patch.object(activity, "ACTIVITY_UPDATE_INTERVAL_SECONDS", 0),
@@ -166,17 +221,41 @@ class ActivityProjectionTests(unittest.IsolatedAsyncioTestCase):
                 reasoning_summary="Inspecting the relevant files",
                 reply="The first finding",
             )
-            activity.publish_subagent_activity(record, "Running a tool")
             record["status"] = "completed"
-            await activity.close_subagent_activity(record)
+            await activity.finish_subagent_activity(record)
 
-        self.assertEqual(len(provider.closed), 1)
-        final = provider.closed[0]
+        final = provider.finished[0]
         self.assertEqual(final.reasoning_summary, "Inspecting the relevant files")
         self.assertEqual(final.reply, "The first finding")
         self.assertEqual(final.status, "completed")
+        self.assertEqual(record["activity_surface_id"], "surface")
 
-    async def test_long_streams_keep_the_latest_output_visible(self) -> None:
+    async def test_open_rolls_back_new_surface_when_persistence_fails(
+        self,
+    ) -> None:
+        provider = RecordingActivityProvider()
+        record = {
+            "id": "worker",
+            "task": "Inspect target",
+            "status": "running",
+            "chat_id": "conversation",
+            "activity_surface_id": None,
+        }
+        with (
+            patch.object(activity, "get_chat_provider", return_value=provider),
+            patch.object(
+                activity.session,
+                "save_state",
+                side_effect=RuntimeError("state unavailable"),
+            ),
+            self.assertRaisesRegex(RuntimeError, "state unavailable"),
+        ):
+            await activity.open_subagent_activity(record)
+
+        self.assertIsNone(record["activity_surface_id"])
+        self.assertEqual(provider.deleted, ["surface"])
+
+    async def test_long_streams_keep_latest_output_visible(self) -> None:
         provider = RecordingActivityProvider()
         initial = activity.ActivitySnapshot(
             activity_id="worker",
@@ -200,6 +279,199 @@ class ActivityProjectionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(rendered), activity.MAX_ACTIVITY_STREAM_CHARS)
         self.assertTrue(rendered.startswith("..."))
         self.assertTrue(rendered.endswith("latest"))
+
+    async def test_finish_uses_latest_snapshot_after_update_failure(self) -> None:
+        provider = FailingUpdateProvider()
+        initial = activity.ActivitySnapshot(
+            activity_id="worker",
+            title="Inspect target",
+            status="running",
+        )
+        projection = activity.ActivityProjection(
+            provider,
+            "conversation",
+            "surface",
+            initial,
+        )
+        latest = activity.ActivitySnapshot(
+            activity_id="worker",
+            title="Inspect target",
+            status="completed",
+            reasoning_summary="latest reasoning",
+            reply="latest reply",
+        )
+
+        with patch.object(activity, "ACTIVITY_UPDATE_INTERVAL_SECONDS", 0):
+            projection.publish(latest)
+            assert projection.task is not None
+            await projection.task
+            result = await projection.finish(latest)
+
+        self.assertFalse(result.result_delivered)
+        self.assertTrue(result.finished)
+        self.assertEqual(provider.finished, [latest])
+
+    async def test_stale_generation_cannot_finish_current_activity(self) -> None:
+        provider = RecordingActivityProvider()
+        record = {
+            "id": "worker",
+            "task": "Inspect target",
+            "status": "running",
+            "run_generation": 1,
+            "chat_id": "conversation",
+            "activity_surface_id": None,
+        }
+        with (
+            patch.object(activity, "get_chat_provider", return_value=provider),
+            patch.object(activity.session, "save_state"),
+        ):
+            await activity.open_subagent_activity(record)
+            record["run_generation"] = 2
+            finished = await activity.finish_subagent_activity(
+                record,
+                expected_generation=1,
+            )
+
+        self.assertFalse(finished)
+        self.assertEqual(provider.finished, [])
+
+    async def test_repeated_finish_does_not_repeat_result(self) -> None:
+        provider = RecordingActivityProvider()
+        record = {
+            "id": "worker",
+            "task": "Inspect target",
+            "status": "completed",
+            "result": "complete result",
+            "chat_id": "conversation",
+            "activity_surface_id": "surface",
+        }
+        with (
+            patch.object(activity, "get_chat_provider", return_value=provider),
+            patch.object(activity.session, "save_state"),
+        ):
+            await activity.finish_subagent_activity(record)
+            await activity.finish_subagent_activity(record)
+
+        self.assertEqual(
+            [snapshot.result for snapshot in provider.finished],
+            ["complete result"],
+        )
+        self.assertEqual(record["activity_finished_generation"], 1)
+        self.assertEqual(record["activity_surface_id"], "surface")
+
+    async def test_later_finish_does_not_repeat_delivered_result(self) -> None:
+        provider = PartialFinishProvider()
+        record = {
+            "id": "worker",
+            "task": "Inspect target",
+            "status": "completed",
+            "result": "complete result",
+            "chat_id": "conversation",
+            "activity_surface_id": "surface",
+        }
+        with (
+            patch.object(activity, "get_chat_provider", return_value=provider),
+            patch.object(activity.session, "save_state"),
+        ):
+            first_finished = await activity.finish_subagent_activity(record)
+            second_finished = await activity.finish_subagent_activity(record)
+
+        self.assertFalse(first_finished)
+        self.assertTrue(second_finished)
+        self.assertEqual(
+            [snapshot.result for snapshot in provider.finished],
+            ["complete result", ""],
+        )
+
+    async def test_delete_removes_provider_surface_from_record(self) -> None:
+        provider = RecordingActivityProvider()
+        record = {
+            "id": "worker",
+            "chat_id": "conversation",
+            "activity_surface_id": "surface",
+            "activity_finished_generation": 1,
+            "activity_result_delivered": True,
+        }
+        with (
+            patch.object(activity, "get_chat_provider", return_value=provider),
+            patch.object(activity.session, "save_state"),
+        ):
+            deleted = await activity.delete_subagent_activity(record)
+
+        self.assertTrue(deleted)
+        self.assertEqual(provider.deleted, ["surface"])
+        self.assertIsNone(record["activity_surface_id"])
+        self.assertNotIn("activity_finished_generation", record)
+
+    async def test_reconcile_isolates_surface_restore_failures(self) -> None:
+        provider = PartiallyBrokenRestoreProvider()
+        runtime = activity.session.current_runtime()
+        previous = runtime.state["subagents"]
+        runtime.state["subagents"] = {
+            "broken": {
+                "id": "broken",
+                "status": "running",
+                "chat_id": "conversation",
+                "activity_surface_id": "broken-surface",
+            },
+            "healthy": {
+                "id": "healthy",
+                "status": "running",
+                "chat_id": "conversation",
+                "activity_surface_id": "healthy-surface",
+            },
+        }
+        try:
+            with (
+                patch.object(
+                    activity.session,
+                    "all_chat_runtimes",
+                    return_value=(runtime,),
+                ),
+                patch.object(activity, "get_chat_provider", return_value=provider),
+                patch.object(activity, "log_exception"),
+            ):
+                await activity.reconcile_activity_surfaces()
+        finally:
+            runtime.state["subagents"] = previous
+
+        self.assertEqual(
+            provider.restored,
+            ["broken-surface", "healthy-surface"],
+        )
+
+    async def test_reconcile_restores_only_open_surfaces(self) -> None:
+        provider = RecordingActivityProvider()
+        runtime = activity.session.current_runtime()
+        previous = runtime.state["subagents"]
+        runtime.state["subagents"] = {
+            "open": {
+                "id": "open",
+                "status": "completed",
+                "chat_id": "conversation",
+                "activity_surface_id": "open-surface",
+            },
+            "without_surface": {
+                "id": "without-surface",
+                "status": "completed",
+                "chat_id": "conversation",
+                "activity_surface_id": None,
+            },
+        }
+        try:
+            with (
+                patch.object(
+                    activity.session,
+                    "all_chat_runtimes",
+                    return_value=(runtime,),
+                ),
+                patch.object(activity, "get_chat_provider", return_value=provider),
+            ):
+                await activity.reconcile_activity_surfaces()
+        finally:
+            runtime.state["subagents"] = previous
+
+        self.assertEqual(provider.restored, ["open-surface"])
 
 
 if __name__ == "__main__":

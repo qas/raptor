@@ -176,7 +176,7 @@ class ChatProvider(Protocol):
         conversation_id: ConversationId,
         delivery_context: Any | None,
     ) -> Any | None:
-        """Activate captured state and return a restoration token."""
+        """Activate captured state, or detach it with ``None``."""
         ...
 
     def restore_delivery_context(self, token: Any | None) -> None:

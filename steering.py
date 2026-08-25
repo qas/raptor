@@ -80,9 +80,12 @@ async def _cancel_steers(*, preserve_forced: bool) -> int:
     for entry in queued:
         await session.steer_queue.put(entry)
     session.state["pending_inputs"] = [
-        str(entry.get("text") or "")
+        {
+            "id": str(entry.get("id") or ""),
+            "text": str(entry.get("text") or ""),
+        }
         for entry in session.pending_steers.values()
-        if str(entry.get("text") or "")
+        if entry.get("id") and str(entry.get("text") or "")
     ]
     session.save_state()
     return len(cancelled)
@@ -98,14 +101,15 @@ async def cancel_unforced_steers() -> int:
     return await _cancel_steers(preserve_forced=True)
 
 
-def remove_persisted_steer(text: str) -> None:
+def remove_persisted_steer(steer_id: str) -> None:
     pending = session.state.get("pending_inputs")
     if not isinstance(pending, list):
         return
-    try:
-        pending.remove(text)
-    except ValueError:
-        return
+    session.state["pending_inputs"] = [
+        item
+        for item in pending
+        if not isinstance(item, dict) or str(item.get("id") or "") != steer_id
+    ]
     session.save_state()
 
 
@@ -161,7 +165,7 @@ async def handle_steering_action(
             steer_id,
         )
         await delete_steered_message(entry)
-        remove_persisted_steer(str(entry.get("text") or ""))
+        remove_persisted_steer(steer_id)
         delivery_context = entry.get("delivery_context")
         if delivery_context is not None:
             with bound_delivery_context(
@@ -193,8 +197,7 @@ async def handle_steering_action(
     if interrupted.error is not None:
         log_exception("steering", "force_wait_error", interrupted.error)
     if interrupted.completed:
-        entry["status"] = "applied"
-        session.pending_steers.pop(steer_id, None)
+        session.persist_steer_handoff(entry)
         await clear_steering_indicator(
             entry["chat_id"],
             entry.get("message_id"),
@@ -203,6 +206,7 @@ async def handle_steering_action(
         start_root_session(
             entry["chat_id"],
             str(entry["text"]),
+            input_recorded=True,
             delivery_context=entry.get("delivery_context"),
         )
     else:

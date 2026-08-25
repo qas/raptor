@@ -1,4 +1,5 @@
 """Agent tool implementations and dispatch."""
+import heapq
 import json
 import stat
 from collections.abc import Awaitable, Callable
@@ -8,17 +9,62 @@ from typing import Any
 from chat_provider import ConversationId
 
 from chat_store import (
+    iter_events,
     list_sessions,
-    read_events,
     render_compaction_records,
     render_item_text,
+    session_summary,
     validate_session_id,
 )
 from config import AGENT_WORKDIR, MAX_TOOL_OUTPUT, TOOLS
 import session
 from session import save_state, state
-from storage import write_text_atomic
+from storage import FileTooLargeError, read_bytes_bounded, write_text_atomic
 from todos import MAX_TODO_EXPLANATION_CHARS, validate_plan
+
+
+FILE_READ_CHUNK_CHARS = 64 * 1024
+MAX_EDIT_FILE_BYTES = 64 * 1024 * 1024
+
+
+class _BoundedText:
+    """Retain a fixed-size head and tail while text is streamed."""
+
+    _marker = "\n... [truncated] ...\n"
+
+    def __init__(self, limit: int) -> None:
+        self.limit = limit
+        retained = max(0, limit - len(self._marker))
+        self.head_limit = retained // 2
+        self.tail_limit = retained - self.head_limit
+        self.head = ""
+        self.tail = ""
+        self.total = 0
+
+    @property
+    def truncated(self) -> bool:
+        return self.total > self.limit
+
+    def append(self, text: str) -> None:
+        if not text:
+            return
+        previous_total = self.total
+        self.total += len(text)
+        if self.total <= self.limit:
+            self.head += text
+            return
+        if previous_total <= self.limit:
+            combined = self.head + text
+            self.head = combined[:self.head_limit]
+            self.tail = combined[-self.tail_limit:] if self.tail_limit else ""
+            return
+        if self.tail_limit:
+            self.tail = (self.tail + text)[-self.tail_limit:]
+
+    def render(self) -> str:
+        if not self.truncated:
+            return self.head
+        return self.head + self._marker + self.tail
 
 # ---------------------------------------------------------------------------
 # Todo tool
@@ -176,7 +222,8 @@ async def shell_tool(
     parent_session_id = None
     if execution_context is not None:
         value = (
-            execution_context.get("parent_session_id")
+            execution_context.get("root_session_id")
+            or execution_context.get("parent_session_id")
             or execution_context.get("session_id")
         )
         if value is not None:
@@ -226,27 +273,30 @@ def read_file_tool(
         ),
     )
 
-    text = path.read_text(
-        errors="replace"
-    )
-
-    lines = (
-        text.splitlines()
-    )
-
-    chunk = "\n".join(
-        lines[
-            start_line - 1:
-            start_line - 1
-            + max_lines
-        ]
-    )
-
-    chunk, truncated = (
-        truncate_tool_output(
-            chunk
-        )
-    )
+    chunk = _BoundedText(MAX_TOOL_OUTPUT)
+    line_number = 1
+    selected_lines = 0
+    at_line_start = True
+    has_more = False
+    with path.open(encoding="utf-8", errors="replace") as handle:
+        while selected_lines < max_lines:
+            part = handle.readline(FILE_READ_CHUNK_CHARS)
+            if not part:
+                break
+            line_ended = part.endswith("\n")
+            body = part[:-1] if line_ended else part
+            if line_number >= start_line:
+                if at_line_start and selected_lines:
+                    chunk.append("\n")
+                chunk.append(body)
+            at_line_start = False
+            if line_ended:
+                if line_number >= start_line:
+                    selected_lines += 1
+                line_number += 1
+                at_line_start = True
+        if selected_lines >= max_lines:
+            has_more = bool(handle.read(1))
 
     return {
         "ok": True,
@@ -258,9 +308,9 @@ def read_file_tool(
         "start_line":
             start_line,
         "text":
-            chunk,
+            chunk.render(),
         "truncated":
-            truncated,
+            chunk.truncated or has_more,
     }
 
 
@@ -282,6 +332,11 @@ def write_file_tool(
             "",
         )
     )
+    if len(content) > MAX_TOOL_OUTPUT:
+        return {
+            "ok": False,
+            "error": f"content exceeds {MAX_TOOL_OUTPUT} characters",
+        }
 
     path.parent.mkdir(
         parents=True,
@@ -334,6 +389,15 @@ def edit_file_tool(
         )
     )
 
+    if len(old_text) > MAX_TOOL_OUTPUT or len(new_text) > MAX_TOOL_OUTPUT:
+        return {
+            "ok": False,
+            "error": (
+                "edit text exceeds "
+                f"{MAX_TOOL_OUTPUT} characters"
+            ),
+        }
+
     if not old_text:
         return {
             "ok": False,
@@ -341,9 +405,21 @@ def edit_file_tool(
                 "old_text must not be empty",
         }
 
-    text = path.read_text(
-        errors="replace"
-    )
+    try:
+        encoded = read_bytes_bounded(path, MAX_EDIT_FILE_BYTES)
+    except FileTooLargeError:
+        return {
+            "ok": False,
+            "error": (
+                "file exceeds edit limit of "
+                f"{MAX_EDIT_FILE_BYTES} bytes"
+            ),
+        }
+
+    try:
+        text = encoded.decode("utf-8")
+    except UnicodeDecodeError:
+        return {"ok": False, "error": "file is not valid UTF-8 text"}
 
     count = text.count(
         old_text
@@ -377,21 +453,38 @@ def edit_file_tool(
         }
 
     if replace_all:
+        replacements = count
+    else:
+        replacements = 1
+
+    output_bytes = (
+        len(encoded)
+        + replacements
+        * (
+            len(new_text.encode("utf-8"))
+            - len(old_text.encode("utf-8"))
+        )
+    )
+    if output_bytes > MAX_EDIT_FILE_BYTES:
+        return {
+            "ok": False,
+            "error": (
+                "edited file exceeds limit of "
+                f"{MAX_EDIT_FILE_BYTES} bytes"
+            ),
+        }
+
+    if replace_all:
         text = text.replace(
             old_text,
             new_text,
         )
-
-        replacements = count
-
     else:
         text = text.replace(
             old_text,
             new_text,
             1,
         )
-
-        replacements = 1
 
     write_text_atomic(
         path,
@@ -440,17 +533,17 @@ def list_dir_tool(
         dict[str, Any]
     ] = []
 
-    children = sorted(
+    children = heapq.nsmallest(
+        limit + 1,
         path.iterdir(),
         key=lambda item: (
             not item.is_dir(),
             item.name.lower(),
         ),
     )
+    has_more = len(children) > limit
 
-    for child in children[
-        :limit
-    ]:
+    for child in children[:limit]:
         entries.append(
             {
                 "name":
@@ -487,6 +580,8 @@ def list_dir_tool(
         "entries":
             entries,
     }
+    if has_more:
+        result["truncated"] = True
     while (
         entries
         and len(json.dumps(result, ensure_ascii=False)) > MAX_TOOL_OUTPUT
@@ -586,14 +681,11 @@ def chat_history_tool(
     limit = int(args.get("limit") or 20)
     limit = max(1, min(100, limit))
     chat_key = session.current_runtime().key
-    owned_sessions = [
-        row
-        for row in list_sessions()
-        if row.get("chat_key") == chat_key
-    ]
-    visible_sessions = [
-        row for row in owned_sessions if row.get("kind") != "thread"
-    ]
+    visible_sessions = list_sessions(
+        limit=100,
+        chat_key=chat_key,
+        kinds={"main", "subagent"},
+    )
     if action == "list":
         sessions = visible_sessions[:limit]
         return _fit_history_payload(
@@ -607,14 +699,9 @@ def chat_history_tool(
     except ValueError as exc:
         return {"ok": False, "error": str(exc)}
     if session_id:
-        target = next(
-            (
-                row
-                for row in owned_sessions
-                if row.get("session_id") == session_id
-            ),
-            None,
-        )
+        target = session_summary(session_id)
+        if target is not None and target.get("chat_key") != chat_key:
+            target = None
         if target is None:
             return {"ok": False, "error": "session is not available"}
         current_execution_session = str(
@@ -641,7 +728,7 @@ def chat_history_tool(
             return {"ok": False, "error": "session_id required"}
         hits: list[dict[str, Any]] = []
         for sid in targets:
-            for event in read_events(sid):
+            for event in iter_events(sid):
                 text = render_compaction_records([event])
                 if query.lower() not in text.lower():
                     continue
@@ -664,7 +751,7 @@ def chat_history_tool(
         start_seq = int(args.get("start_seq") or 1)
         end_seq = int(args.get("end_seq") or 10**9)
         records = []
-        for event in read_events(session_id):
+        for event in iter_events(session_id):
             seq = int(event.get("seq") or 0)
             if seq < start_seq or seq > end_seq:
                 continue

@@ -509,6 +509,56 @@ class GoalTests(unittest.IsolatedAsyncioTestCase):
             ],
         )
 
+    async def test_goal_continuation_does_not_reuse_response_context(
+        self,
+    ) -> None:
+        replace_goal("continue independently")
+        contexts: list[object] = []
+        turns_seen: list[tuple[str, bool]] = []
+
+        @contextmanager
+        def capture_context(_chat_id, delivery_context):
+            contexts.append(delivery_context)
+            yield
+
+        async def fake_turn(_chat_id, text, **kwargs):
+            turns_seen.append((text, bool(kwargs.get("input_recorded"))))
+            if text == goal_continuation_input():
+                complete_goal(current_goal()["id"])
+            return True
+
+        await session.steer_queue.put(
+            {
+                "id": "steer-response",
+                "chat_id": "responses_api:web",
+                "text": "new direction",
+                "status": "queued",
+                "message_id": None,
+                "delivery_context": ("responses_api", "request-2"),
+            }
+        )
+        with (
+            patch.object(controller, "agent_turn", fake_turn),
+            patch.object(controller, "bound_delivery_context", capture_context),
+            patch.object(controller, "clear_steering_indicator", _noop),
+            patch.object(controller, "ensure_goal_pin", _noop),
+            patch.object(controller, "sync_goal_pin", _noop),
+            patch.object(controller, "send", _noop),
+        ):
+            await controller.run_root_session("responses_api:web", None)
+
+        self.assertEqual(
+            contexts,
+            [("responses_api", "request-2"), None],
+        )
+        self.assertEqual(
+            turns_seen,
+            [
+                ("new direction", True),
+                (goal_continuation_input(), False),
+            ],
+        )
+
     async def test_complete_goal_does_not_continue(self) -> None:
         replace_goal("done soon")
         calls: list[str] = []
@@ -1246,6 +1296,33 @@ class GoalTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("start", calls)
         self.assertTrue(any("late-internal" in call for call in calls))
 
+    async def test_goal_replacement_does_not_drop_runtime_event(
+        self,
+    ) -> None:
+        replace_goal("first")
+        calls: list[str] = []
+        completion = _runtime_event("worker finished")
+
+        async def fake_turn(chat_id, text, **_kwargs):
+            calls.append(text)
+            if text == "start":
+                replace_goal("second")
+                await session.runtime_event_queue.put(completion)
+            else:
+                complete_goal(current_goal()["id"])
+            return True
+
+        with (
+            patch.object(controller, "agent_turn", fake_turn),
+            patch.object(controller, "send", _noop),
+        ):
+            await controller.start_root_session(1, "start")
+            while turns.task is not None and not turns.task.done():
+                await turns.task
+
+        self.assertEqual(calls, ["start", completion.prompt()])
+        self.assertTrue(completion.done.result())
+
     def test_clean_startup_resumes_active_goal(self) -> None:
         replace_goal("resume on clean start")
         notice = prepare_goal_on_startup()
@@ -1508,6 +1585,37 @@ class GoalTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(source, "goal")
         self.assertIsNone(entry)
+
+    async def test_active_goal_quiesces_while_subagent_runs(self) -> None:
+        replace_goal("wait for delegated work")
+        session.subagent_tasks["worker"] = asyncio.current_task()
+        try:
+            text, source, entry = await controller._select_next_work(
+                current_goal()["id"]
+            )
+            self.assertFalse(controller._pending_controller_work())
+        finally:
+            session.subagent_tasks.pop("worker", None)
+
+        self.assertIsNone(text)
+        self.assertIsNone(source)
+        self.assertIsNone(entry)
+
+    async def test_subagent_completion_wakes_quiesced_goal(self) -> None:
+        replace_goal("wait for delegated work")
+        completion = _runtime_event("worker finished")
+        await session.runtime_event_queue.put(completion)
+        session.subagent_tasks["worker"] = asyncio.current_task()
+        try:
+            text, source, entry = await controller._select_next_work(
+                current_goal()["id"]
+            )
+        finally:
+            session.subagent_tasks.pop("worker", None)
+
+        self.assertIn("worker finished", text)
+        self.assertEqual(source, "runtime")
+        self.assertIs(entry, completion)
 
     async def test_goal_source_sets_turn_goal_ownership(
         self,

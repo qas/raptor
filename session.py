@@ -3,7 +3,6 @@
 import asyncio
 import copy
 import json
-import secrets
 import time
 from collections.abc import Iterator, MutableMapping
 from contextlib import contextmanager
@@ -13,14 +12,22 @@ from typing import Any, Generic, TypeVar
 
 from chat_provider import ConversationId
 from chat_store import (
+    append_item,
     create_session,
     ensure_chat_dirs,
+    event_at_seq,
+    next_event_seq,
     repair_all_chat_files,
+    repair_chat_file,
     session_chat_key,
     session_exists,
+    session_is_ended,
+    steer_is_recorded,
 )
 from config import (
+    MAX_CHAT_RUNTIMES,
     MAX_PENDING_STEERS,
+    MAX_STATE_LOAD_BYTES,
     MAX_SUBAGENT_PENDING_INPUTS,
     MAX_SUBAGENT_RECORDS,
     RESPONSES_MODEL,
@@ -30,8 +37,8 @@ from runtime_events import RuntimeEvent
 from storage import write_text_atomic
 from todos import validate_plan
 
-
 STATE_SCHEMA_VERSION = 2
+_RECOVERY_BYTES_PER_CHAT = 512
 
 GLOBAL_DEFAULT_STATE: dict[str, Any] = {
     "schema_version": STATE_SCHEMA_VERSION,
@@ -45,12 +52,17 @@ CHAT_DEFAULT_STATE: dict[str, Any] = {
     "todos": [],
     "approval_mode": "off",
     "pending_inputs": [],
+    "pending_delivery": None,
     "active_root_turn": None,
     "interrupted_subagents": [],
     "subagents": {},
     "goal": None,
     "thread": None,
 }
+
+
+class StateCapacityError(RuntimeError):
+    """Raised when a durable state update would exceed its load bound."""
 
 # Logical state exposed to domain code and focused tests.
 DEFAULT_STATE: dict[str, Any] = {
@@ -137,6 +149,7 @@ def _prune_subagent_mapping(
         and (
             record.get("status") == "running"
             or record.get("completion_pending")
+            or record.get("activity_surface_id")
         )
     )
     removable = sorted(
@@ -194,11 +207,66 @@ def _normalize_chat_state(value: Any, owner: str) -> dict[str, Any]:
         interrupted if isinstance(interrupted, list) else []
     )
     pending = result.get("pending_inputs")
-    result["pending_inputs"] = (
-        [str(item) for item in pending[:MAX_PENDING_STEERS] if str(item)]
-        if isinstance(pending, list)
-        else []
+    pending_items = (
+        pending[:MAX_PENDING_STEERS] if isinstance(pending, list) else []
     )
+    result["pending_inputs"] = [
+        {
+            "id": str(item["id"]),
+            "text": str(item["text"]),
+        }
+        for item in pending_items
+        if isinstance(item, dict) and item.get("id") and item.get("text")
+    ]
+    pending_delivery = result.get("pending_delivery")
+    if pending_delivery is not None:
+        if not isinstance(pending_delivery, dict):
+            raise RuntimeError(
+                f"Persisted pending delivery must be an object: {owner}"
+            )
+        session_id = str(pending_delivery.get("session_id") or "")
+        seq = pending_delivery.get("seq")
+        try:
+            delivery_owned = (
+                bool(session_id)
+                and session_exists(session_id)
+                and session_chat_key(session_id) == owner
+            )
+        except ValueError:
+            delivery_owned = False
+        if (
+            not delivery_owned
+            or not isinstance(seq, int)
+            or seq <= 0
+        ):
+            raise RuntimeError(
+                f"Invalid persisted pending delivery: {owner}"
+            )
+        repair_chat_file(session_id)
+        delivery_event = event_at_seq(session_id, seq)
+        delivery_item = (
+            delivery_event.get("item")
+            if isinstance(delivery_event, dict)
+            else None
+        )
+        prepared = (
+            delivery_event is None
+            and seq == next_event_seq(session_id)
+        )
+        recorded = (
+            isinstance(delivery_event, dict)
+            and delivery_event.get("source") == "assistant"
+            and isinstance(delivery_item, dict)
+            and delivery_item.get("type") == "message"
+        )
+        if not prepared and not recorded:
+            raise RuntimeError(
+                f"Pending delivery does not reference an answer: {owner}"
+            )
+        result["pending_delivery"] = {
+            "session_id": session_id,
+            "seq": seq,
+        }
     result["todos"] = _load_plan(result.get("todos"), f"{owner} root")
 
     goal = result.get("goal")
@@ -231,6 +299,9 @@ def _normalize_chat_state(value: Any, owner: str) -> dict[str, Any]:
                     if isinstance(parent_interrupted, list)
                     else []
                 )
+            else:
+                result["current_session_id"] = None
+                result["interrupted_subagents"] = []
         else:
             result["current_session_id"] = branch_id
 
@@ -265,11 +336,19 @@ def _normalize_chat_state(value: Any, owner: str) -> dict[str, Any]:
         record.setdefault("completion_notified_at", None)
         record.setdefault("completion_attempts", 0)
         record.setdefault("parent_session_id", None)
+        record.setdefault("root_session_id", record.get("parent_session_id"))
+        record["run_generation"] = max(
+            1,
+            int(record.get("run_generation") or 1),
+        )
         record.setdefault("activity_surface_id", None)
-        record.setdefault("activity_surface_closed", True)
+        record["activity_finished_generation"] = max(
+            0,
+            int(record.get("activity_finished_generation") or 0),
+        )
+        record.setdefault("activity_result_delivered", False)
         record["task_count"] = max(1, int(record.get("task_count") or 1))
         if record.get("status") == "running":
-            record["pending_inputs"] = []
             record["status"] = "interrupted"
             record["error"] = "Process exited while subagent was running"
             record["completed_at"] = int(time.time())
@@ -321,8 +400,17 @@ def load_state() -> dict[str, Any]:
     result = copy.deepcopy(GLOBAL_DEFAULT_STATE)
     if STATE_PATH.exists():
         try:
-            loaded = json.loads(STATE_PATH.read_text())
-        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            with STATE_PATH.open("rb") as handle:
+                encoded = handle.read(MAX_STATE_LOAD_BYTES + 1)
+        except OSError as exc:
+            raise RuntimeError(f"Could not load state: {STATE_PATH}") from exc
+        if len(encoded) > MAX_STATE_LOAD_BYTES:
+            raise RuntimeError(
+                f"State file exceeds MAX_STATE_LOAD_BYTES: {STATE_PATH}"
+            )
+        try:
+            loaded = json.loads(encoded)
+        except (UnicodeError, json.JSONDecodeError) as exc:
             raise RuntimeError(f"Could not load state: {STATE_PATH}") from exc
         if not isinstance(loaded, dict):
             raise RuntimeError(f"State root must be an object: {STATE_PATH}")
@@ -339,6 +427,10 @@ def load_state() -> dict[str, Any]:
         chats = loaded.get("chats")
         if not isinstance(chats, dict):
             raise RuntimeError("Persisted chats must be an object")
+        if len(chats) > MAX_CHAT_RUNTIMES:
+            raise RuntimeError(
+                "Persisted chats exceed MAX_CHAT_RUNTIMES"
+            )
         normalized_chats: dict[str, Any] = {}
         for key, entry in chats.items():
             if not isinstance(entry, dict):
@@ -379,12 +471,117 @@ _root_state = load_state()
 _register_loaded_chats()
 
 
-def _write_state() -> None:
+def _state_recovery_reserve(root_state: dict[str, Any]) -> int:
+    return len(root_state.get("chats", {})) * _RECOVERY_BYTES_PER_CHAT
+
+
+def _state_admission_limit(root_state: dict[str, Any]) -> int:
+    return MAX_STATE_LOAD_BYTES - _state_recovery_reserve(root_state)
+
+
+def _state_without_recovery_markers(
+    root_state: dict[str, Any],
+) -> dict[str, Any]:
+    chats: dict[str, Any] = {}
+    for key, entry in root_state.get("chats", {}).items():
+        chat_state = dict(entry.get("state", {}))
+        chat_state["active_root_turn"] = None
+        chat_state["pending_delivery"] = None
+        chats[str(key)] = {**entry, "state": chat_state}
+    return {**root_state, "chats": chats}
+
+
+def _write_root_state(root_state: dict[str, Any]) -> None:
+    admitted = json.dumps(
+        _state_without_recovery_markers(root_state),
+        indent=2,
+        ensure_ascii=False,
+    )
+    admitted_bytes = len(admitted.encode("utf-8"))
+    reserve = _state_recovery_reserve(root_state)
+    if admitted_bytes > _state_admission_limit(root_state):
+        raise StateCapacityError(
+            "State update would consume reserved recovery capacity"
+        )
+    serialized = json.dumps(root_state, indent=2, ensure_ascii=False)
+    serialized_bytes = len(serialized.encode("utf-8"))
+    if serialized_bytes - admitted_bytes > reserve:
+        raise StateCapacityError("Recovery markers exceed reserved capacity")
+    if serialized_bytes > MAX_STATE_LOAD_BYTES:
+        raise StateCapacityError(
+            "State update exceeds MAX_STATE_LOAD_BYTES"
+        )
     write_text_atomic(
         STATE_PATH,
-        json.dumps(_root_state, indent=2, ensure_ascii=False),
+        serialized,
         mode=0o600,
     )
+
+
+def _write_state() -> None:
+    _write_root_state(_root_state)
+
+
+def _persist_chat_candidate(
+    candidate_state: dict[str, Any],
+) -> None:
+    """Commit one chat-state replacement only after its write succeeds."""
+    runtime = current_runtime()
+    current_entry = _root_state["chats"][runtime.key]
+    candidate_entry = {
+        **current_entry,
+        "state": candidate_state,
+    }
+    candidate_root = {
+        **_root_state,
+        "chats": {
+            **_root_state["chats"],
+            runtime.key: candidate_entry,
+        },
+    }
+    _write_root_state(candidate_root)
+    runtime.state.clear()
+    runtime.state.update(candidate_state)
+
+
+def queue_pending_steer(steer_id: str, text: str) -> None:
+    """Durably admit one steer without mutating live state on rejection."""
+    candidate = copy.deepcopy(current_runtime().state)
+    pending = candidate.setdefault("pending_inputs", [])
+    if not isinstance(pending, list):
+        raise RuntimeError("Pending steering state is invalid")
+    if len(pending) >= MAX_PENDING_STEERS:
+        raise StateCapacityError("Steering queue is full")
+    pending.append({"id": str(steer_id), "text": str(text)})
+    _persist_chat_candidate(candidate)
+
+
+def set_pending_delivery(session_id: str, seq: int) -> None:
+    """Persist the transcript reference awaiting provider delivery."""
+    candidate = copy.deepcopy(current_runtime().state)
+    reference = {"session_id": str(session_id), "seq": int(seq)}
+    existing = candidate.get("pending_delivery")
+    if existing is not None and existing != reference:
+        raise RuntimeError("A response is already awaiting delivery")
+    candidate["pending_delivery"] = reference
+    _persist_chat_candidate(candidate)
+
+
+def clear_pending_delivery(session_id: str, seq: int) -> None:
+    """Clear a delivered transcript reference if it is still current."""
+    expected = {"session_id": str(session_id), "seq": int(seq)}
+    if current_runtime().state.get("pending_delivery") != expected:
+        return
+    candidate = copy.deepcopy(current_runtime().state)
+    candidate["pending_delivery"] = None
+    _persist_chat_candidate(candidate)
+
+
+def set_active_root_turn(marker: dict[str, Any]) -> None:
+    """Persist the bounded crash-recovery marker from reserved capacity."""
+    candidate = copy.deepcopy(current_runtime().state)
+    candidate["active_root_turn"] = copy.deepcopy(marker)
+    _persist_chat_candidate(candidate)
 
 
 def ensure_chat(conversation_id: ConversationId) -> ChatRuntime:
@@ -395,6 +592,8 @@ def ensure_chat(conversation_id: ConversationId) -> ChatRuntime:
         if runtime.conversation_id != conversation_id:
             raise RuntimeError(f"Conversation key collision: {key}")
         return runtime
+    if len(_runtimes) >= MAX_CHAT_RUNTIMES:
+        raise RuntimeError("Chat runtime capacity reached")
     chat_state = copy.deepcopy(CHAT_DEFAULT_STATE)
     ensure_chat_dirs()
     chat_state["current_session_id"] = create_session(
@@ -406,15 +605,21 @@ def ensure_chat(conversation_id: ConversationId) -> ChatRuntime:
         conversation_id=conversation_id,
         state=chat_state,
     )
+    entry = {
+        "conversation_id": conversation_id,
+        "state": chat_state,
+    }
+    candidate = dict(_root_state)
+    candidate["chats"] = {
+        **_root_state["chats"],
+        key: entry,
+    }
+    _write_root_state(candidate)
+    _root_state["chats"][key] = entry
     _runtimes[key] = runtime
     global _default_runtime_key
     if _default_runtime_key is None:
         _default_runtime_key = key
-    _root_state["chats"][key] = {
-        "conversation_id": conversation_id,
-        "state": chat_state,
-    }
-    _write_state()
     return runtime
 
 
@@ -426,8 +631,6 @@ def current_runtime() -> ChatRuntime:
         default_runtime = _runtimes.get(_default_runtime_key)
         if default_runtime is not None:
             return default_runtime
-    if not _runtimes:
-        return ensure_chat("local")
     raise RuntimeError("No chat runtime is bound to this task")
 
 
@@ -596,9 +799,6 @@ pending_approvals: ContextMapping[dict[str, Any]] = ContextMapping(
     "pending_approvals"
 )
 
-# Completion events cross chat boundaries and carry their owning conversation.
-subagent_events: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
-
 APPROVAL_TOOLS = {"shell", "write_file", "edit_file"}
 
 DAEMON_MODE = False
@@ -607,6 +807,40 @@ responses: Any
 
 def save_state() -> None:
     _write_state()
+
+
+def consume_pending_steer(entry: dict[str, Any]) -> None:
+    """Retire one accepted steer from runtime and durable pending state."""
+    entry["status"] = "applied"
+    pending_steers.pop(str(entry.get("id") or ""), None)
+    pending = state.get("pending_inputs")
+    if isinstance(pending, list):
+        steer_id = str(entry.get("id") or "")
+        state["pending_inputs"] = [
+            item
+            for item in pending
+            if not isinstance(item, dict) or str(item.get("id") or "") != steer_id
+        ]
+    save_state()
+
+
+def persist_steer_handoff(entry: dict[str, Any]) -> None:
+    """Transfer one accepted steer to the transcript before retiring it."""
+    session_id = str(state.get("current_session_id") or "")
+    if not session_id:
+        raise RuntimeError("No current session")
+    steer_id = str(entry.get("id") or "")
+    text = str(entry.get("text") or "")
+    if not steer_id or not text:
+        raise ValueError("invalid pending steer")
+    if not steer_is_recorded(session_id, steer_id):
+        append_item(
+            session_id,
+            {"role": "user", "content": text},
+            source="steer",
+            data={"steer_id": steer_id},
+        )
+    consume_pending_steer(entry)
 
 
 def prune_subagent_records() -> int:
@@ -625,11 +859,13 @@ def rehydrate_pending_inputs(chat_id: ConversationId) -> int:
         return 0
     count = 0
     with bound_runtime(runtime):
-        for text in pending:
-            content = str(text)
-            if not content:
+        for item in pending:
+            if not isinstance(item, dict):
                 continue
-            steer_id = secrets.token_hex(4)
+            steer_id = str(item.get("id") or "")
+            content = str(item.get("text") or "")
+            if not steer_id or not content:
+                continue
             entry = {
                 "id": steer_id,
                 "chat_id": chat_id,
@@ -646,19 +882,49 @@ def rehydrate_pending_inputs(chat_id: ConversationId) -> int:
 
 def bootstrap_runtime_storage() -> dict[str, int]:
     """Repair transcripts and ensure every registered chat has a session."""
-    ensure_chat_dirs()
+    repaired = repair_all_chat_files()
     created = 0
+    state_changed = False
     for runtime in all_chat_runtimes():
         session_id = runtime.state.get("current_session_id")
-        if not session_id or not session_exists(str(session_id)):
+        session_valid = bool(session_id and session_exists(str(session_id)))
+        ended = bool(session_valid and session_is_ended(str(session_id)))
+        thread = runtime.state.get("thread")
+        if (not session_valid or ended) and isinstance(thread, dict):
+            parent_id = str(thread.get("parent_session_id") or "")
+            branch_id = str(thread.get("session_id") or "")
+            parent_valid = bool(
+                parent_id
+                and session_exists(parent_id)
+                and not session_is_ended(parent_id)
+            )
+            if str(session_id) == branch_id and parent_valid:
+                runtime.state["thread"] = None
+                runtime.state["current_session_id"] = parent_id
+                runtime.state["interrupted_subagents"] = copy.deepcopy(
+                    thread.get("parent_interrupted_subagents") or []
+                )
+                state_changed = True
+                session_id = parent_id
+                session_valid = True
+                ended = False
+            else:
+                runtime.state["thread"] = None
+                runtime.state["interrupted_subagents"] = []
+                state_changed = True
+        if (
+            not session_id
+            or not session_exists(str(session_id))
+            or ended
+        ):
             runtime.state["current_session_id"] = create_session(
                 kind="main",
                 chat_key=runtime.key,
             )
             created += 1
-    if created:
+            state_changed = True
+    if state_changed:
         _write_state()
-    repaired = repair_all_chat_files()
     return {
         "created_sessions": created,
         "repaired_chats": repaired,

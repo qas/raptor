@@ -2,14 +2,18 @@
 
 import asyncio
 import ast
+import heapq
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from config import AGENT_WORKDIR
+from config import AGENT_WORKDIR, MAX_TOOL_OUTPUT
+from storage import FileTooLargeError, read_text_bounded
 
 
 SKILLS_ROOT = AGENT_WORKDIR / ".skills"
+MAX_DISCOVERED_SKILLS = 256
+MAX_FRONTMATTER_CHARS = 16 * 1024
 
 
 @dataclass(frozen=True)
@@ -91,6 +95,29 @@ def _inside(path: Path, root: Path) -> bool:
     return True
 
 
+def _read_frontmatter(path: Path) -> str:
+    parts: list[str] = []
+    characters = 0
+    with path.open(encoding="utf-8") as handle:
+        index = 0
+        while True:
+            remaining = MAX_FRONTMATTER_CHARS - characters
+            line = handle.readline(remaining + 1)
+            if not line:
+                break
+            characters += len(line)
+            if characters > MAX_FRONTMATTER_CHARS:
+                raise ValueError(
+                    "skill frontmatter exceeds "
+                    f"{MAX_FRONTMATTER_CHARS} characters"
+                )
+            parts.append(line)
+            if index and line.strip() == "---":
+                return "".join(parts)
+            index += 1
+    return "".join(parts)
+
+
 def _discover_sync() -> SkillSnapshot:
     root = SKILLS_ROOT.resolve()
     if not root.is_dir():
@@ -100,15 +127,24 @@ def _discover_sync() -> SkillSnapshot:
     errors: list[str] = []
     names: set[str] = set()
     try:
-        advertised_paths = sorted(SKILLS_ROOT.rglob("SKILL.md"))
+        advertised_paths = heapq.nsmallest(
+            MAX_DISCOVERED_SKILLS + 1,
+            SKILLS_ROOT.rglob("SKILL.md"),
+        )
     except OSError as exc:
         return SkillSnapshot((), (f"{SKILLS_ROOT}: {exc}",))
+    if len(advertised_paths) > MAX_DISCOVERED_SKILLS:
+        advertised_paths.pop()
+        errors.append(
+            f"{SKILLS_ROOT}: discovery exceeds "
+            f"{MAX_DISCOVERED_SKILLS} skills"
+        )
     for advertised_path in advertised_paths:
         try:
             path = advertised_path.resolve(strict=True)
             if not _inside(path, root):
                 raise ValueError("skill path escapes .skills")
-            contents = path.read_text(encoding="utf-8")
+            contents = _read_frontmatter(path)
             metadata = _frontmatter(contents)
             name = metadata.get("name", "").strip() or path.parent.name
             description = metadata.get("description", "").strip()
@@ -232,9 +268,18 @@ async def read_skill_tool(args: dict[str, Any]) -> dict[str, Any]:
         }
     try:
         contents = await asyncio.to_thread(
-            match.path.read_text,
-            encoding="utf-8",
+            read_text_bounded,
+            match.path,
+            MAX_TOOL_OUTPUT,
         )
+    except FileTooLargeError:
+        return {
+            "ok": False,
+            "error": (
+                "skill exceeds tool-output limit of "
+                f"{MAX_TOOL_OUTPUT} bytes"
+            ),
+        }
     except (OSError, UnicodeError) as exc:
         return {"ok": False, "error": f"failed to read skill: {exc}"}
     return {

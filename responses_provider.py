@@ -23,7 +23,12 @@ from config import (
     RESPONSES_SERVER_API_KEY,
     RESPONSES_SERVER_HOST,
     RESPONSES_SERVER_MAX_BODY,
+    RESPONSES_SERVER_MAX_CONNECTIONS,
+    RESPONSES_SERVER_MAX_PENDING,
+    RESPONSES_SERVER_MAX_STATUS_MESSAGES,
+    RESPONSES_SERVER_MAX_STREAM_EVENTS,
     RESPONSES_SERVER_PORT,
+    RESPONSES_SERVER_READ_TIMEOUT,
 )
 from observability import log_exception
 
@@ -46,7 +51,7 @@ class PendingResponse:
     created_at: int = field(default_factory=lambda: int(time.time()))
     completed: asyncio.Future[dict[str, Any]] | None = None
     events: asyncio.Queue[dict[str, Any]] = field(
-        default_factory=asyncio.Queue,
+        default_factory=lambda: asyncio.Queue(maxsize=256),
     )
     streamed_text: str = ""
     reasoning_summary: str = ""
@@ -55,12 +60,17 @@ class PendingResponse:
     )
     action: bool = False
     action_result: dict[str, Any] | None = None
+    delivery_captured: bool = False
 
 
 @dataclass(frozen=True)
 class QueuedEvent:
     request_id: str
     event: ChatEvent
+
+
+class ProviderOverloadedError(RuntimeError):
+    """The inbound provider reached its explicit request capacity."""
 
 
 def _json_bytes(value: Any) -> bytes:
@@ -138,18 +148,32 @@ class ResponsesApiProvider:
         port: int = RESPONSES_SERVER_PORT,
         api_key: str = RESPONSES_SERVER_API_KEY,
         max_body: int = RESPONSES_SERVER_MAX_BODY,
+        max_connections: int = RESPONSES_SERVER_MAX_CONNECTIONS,
+        max_pending: int = RESPONSES_SERVER_MAX_PENDING,
+        max_status_messages: int = RESPONSES_SERVER_MAX_STATUS_MESSAGES,
+        max_stream_events: int = RESPONSES_SERVER_MAX_STREAM_EVENTS,
+        read_timeout: float = RESPONSES_SERVER_READ_TIMEOUT,
     ) -> None:
         self.host = host
         self.port = port
         self.api_key = api_key
         self.max_body = max_body
+        self.max_connections = max_connections
+        self.max_pending = max_pending
+        self.max_status_messages = max_status_messages
+        self.max_stream_events = max_stream_events
+        self.read_timeout = read_timeout
         self.server: asyncio.AbstractServer | None = None
-        self.events: asyncio.Queue[QueuedEvent] = asyncio.Queue()
+        self.events: asyncio.Queue[QueuedEvent] = asyncio.Queue(
+            maxsize=max_pending,
+        )
         self.pending: dict[str, PendingResponse] = {}
         self.messages: dict[str, dict[str, Any]] = {}
+        self.inbox: dict[str, dict[str, dict[str, Any]]] = {}
         self.event_requests: dict[int, str] = {}
         self._cursor = 0
         self._message_counter = 0
+        self._active_connections = 0
 
     @property
     def bound_port(self) -> int:
@@ -184,7 +208,15 @@ class ResponsesApiProvider:
                     RuntimeError("Responses API provider closed"),
                 )
         self.pending.clear()
+        self.inbox.clear()
         self.event_requests.clear()
+        while True:
+            try:
+                self.events.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            else:
+                self.events.task_done()
         self._clear_request_context()
 
     async def poll(
@@ -235,7 +267,9 @@ class ResponsesApiProvider:
         self,
         conversation_id: ConversationId,
     ) -> str | None:
-        self._conversation_pending(conversation_id)
+        pending = self._conversation_pending(conversation_id)
+        if pending is not None:
+            pending.delivery_captured = True
         return _request_id.get()
 
     def activate_delivery_context(
@@ -261,7 +295,26 @@ class ResponsesApiProvider:
     def _emit(self, event: dict[str, Any]) -> None:
         pending = self._pending()
         if pending is not None and pending.stream:
-            pending.events.put_nowait(event)
+            self._emit_stream_event(pending, event)
+
+    @staticmethod
+    def _emit_stream_event(
+        pending: PendingResponse,
+        event: dict[str, Any],
+        *,
+        terminal: bool = False,
+    ) -> None:
+        """Bound streamed projections while preserving terminal state."""
+        if pending.events.full():
+            if not terminal:
+                return
+            try:
+                pending.events.get_nowait()
+            except asyncio.QueueEmpty:
+                pass
+            else:
+                pending.events.task_done()
+        pending.events.put_nowait(event)
 
     @staticmethod
     def _actions(controls: Controls) -> list[dict[str, str]]:
@@ -285,6 +338,48 @@ class ResponsesApiProvider:
             "actions": message["actions"],
             "pinned": message["pinned"],
         }
+
+    def _store_message(self, message_id: str, message: dict[str, Any]) -> None:
+        self.messages[message_id] = message
+        conversation_id = message["conversation_id"]
+        while True:
+            matching = [
+                key
+                for key, item in self.messages.items()
+                if item["conversation_id"] == conversation_id
+            ]
+            if len(matching) <= self.max_status_messages:
+                return
+            evictable = next(
+                (
+                    key
+                    for key in matching
+                    if not self.messages[key]["pinned"]
+                    and not self.messages[key]["actions"]
+                ),
+                matching[0],
+            )
+            self.messages.pop(evictable, None)
+
+    def _store_inbox_message(
+        self,
+        conversation_id: ConversationId,
+        text: str,
+    ) -> None:
+        conversation = str(conversation_id)
+        self._message_counter += 1
+        message_id = f"inbox_{self._message_counter}"
+        messages = self.inbox.setdefault(conversation, {})
+        messages[message_id] = {
+            "conversation_id": conversation,
+            "message_id": message_id,
+            "text": str(text),
+            "actions": [],
+            "pinned": False,
+            "asynchronous": True,
+        }
+        while len(messages) > self.max_status_messages:
+            messages.pop(next(iter(messages)), None)
 
     def _response(self, pending: PendingResponse, text: str) -> dict[str, Any]:
         message_id = "msg_" + secrets.token_hex(12)
@@ -322,18 +417,17 @@ class ResponsesApiProvider:
 
     async def send_text(self, conversation_id, text: str) -> None:
         pending = self._conversation_pending(conversation_id)
-        if pending is None or pending.completed is None:
-            raise RuntimeError(
-                "no active Responses request for this conversation"
-            )
+        if pending is None:
+            self._store_inbox_message(conversation_id, str(text))
+            return
         response = self._response(pending, str(text))
-        if not pending.completed.done():
+        if pending.completed is not None and not pending.completed.done():
             pending.completed.set_result(response)
         final_text = str(text)
         if pending.stream and final_text.startswith(pending.streamed_text):
             delta = final_text[len(pending.streamed_text):]
             if delta:
-                pending.events.put_nowait({
+                self._emit_stream_event(pending, {
                     "type": "response.output_text.delta",
                     "output_index": 0,
                     "content_index": 0,
@@ -341,23 +435,23 @@ class ResponsesApiProvider:
                 })
         if pending.stream:
             if pending.reasoning_summary:
-                pending.events.put_nowait({
+                self._emit_stream_event(pending, {
                     "type": "response.reasoning_summary_text.done",
                     "item_id": pending.reasoning_item_id,
                     "output_index": 1,
                     "summary_index": 0,
                     "text": pending.reasoning_summary,
-                })
-            pending.events.put_nowait({
+                }, terminal=True)
+            self._emit_stream_event(pending, {
                 "type": "response.output_text.done",
                 "output_index": 0,
                 "content_index": 0,
                 "text": final_text,
-            })
-        pending.events.put_nowait({
-            "type": "response.completed",
-            "response": response,
-        })
+            }, terminal=True)
+            self._emit_stream_event(pending, {
+                "type": "response.completed",
+                "response": response,
+            }, terminal=True)
 
     async def send_draft(
         self,
@@ -376,7 +470,7 @@ class ResponsesApiProvider:
             delta = current
         pending.streamed_text = current
         if delta:
-            pending.events.put_nowait({
+            self._emit_stream_event(pending, {
                 "type": "response.output_text.delta",
                 "output_index": 0,
                 "content_index": 0,
@@ -393,7 +487,7 @@ class ResponsesApiProvider:
         if pending is None or not pending.stream or not text:
             return
         pending.reasoning_summary += text
-        pending.events.put_nowait({
+        self._emit_stream_event(pending, {
             "type": "response.reasoning_summary_text.delta",
             "item_id": pending.reasoning_item_id,
             "output_index": 1,
@@ -417,7 +511,7 @@ class ResponsesApiProvider:
             "actions": self._actions(controls),
             "pinned": False,
         }
-        self.messages[message_id] = message
+        self._store_message(message_id, message)
         self._emit(self._status_event("created", message))
         return message_id
 
@@ -443,7 +537,7 @@ class ResponsesApiProvider:
             "actions": self._actions(controls),
             "pinned": bool(previous.get("pinned", False)),
         }
-        self.messages[key] = message
+        self._store_message(key, message)
         self._emit(self._status_event("updated", message))
 
     async def delete_message(self, conversation_id, message_id) -> None:
@@ -540,6 +634,15 @@ class ResponsesApiProvider:
                         "alert": False,
                     }
                 )
+            elif (
+                pending is not None
+                and pending.completed is not None
+                and not pending.completed.done()
+                and not pending.delivery_captured
+            ):
+                pending.completed.set_exception(
+                    RuntimeError("request ended without a response")
+                )
         finally:
             self._clear_request_context()
 
@@ -586,9 +689,12 @@ class ResponsesApiProvider:
             200: "OK",
             400: "Bad Request",
             401: "Unauthorized",
+            408: "Request Timeout",
+            429: "Too Many Requests",
             404: "Not Found",
             405: "Method Not Allowed",
             500: "Internal Server Error",
+            503: "Service Unavailable",
         }
         header = (
             f"HTTP/1.1 {status} {reasons.get(status, 'Error')}\r\n"
@@ -653,9 +759,12 @@ class ResponsesApiProvider:
         self,
         payload: dict[str, Any],
     ) -> PendingResponse:
-        conversation_id = str(
-            payload.get("conversation") or self.primary_conversation_id
-        )
+        if len(self.pending) >= self.max_pending:
+            raise ProviderOverloadedError("too many pending requests")
+        conversation = payload.get("conversation")
+        if conversation is not None and not isinstance(conversation, str):
+            raise ValueError("conversation must be a string")
+        conversation_id = conversation or self.primary_conversation_id
         if not CONVERSATION_PATTERN.fullmatch(conversation_id):
             raise ValueError(
                 "conversation must be 1-128 letters, numbers, dots, "
@@ -663,12 +772,23 @@ class ResponsesApiProvider:
             )
         text = input_text(payload.get("input"))
         request_id = "req_" + secrets.token_hex(12)
+        stream = payload.get("stream", False)
+        if not isinstance(stream, bool):
+            raise ValueError("stream must be a boolean")
+        model = payload.get("model")
+        if model is not None and not isinstance(model, str):
+            raise ValueError("model must be a string")
         pending = PendingResponse(
             response_id="resp_" + secrets.token_hex(12),
             request_id=request_id,
             conversation_id=conversation_id,
-            stream=bool(payload.get("stream", False)),
-            completed=asyncio.get_running_loop().create_future(),
+            stream=stream,
+            completed=(
+                None
+                if stream
+                else asyncio.get_running_loop().create_future()
+            ),
+            events=asyncio.Queue(maxsize=self.max_stream_events),
         )
         self.pending[request_id] = pending
         event = IncomingMessage(
@@ -678,16 +798,29 @@ class ResponsesApiProvider:
             text=text,
         )
         self.event_requests[id(event)] = request_id
-        await self.events.put(QueuedEvent(request_id, event))
+        try:
+            self.events.put_nowait(QueuedEvent(request_id, event))
+        except asyncio.QueueFull as exc:
+            self.pending.pop(request_id, None)
+            self.event_requests.pop(id(event), None)
+            raise ProviderOverloadedError(
+                "too many pending requests"
+            ) from exc
         return pending
 
     async def _queue_action(self, payload: dict[str, Any]) -> PendingResponse:
-        data = str(payload.get("data") or "").strip()
+        if len(self.pending) >= self.max_pending:
+            raise ProviderOverloadedError("too many pending requests")
+        data_value = payload.get("data")
+        if not isinstance(data_value, str):
+            raise ValueError("data must be a string")
+        data = data_value.strip()
         if not data:
             raise ValueError("data is required")
-        conversation_id = str(
-            payload.get("conversation") or self.primary_conversation_id
-        )
+        conversation = payload.get("conversation")
+        if conversation is not None and not isinstance(conversation, str):
+            raise ValueError("conversation must be a string")
+        conversation_id = conversation or self.primary_conversation_id
         if not CONVERSATION_PATTERN.fullmatch(conversation_id):
             raise ValueError("invalid conversation")
         request_id = "req_" + secrets.token_hex(12)
@@ -697,6 +830,7 @@ class ResponsesApiProvider:
             conversation_id=conversation_id,
             stream=False,
             completed=asyncio.get_running_loop().create_future(),
+            events=asyncio.Queue(maxsize=self.max_stream_events),
             action=True,
         )
         self.pending[request_id] = pending
@@ -708,7 +842,14 @@ class ResponsesApiProvider:
             data=data,
         )
         self.event_requests[id(event)] = request_id
-        await self.events.put(QueuedEvent(request_id, event))
+        try:
+            self.events.put_nowait(QueuedEvent(request_id, event))
+        except asyncio.QueueFull as exc:
+            self.pending.pop(request_id, None)
+            self.event_requests.pop(id(event), None)
+            raise ProviderOverloadedError(
+                "too many pending requests"
+            ) from exc
         return pending
 
     async def _handle_connection(
@@ -716,10 +857,39 @@ class ResponsesApiProvider:
         reader: asyncio.StreamReader,
         writer: asyncio.StreamWriter,
     ) -> None:
-        pending: PendingResponse | None = None
+        if self._active_connections >= self.max_connections:
+            try:
+                await self._write_json(writer, 503, {
+                    "error": {
+                        "code": "server_overloaded",
+                        "message": "Server is at connection capacity",
+                        "type": "server_error",
+                    }
+                })
+            finally:
+                writer.close()
+                try:
+                    await writer.wait_closed()
+                except (ConnectionError, BrokenPipeError):
+                    pass
+            return
+        self._active_connections += 1
         try:
-            method, path, query, headers, body = await self._read_request(
-                reader
+            await self._serve_connection(reader, writer)
+        finally:
+            self._active_connections -= 1
+
+    async def _serve_connection(
+        self,
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter,
+    ) -> None:
+        pending: PendingResponse | None = None
+        correlation_id = "req_" + secrets.token_hex(12)
+        try:
+            method, path, query, headers, body = await asyncio.wait_for(
+                self._read_request(reader),
+                timeout=self.read_timeout,
             )
             if not self._authorized(headers):
                 await self._write_json(
@@ -750,7 +920,7 @@ class ResponsesApiProvider:
                         message
                         for message in self.messages.values()
                         if message["conversation_id"] == conversation_id
-                    ],
+                    ] + list(self.inbox.get(conversation_id, {}).values()),
                 })
                 return
             if method == "GET" and path == "/v1/models":
@@ -797,17 +967,47 @@ class ResponsesApiProvider:
                 assert pending.completed is not None
                 result = await pending.completed
                 await self._write_json(writer, 200, result)
-        except (ValueError, asyncio.IncompleteReadError) as exc:
+        except asyncio.TimeoutError:
+            await self._write_json(writer, 408, {
+                "error": {
+                    "code": "request_timeout",
+                    "message": "Request headers or body timed out",
+                    "type": "invalid_request_error",
+                }
+            })
+        except ProviderOverloadedError:
+            await self._write_json(writer, 429, {
+                "error": {
+                    "code": "agent_overloaded",
+                    "message": "Too many pending requests",
+                    "type": "rate_limit_error",
+                }
+            })
+        except (
+            ValueError,
+            asyncio.IncompleteReadError,
+            asyncio.LimitOverrunError,
+        ) as exc:
             await self._write_json(writer, 400, {
                 "error": {"message": str(exc), "type": "invalid_request_error"},
             })
         except (ConnectionError, BrokenPipeError):
             pass
         except Exception as exc:
-            log_exception("responses_api", "request_error", exc)
+            log_exception(
+                "responses_api",
+                "request_error",
+                exc,
+                {"request_id": correlation_id},
+            )
             try:
                 await self._write_json(writer, 500, {
-                    "error": {"message": str(exc), "type": "server_error"},
+                    "error": {
+                        "code": "internal_error",
+                        "message": "Internal server error",
+                        "request_id": correlation_id,
+                        "type": "server_error",
+                    },
                 })
             except Exception:
                 pass

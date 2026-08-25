@@ -1,15 +1,14 @@
-"""Provider-neutral projection of background subagent activity."""
+"""Provider-neutral projection of subagent activity."""
 
 import asyncio
 from dataclasses import dataclass, replace
 from typing import Any, Protocol, runtime_checkable
 
+import session
 from chat_provider import ConversationId
 from chat_runtime import get_chat_provider
 from config import MAX_TOOL_OUTPUT
 from observability import log_exception
-import session
-
 
 ACTIVITY_UPDATE_INTERVAL_SECONDS = 1.5
 MAX_ACTIVITY_FIELD_CHARS = 600
@@ -37,20 +36,29 @@ def _bounded_activity_message(value: Any) -> str:
 
 @dataclass(frozen=True)
 class ActivitySnapshot:
-    """Safe public state for one background activity."""
+    """Safe public state for one subagent activity surface."""
 
     activity_id: str
     title: str
     status: str
+    generation: int = 1
     detail: str = ""
     result: str = ""
     reasoning_summary: str = ""
     reply: str = ""
 
 
+@dataclass(frozen=True)
+class ActivityFinishResult:
+    """Durable progress from finalizing one activity run."""
+
+    finished: bool
+    result_delivered: bool
+
+
 @runtime_checkable
 class ActivitySurfaceProvider(Protocol):
-    """Optional provider extension for isolated background-agent output."""
+    """Optional provider extension for isolated subagent output."""
 
     async def open_activity_surface(
         self,
@@ -66,11 +74,24 @@ class ActivitySurfaceProvider(Protocol):
         snapshot: ActivitySnapshot,
     ) -> None: ...
 
-    async def close_activity_surface(
+    async def append_activity_message(
+        self,
+        conversation_id: ConversationId,
+        surface_id: str,
+        text: str,
+    ) -> None: ...
+
+    async def finish_activity_surface(
         self,
         conversation_id: ConversationId,
         surface_id: str,
         snapshot: ActivitySnapshot,
+    ) -> ActivityFinishResult: ...
+
+    async def delete_activity_surface(
+        self,
+        conversation_id: ConversationId,
+        surface_id: str,
     ) -> None: ...
 
     def restore_activity_surface(
@@ -95,12 +116,14 @@ class ActivityProjection:
         self.surface_id = surface_id
         self.pending: ActivitySnapshot | None = None
         self.last_published = snapshot
+        self.desired = snapshot
         self.task: asyncio.Task[None] | None = None
         self.closed = False
 
     def publish(self, snapshot: ActivitySnapshot) -> None:
         if self.closed:
             return
+        self.desired = snapshot
         if snapshot == self.pending:
             return
         if self.pending is None and snapshot == self.last_published:
@@ -115,7 +138,7 @@ class ActivityProjection:
         reasoning_summary: str | None = None,
         reply: str | None = None,
     ) -> None:
-        current = self.pending or self.last_published
+        current = self.desired
         self.publish(
             replace(
                 current,
@@ -133,7 +156,7 @@ class ActivityProjection:
         )
 
     def publish_activity(self, snapshot: ActivitySnapshot) -> None:
-        current = self.pending or self.last_published
+        current = self.desired
         self.publish(
             replace(
                 snapshot,
@@ -166,49 +189,36 @@ class ActivityProjection:
             if self.pending is not None:
                 await asyncio.sleep(ACTIVITY_UPDATE_INTERVAL_SECONDS)
 
-    async def close(self, snapshot: ActivitySnapshot) -> bool:
-        if self.closed:
-            return True
-        self.closed = True
-        self.pending = None
-        if self.task is not None and not self.task.done():
-            self.task.cancel()
-            await asyncio.gather(self.task, return_exceptions=True)
+    async def finish(self, snapshot: ActivitySnapshot) -> ActivityFinishResult:
+        if not self.closed:
+            self.closed = True
+            self.pending = None
+            if self.task is not None and not self.task.done():
+                self.task.cancel()
+                await asyncio.gather(self.task, return_exceptions=True)
         try:
-            await self.provider.close_activity_surface(
+            return await self.provider.finish_activity_surface(
                 self.conversation_id,
                 self.surface_id,
                 snapshot,
             )
-            return True
         except asyncio.CancelledError:
             raise
         except Exception as exc:
             log_exception(
                 "activity",
-                "surface_close_error",
+                "surface_finish_error",
                 exc,
                 {"activity_id": snapshot.activity_id},
             )
-            return False
+            return ActivityFinishResult(False, False)
 
 
-_projections: dict[tuple[str, str], ActivityProjection] = {}
-_close_tasks: set[asyncio.Task[None]] = set()
+_projections: dict[tuple[str, str, int], ActivityProjection] = {}
 
 
-def _finish_close_task(task: asyncio.Task[None]) -> None:
-    _close_tasks.discard(task)
-    try:
-        task.result()
-    except asyncio.CancelledError:
-        pass
-    except Exception as exc:
-        log_exception("activity", "surface_close_task_error", exc)
-
-
-def _projection_key(activity_id: str) -> tuple[str, str]:
-    return session.current_runtime().key, activity_id
+def _projection_key(activity_id: str, generation: int) -> tuple[str, str, int]:
+    return session.current_runtime().key, activity_id, generation
 
 
 def _snapshot(
@@ -224,6 +234,7 @@ def _snapshot(
             record.get("last_task") or record.get("task") or "Subagent"
         ),
         status=_bounded_activity_field(status),
+        generation=max(1, int(record.get("run_generation") or 1)),
         detail=_bounded_activity_field(detail),
         result=(
             _bounded_activity_message(result)
@@ -234,7 +245,7 @@ def _snapshot(
 
 
 async def open_subagent_activity(record: dict[str, Any]) -> None:
-    """Open a best-effort activity surface for a background subagent."""
+    """Open a best-effort activity surface for a subagent."""
     provider = get_chat_provider()
     if not isinstance(provider, ActivitySurfaceProvider):
         return
@@ -256,22 +267,64 @@ async def open_subagent_activity(record: dict[str, Any]) -> None:
         return
     if not surface_id:
         return
-    activity_id = str(record.get("id") or "")
+    activity_id = snapshot.activity_id
     record["activity_surface_id"] = surface_id
-    record["activity_surface_closed"] = False
-    session.save_state()
-    _projections[_projection_key(activity_id)] = ActivityProjection(
-        provider,
-        record["chat_id"],
-        surface_id,
-        snapshot,
-    )
+    try:
+        session.save_state()
+    except Exception:
+        record["activity_surface_id"] = existing_surface_id
+        if surface_id != existing_surface_id:
+            try:
+                await provider.delete_activity_surface(
+                    record["chat_id"],
+                    surface_id,
+                )
+            except Exception as exc:
+                log_exception(
+                    "activity",
+                    "surface_open_rollback_error",
+                    exc,
+                    {"activity_id": activity_id},
+                )
+        raise
+    _projections[
+        _projection_key(activity_id, snapshot.generation)
+    ] = ActivityProjection(provider, record["chat_id"], surface_id, snapshot)
 
 
 def publish_subagent_activity(record: dict[str, Any], detail: str) -> None:
-    projection = _projections.get(_projection_key(str(record.get("id") or "")))
+    snapshot = _snapshot(record, detail=detail)
+    projection = _projections.get(
+        _projection_key(snapshot.activity_id, snapshot.generation)
+    )
     if projection is not None:
-        projection.publish_activity(_snapshot(record, detail=detail))
+        projection.publish_activity(snapshot)
+
+
+async def append_subagent_activity_input(
+    record: dict[str, Any],
+    text: str,
+) -> None:
+    """Append one parent-authored input to an existing activity surface."""
+    surface_id = str(record.get("activity_surface_id") or "")
+    provider = get_chat_provider()
+    if not surface_id or not isinstance(provider, ActivitySurfaceProvider):
+        return
+    try:
+        await provider.append_activity_message(
+            record["chat_id"],
+            surface_id,
+            _bounded_activity_message(text),
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        log_exception(
+            "activity",
+            "surface_input_error",
+            exc,
+            {"activity_id": _bounded_activity_field(record.get("id"))},
+        )
 
 
 def publish_subagent_response(
@@ -281,7 +334,10 @@ def publish_subagent_response(
     reply: str | None = None,
 ) -> None:
     """Project safe model-visible output without exposing child context."""
-    projection = _projections.get(_projection_key(str(record.get("id") or "")))
+    snapshot = _snapshot(record)
+    projection = _projections.get(
+        _projection_key(snapshot.activity_id, snapshot.generation)
+    )
     if projection is not None:
         projection.publish_response(
             reasoning_summary=reasoning_summary,
@@ -289,79 +345,129 @@ def publish_subagent_response(
         )
 
 
-async def close_subagent_activity(record: dict[str, Any]) -> None:
-    activity_id = str(record.get("id") or "")
+async def finish_subagent_activity(
+    record: dict[str, Any],
+    *,
+    expected_generation: int | None = None,
+) -> bool:
+    """Finalize one run while preserving its continuable surface."""
+    activity_id = _bounded_activity_field(record.get("id"))
+    generation = max(1, int(record.get("run_generation") or 1))
+    if expected_generation is not None and generation != expected_generation:
+        return False
+    if int(record.get("activity_finished_generation") or 0) >= generation:
+        return True
     surface_id = str(record.get("activity_surface_id") or "")
-    if not surface_id or record.get("activity_surface_closed"):
-        return
+    if not surface_id:
+        return True
     provider = get_chat_provider()
     if not isinstance(provider, ActivitySurfaceProvider):
-        return
-    projection = _projections.pop(_projection_key(activity_id), None)
+        return True
+    projection = _projections.pop(
+        _projection_key(activity_id, generation),
+        None,
+    )
     snapshot = _snapshot(record)
+    if record.get("activity_result_delivered"):
+        snapshot = replace(snapshot, result="")
     if projection is not None:
-        current = projection.pending or projection.last_published
+        current = projection.desired
         snapshot = replace(
             snapshot,
             reasoning_summary=current.reasoning_summary,
             reply=current.reply,
         )
-        closed = await projection.close(snapshot)
+        result = await projection.finish(snapshot)
     else:
         try:
-            await provider.close_activity_surface(
+            result = await provider.finish_activity_surface(
                 record["chat_id"],
                 surface_id,
                 snapshot,
             )
-            closed = True
         except asyncio.CancelledError:
             raise
         except Exception as exc:
             log_exception(
                 "activity",
-                "surface_recovery_close_error",
+                "surface_finish_error",
                 exc,
                 {"activity_id": activity_id},
             )
-            closed = False
-    if closed:
-        record["activity_surface_closed"] = True
+            return False
+    if result.result_delivered:
+        record["activity_result_delivered"] = True
+    if result.finished:
+        record["activity_finished_generation"] = generation
+    if result.result_delivered or result.finished:
         session.save_state()
+    return result.finished
 
 
-def schedule_subagent_activity_close(record: dict[str, Any]) -> None:
-    """Close presentation asynchronously without gating agent capacity."""
-    task = asyncio.create_task(close_subagent_activity(record))
-    _close_tasks.add(task)
-    task.add_done_callback(_finish_close_task)
+async def delete_subagent_activity(record: dict[str, Any]) -> bool:
+    """Delete a terminal subagent's provider-owned activity surface."""
+    surface_id = str(record.get("activity_surface_id") or "")
+    if not surface_id:
+        return True
+    provider = get_chat_provider()
+    if not isinstance(provider, ActivitySurfaceProvider):
+        return False
+    try:
+        await provider.delete_activity_surface(
+            record["chat_id"],
+            surface_id,
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        log_exception(
+            "activity",
+            "surface_delete_error",
+            exc,
+            {"activity_id": _bounded_activity_field(record.get("id"))},
+        )
+        return False
+    record["activity_surface_id"] = None
+    record.pop("activity_finished_generation", None)
+    record.pop("activity_result_delivered", None)
+    session.save_state()
+    return True
 
 
 async def reconcile_activity_surfaces() -> None:
-    """Close surfaces left open by an interrupted process."""
+    """Restore continuable surfaces after process restart."""
     for runtime in session.all_chat_runtimes():
         with session.bound_runtime(runtime):
             for record in runtime.subagent_records.values():
                 surface_id = str(record.get("activity_surface_id") or "")
                 provider = get_chat_provider()
-                if surface_id and isinstance(provider, ActivitySurfaceProvider):
-                    provider.restore_activity_surface(
-                        record["chat_id"],
-                        surface_id,
-                    )
                 if (
                     surface_id
-                    and not record.get("activity_surface_closed")
-                    and record.get("status") != "running"
+                    and isinstance(provider, ActivitySurfaceProvider)
                 ):
-                    await close_subagent_activity(record)
+                    try:
+                        provider.restore_activity_surface(
+                            record["chat_id"],
+                            surface_id,
+                        )
+                    except Exception as exc:
+                        log_exception(
+                            "activity",
+                            "surface_restore_error",
+                            exc,
+                            {
+                                "activity_id": _bounded_activity_field(
+                                    record.get("id")
+                                )
+                            },
+                        )
+                        continue
+                    if record.get("status") != "running":
+                        await finish_subagent_activity(record)
 
 
 async def close_activity_projections() -> None:
     """Stop transient update tasks during application shutdown."""
-    close_tasks = tuple(_close_tasks)
-    if close_tasks:
-        await asyncio.gather(*close_tasks, return_exceptions=True)
     projections = tuple(_projections.values())
     _projections.clear()
     for projection in projections:

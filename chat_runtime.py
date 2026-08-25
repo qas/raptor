@@ -95,6 +95,19 @@ def bound_delivery_context(
         restore_delivery_context(token)
 
 
+@contextmanager
+def detached_delivery_context(
+    conversation_id: ConversationId,
+) -> Iterator[None]:
+    """Temporarily send outside any request-correlated response slot."""
+    provider = get_chat_provider()
+    token = provider.activate_delivery_context(conversation_id, None)
+    try:
+        yield
+    finally:
+        provider.restore_delivery_context(token)
+
+
 async def send(
     conversation_id: ConversationId,
     text: str,

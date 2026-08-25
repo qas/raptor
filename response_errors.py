@@ -18,6 +18,10 @@ class IncompleteResponsesStreamError(RuntimeError):
     """The transport closed before the protocol's terminal event."""
 
 
+class PartialResponsesStreamError(RuntimeError):
+    """A stream failed after public output made replay unsafe."""
+
+
 class MalformedToolCallError(RuntimeError):
     """The provider rejected malformed model-generated tool arguments."""
 
