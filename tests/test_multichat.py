@@ -21,6 +21,27 @@ from turn_runtime import TurnKind, turns
 
 
 class MultichatTests(unittest.IsolatedAsyncioTestCase):
+    def test_durable_field_commit_preserves_live_subagent_record(self) -> None:
+        runtime = session.current_runtime()
+        record = {"id": "worker", "status": "running"}
+        runtime.subagent_records["worker"] = record
+        session_id = str(runtime.state["current_session_id"])
+        try:
+            session.set_pending_delivery(session_id, 1)
+
+            self.assertIs(runtime.subagent_records["worker"], record)
+            record["status"] = "completed"
+            session.save_state()
+
+            persisted = session._root_state["chats"][runtime.key]["state"]
+            self.assertEqual(
+                persisted["subagents"]["worker"]["status"],
+                "completed",
+            )
+        finally:
+            runtime.subagent_records.pop("worker", None)
+            session.clear_pending_delivery(session_id, 1)
+
     def test_recovery_markers_fit_after_state_reaches_admission_limit(
         self,
     ) -> None:

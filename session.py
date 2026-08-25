@@ -4,7 +4,7 @@ import asyncio
 import copy
 import json
 import time
-from collections.abc import Iterator, MutableMapping
+from collections.abc import Callable, Iterator, MutableMapping
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -522,11 +522,13 @@ def _write_state() -> None:
     _write_root_state(_root_state)
 
 
-def _persist_chat_candidate(
-    candidate_state: dict[str, Any],
+def _commit_chat_mutation(
+    mutate: Callable[[dict[str, Any]], None],
 ) -> None:
-    """Commit one chat-state replacement only after its write succeeds."""
+    """Persist one chat mutation without replacing live nested objects."""
     runtime = current_runtime()
+    candidate_state = copy.deepcopy(runtime.state)
+    mutate(candidate_state)
     current_entry = _root_state["chats"][runtime.key]
     candidate_entry = {
         **current_entry,
@@ -540,31 +542,35 @@ def _persist_chat_candidate(
         },
     }
     _write_root_state(candidate_root)
-    runtime.state.clear()
-    runtime.state.update(candidate_state)
+    mutate(runtime.state)
 
 
 def queue_pending_steer(steer_id: str, text: str) -> None:
     """Durably admit one steer without mutating live state on rejection."""
-    candidate = copy.deepcopy(current_runtime().state)
-    pending = candidate.setdefault("pending_inputs", [])
+    pending = current_runtime().state.get("pending_inputs")
     if not isinstance(pending, list):
         raise RuntimeError("Pending steering state is invalid")
     if len(pending) >= MAX_PENDING_STEERS:
         raise StateCapacityError("Steering queue is full")
-    pending.append({"id": str(steer_id), "text": str(text)})
-    _persist_chat_candidate(candidate)
+    entry = {"id": str(steer_id), "text": str(text)}
+
+    def mutate(chat_state: dict[str, Any]) -> None:
+        chat_state["pending_inputs"].append(copy.deepcopy(entry))
+
+    _commit_chat_mutation(mutate)
 
 
 def set_pending_delivery(session_id: str, seq: int) -> None:
     """Persist the transcript reference awaiting provider delivery."""
-    candidate = copy.deepcopy(current_runtime().state)
     reference = {"session_id": str(session_id), "seq": int(seq)}
-    existing = candidate.get("pending_delivery")
+    existing = current_runtime().state.get("pending_delivery")
     if existing is not None and existing != reference:
         raise RuntimeError("A response is already awaiting delivery")
-    candidate["pending_delivery"] = reference
-    _persist_chat_candidate(candidate)
+
+    def mutate(chat_state: dict[str, Any]) -> None:
+        chat_state["pending_delivery"] = copy.deepcopy(reference)
+
+    _commit_chat_mutation(mutate)
 
 
 def clear_pending_delivery(session_id: str, seq: int) -> None:
@@ -572,16 +578,19 @@ def clear_pending_delivery(session_id: str, seq: int) -> None:
     expected = {"session_id": str(session_id), "seq": int(seq)}
     if current_runtime().state.get("pending_delivery") != expected:
         return
-    candidate = copy.deepcopy(current_runtime().state)
-    candidate["pending_delivery"] = None
-    _persist_chat_candidate(candidate)
+
+    def mutate(chat_state: dict[str, Any]) -> None:
+        chat_state["pending_delivery"] = None
+
+    _commit_chat_mutation(mutate)
 
 
 def set_active_root_turn(marker: dict[str, Any]) -> None:
     """Persist the bounded crash-recovery marker from reserved capacity."""
-    candidate = copy.deepcopy(current_runtime().state)
-    candidate["active_root_turn"] = copy.deepcopy(marker)
-    _persist_chat_candidate(candidate)
+    def mutate(chat_state: dict[str, Any]) -> None:
+        chat_state["active_root_turn"] = copy.deepcopy(marker)
+
+    _commit_chat_mutation(mutate)
 
 
 def ensure_chat(conversation_id: ConversationId) -> ChatRuntime:
