@@ -5,19 +5,13 @@ import select
 import signal
 import sys
 import time
+from collections.abc import Callable
 
 SUPERVISOR_MODE = "_shell-supervisor"
 
 
 _POLL_SECONDS = 0.05
 _TERMINATION_GRACE_SECONDS = 1.0
-
-
-def _reap_if_exited(pid: int) -> int | None:
-    waited, status = os.waitpid(pid, os.WNOHANG)
-    if waited == 0:
-        return None
-    return status
 
 
 def _signal_group(pgid: int, sig: signal.Signals) -> None:
@@ -27,17 +21,14 @@ def _signal_group(pgid: int, sig: signal.Signals) -> None:
         pass
 
 
-def _terminate_group(pid: int, status: int | None) -> int:
-    """Signal the group, then reap the leader if this process still owns it."""
+def _terminate_group(pid: int, leader_exited: Callable[[], bool]) -> int:
+    """Terminate descendants before reaping the process-group leader."""
     _signal_group(pid, signal.SIGTERM)
     deadline = time.monotonic() + _TERMINATION_GRACE_SECONDS
-    while status is None and time.monotonic() < deadline:
-        status = _reap_if_exited(pid)
-        if status is None:
-            time.sleep(_POLL_SECONDS)
+    while not leader_exited() and time.monotonic() < deadline:
+        time.sleep(_POLL_SECONDS)
     _signal_group(pid, signal.SIGKILL)
-    if status is None:
-        _waited_pid, status = os.waitpid(pid, 0)
+    _waited_pid, status = os.waitpid(pid, 0)
     return status
 
 
@@ -56,6 +47,13 @@ def _run(command: str, liveness_fd: int, start_fd: int) -> int:
     if not _await_start(liveness_fd, start_fd):
         return 128 + signal.SIGTERM
     os.close(start_fd)
+    child_exited = False
+
+    def record_child_exit(_signum: int, _frame: object) -> None:
+        nonlocal child_exited
+        child_exited = True
+
+    signal.signal(signal.SIGCHLD, record_child_exit)
     pid = os.fork()
     if pid == 0:
         os.setpgid(0, 0)
@@ -67,16 +65,12 @@ def _run(command: str, liveness_fd: int, start_fd: int) -> int:
 
     signal.signal(signal.SIGINT, forward_interrupt)
     parent_lost = False
-    status = None
-    while True:
+    while not child_exited:
         readable, _, _ = select.select([liveness_fd], [], [], _POLL_SECONDS)
         if readable and not os.read(liveness_fd, 1):
             parent_lost = True
             break
-        status = _reap_if_exited(pid)
-        if status is not None:
-            break
-    status = _terminate_group(pid, status)
+    status = _terminate_group(pid, lambda: child_exited)
     if parent_lost:
         return 128 + signal.SIGTERM
     return os.waitstatus_to_exitcode(status)
