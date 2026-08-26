@@ -11,6 +11,7 @@ a = Analysis(
         "responses_provider",
         "multi_provider",
         "shell_supervisor",
+        "socksio",
     ],
     hookspath=[],
     hooksconfig={},

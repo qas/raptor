@@ -6,7 +6,7 @@ import tempfile
 import types
 import unittest
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import httpx
 
@@ -847,14 +847,23 @@ class TelegramMultiChatTests(unittest.IsolatedAsyncioTestCase):
             ]
         )
         client = AsyncMock()
+        client_factory = Mock(return_value=client)
         with (
             patch.object(telegram, "TG_CHAT_IDS", (7, -1002)),
-            patch.object(telegram, "_client", client),
+            patch.object(telegram, "_client", None),
+            patch.object(
+                telegram,
+                "outbound_http_client",
+                client_factory,
+            ),
             patch.object(telegram, "tg_call", call),
         ):
             provider = telegram.TelegramProvider()
             await provider.initialize(())
 
+        client_factory.assert_called_once_with(
+            timeout=httpx.Timeout(65.0, connect=10.0),
+        )
         self.assertEqual(provider.primary_conversation_id, "7")
         self.assertEqual(
             provider._chats[7].chat_type,

@@ -64,6 +64,49 @@ class ResponsesServerConfigurationTests(unittest.TestCase):
         self.assertEqual(values["RESPONSES_SERVER_API_KEY"], "")
 
 
+class ProxyConfigurationTests(unittest.TestCase):
+    def test_accepts_https_and_remote_dns_socks_proxies(self) -> None:
+        for proxy in (
+            "https://user:pass@proxy.example:8443",
+            "socks5h://proxy.example:1080",
+        ):
+            with self.subTest(proxy=proxy), patch.dict(
+                os.environ,
+                {"RAPTOR_PROXY": proxy},
+                clear=True,
+            ):
+                values = runpy.run_path(str(ROOT / "config.py"))
+            self.assertEqual(values["RAPTOR_PROXY"], proxy)
+
+    def test_rejects_proxy_schemes_that_can_bypass_remote_dns(self) -> None:
+        for proxy in (
+            "socks5://proxy.example:1080",
+            "ftp://proxy.example",
+            "proxy.example:8080",
+        ):
+            with self.subTest(proxy=proxy), patch.dict(
+                os.environ,
+                {"RAPTOR_PROXY": proxy},
+                clear=True,
+            ):
+                with self.assertRaisesRegex(ValueError, "RAPTOR_PROXY"):
+                    runpy.run_path(str(ROOT / "config.py"))
+
+    def test_rejects_proxy_url_suffixes(self) -> None:
+        for proxy in (
+            "https://proxy.example/path",
+            "https://proxy.example?bypass=true",
+            "https://proxy.example#fragment",
+        ):
+            with self.subTest(proxy=proxy), patch.dict(
+                os.environ,
+                {"RAPTOR_PROXY": proxy},
+                clear=True,
+            ):
+                with self.assertRaisesRegex(ValueError, "RAPTOR_PROXY"):
+                    runpy.run_path(str(ROOT / "config.py"))
+
+
 class ShellConfigurationTests(unittest.TestCase):
     def test_shell_timeout_defaults_to_unlimited(self) -> None:
         with patch.dict(os.environ, {}, clear=True):

@@ -1,6 +1,7 @@
 """Configuration and tool schemas."""
 import math
 import os
+from urllib.parse import urlsplit
 
 from runtime_paths import AGENT_WORKDIR, CHAT_DIR, LOG_PATH, RAPTOR_HOME, STATE_PATH
 
@@ -77,9 +78,31 @@ def _env_int_tuple(name: str, default: tuple[int, ...]) -> tuple[int, ...]:
         raise ValueError(f"{name} entries must be unique")
     return values
 
+
+def _env_proxy(name: str) -> str | None:
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return None
+    parsed = urlsplit(raw)
+    if parsed.scheme not in {"http", "https", "socks5h"}:
+        raise ValueError(
+            f"{name} must use http, https, or socks5h"
+        )
+    if not parsed.hostname:
+        raise ValueError(f"{name} must include a hostname")
+    try:
+        parsed.port
+    except ValueError as exc:
+        raise ValueError(f"{name} has an invalid port") from exc
+    if parsed.path not in {"", "/"} or parsed.query or parsed.fragment:
+        raise ValueError(f"{name} must not include a path, query, or fragment")
+    return raw
+
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
+
+RAPTOR_PROXY = _env_proxy("RAPTOR_PROXY")
 
 CHAT_PROVIDERS = tuple(
     name.strip()

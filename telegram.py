@@ -24,6 +24,7 @@ from config import (
     TG_MAX_RETRIES,
     TG_USER_ID,
 )
+from network import outbound_http_client
 from observability import log_event, log_exception
 from activity import ActivityFinishResult, ActivitySnapshot
 
@@ -904,7 +905,7 @@ class TelegramProvider:
                 "Telegram requires TG_BOT_TOKEN, TG_USER_ID, and TG_CHAT_IDS"
             )
         if _client is None:
-            _client = httpx.AsyncClient(
+            _client = outbound_http_client(
                 timeout=httpx.Timeout(65.0, connect=10.0),
             )
         await tg_call("deleteWebhook", {"drop_pending_updates": False})

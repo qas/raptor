@@ -34,6 +34,7 @@ from config import (
 from controller import ensure_root_session, interrupt_root_turn
 from goals import goal_is_active, pause_goal, prepare_goal_on_startup
 from loop import COMMANDS, accepts_event, handle_event
+from network import outbound_http_client
 from observability import log_event, log_exception
 from responses import ensure_model
 from session import bootstrap_runtime_storage, rehydrate_pending_inputs, state
@@ -101,7 +102,9 @@ async def main(on_ready: Callable[[], None] | None = None) -> None:
                 pass
 
     provider = load_chat_providers(CHAT_PROVIDERS)
-    session.responses = httpx.AsyncClient(timeout=None)
+    session.responses = outbound_http_client(
+        timeout=httpx.Timeout(None, connect=10.0),
+    )
     set_chat_provider(provider)
     cursor: object | None = None
 

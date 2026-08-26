@@ -152,6 +152,7 @@ class ApplicationLifecycleTests(unittest.IsolatedAsyncioTestCase):
         )
         client = Mock()
         client.aclose = AsyncMock()
+        client_factory = Mock(return_value=client)
 
         observed: list[str] = []
 
@@ -167,7 +168,11 @@ class ApplicationLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(set_chat_provider, previous_provider)
         patches = (
             patch.object(application, "load_chat_providers", return_value=provider),
-            patch.object(application.httpx, "AsyncClient", return_value=client),
+            patch.object(
+                application,
+                "outbound_http_client",
+                client_factory,
+            ),
             patch.object(application, "ensure_model", AsyncMock()),
             patch.object(application, "start_skill_discovery"),
             patch.object(application, "close_skill_discovery", AsyncMock()),
@@ -197,6 +202,11 @@ class ApplicationLifecycleTests(unittest.IsolatedAsyncioTestCase):
             patch.object(application, "repair_interrupted_root_turn"),
             patch.object(
                 application,
+                "flush_pending_delivery",
+                AsyncMock(return_value=False),
+            ),
+            patch.object(
+                application,
                 "prepare_goal_on_startup",
                 return_value=None,
             ),
@@ -221,6 +231,9 @@ class ApplicationLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 await application.main(on_ready=on_ready)
 
         self.assertEqual(observed, ["log", "callback"])
+        client_factory.assert_called_once_with(
+            timeout=application.httpx.Timeout(None, connect=10.0),
+        )
 
     async def test_failed_provider_startup_releases_every_owned_resource(
         self,
@@ -240,7 +253,11 @@ class ApplicationLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 "load_chat_providers",
                 return_value=provider,
             ),
-            patch.object(application.httpx, "AsyncClient", return_value=client),
+            patch.object(
+                application,
+                "outbound_http_client",
+                return_value=client,
+            ),
             patch.object(application, "start_skill_discovery"),
             patch.object(application, "close_skill_discovery", close_skills),
             patch.object(application, "cancel_background_subagents", AsyncMock()),

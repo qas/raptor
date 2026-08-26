@@ -401,6 +401,7 @@ outside the documented ranges stop startup with a configuration error.
 | `AGENT_WORKDIR` | launch directory | Workspace, shell working directory, and `.skills` parent |
 | `RAPTOR_HOME` | `$AGENT_WORKDIR/.raptor` | Durable state and transcript directory |
 | `RAPTOR_LOG` | `$RAPTOR_HOME/raptor.log` | Daemon stdout/stderr event log |
+| `RAPTOR_PROXY` | empty | Outbound `http`, `https`, or remote-DNS `socks5h` proxy |
 | `CHAT_PROVIDERS` | `telegram,responses_api` | Comma-separated built-ins or `module:attribute` providers |
 | `CHAT_STREAMING` | `1` | Enable streamed draft previews |
 | `CHAT_STREAM_INTERVAL` | `0.35` | Minimum seconds between draft snapshots |
@@ -410,6 +411,17 @@ outside the documented ranges stop startup with a configuration error.
 | `MAX_PENDING_STEERS` | `64` | Maximum queued root steering inputs |
 | `MAX_CHAT_RUNTIMES` | `1024` | Maximum provider conversations admitted per process |
 | `MAX_STATE_LOAD_BYTES` | `16777216` | Maximum state file bytes accepted at startup |
+
+When `RAPTOR_PROXY` is set, Raptor routes all built-in outbound HTTP traffic
+exclusively through that proxy and fails requests if it is unavailable.
+Ambient proxy variables and bypass lists are ignored. Managed shell commands
+and custom provider implementations retain their own network configuration
+and are outside this routing guarantee.
+
+```bash
+RAPTOR_PROXY=https://proxy.example:8443 raptor
+RAPTOR_PROXY=socks5h://proxy.example:1080 raptor
+```
 
 ### Telegram
 
