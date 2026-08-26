@@ -13,12 +13,11 @@ _POLL_SECONDS = 0.05
 _TERMINATION_GRACE_SECONDS = 1.0
 
 
-def _leader_exited(pid: int) -> bool:
-    return os.waitid(
-        os.P_PID,
-        pid,
-        os.WEXITED | os.WNOHANG | os.WNOWAIT,
-    ) is not None
+def _reap_if_exited(pid: int) -> int | None:
+    waited, status = os.waitpid(pid, os.WNOHANG)
+    if waited == 0:
+        return None
+    return status
 
 
 def _signal_group(pgid: int, sig: signal.Signals) -> None:
@@ -28,14 +27,17 @@ def _signal_group(pgid: int, sig: signal.Signals) -> None:
         pass
 
 
-def _terminate_group(pid: int) -> int:
-    """Terminate descendants while retaining the leader against PID reuse."""
+def _terminate_group(pid: int, status: int | None) -> int:
+    """Signal the group, then reap the leader if this process still owns it."""
     _signal_group(pid, signal.SIGTERM)
     deadline = time.monotonic() + _TERMINATION_GRACE_SECONDS
-    while time.monotonic() < deadline and not _leader_exited(pid):
-        time.sleep(_POLL_SECONDS)
+    while status is None and time.monotonic() < deadline:
+        status = _reap_if_exited(pid)
+        if status is None:
+            time.sleep(_POLL_SECONDS)
     _signal_group(pid, signal.SIGKILL)
-    _waited_pid, status = os.waitpid(pid, 0)
+    if status is None:
+        _waited_pid, status = os.waitpid(pid, 0)
     return status
 
 
@@ -65,15 +67,16 @@ def _run(command: str, liveness_fd: int, start_fd: int) -> int:
 
     signal.signal(signal.SIGINT, forward_interrupt)
     parent_lost = False
+    status = None
     while True:
         readable, _, _ = select.select([liveness_fd], [], [], _POLL_SECONDS)
         if readable and not os.read(liveness_fd, 1):
             parent_lost = True
             break
-        if _leader_exited(pid):
+        status = _reap_if_exited(pid)
+        if status is not None:
             break
-
-    status = _terminate_group(pid)
+    status = _terminate_group(pid, status)
     if parent_lost:
         return 128 + signal.SIGTERM
     return os.waitstatus_to_exitcode(status)

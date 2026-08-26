@@ -121,37 +121,27 @@ def update_plan_tool(
 # Filesystem / shell tools
 # ---------------------------------------------------------------------------
 
+def workspace_root() -> Path:
+    return AGENT_WORKDIR.resolve()
+
+
 def workspace_path(
     raw: str,
 ) -> Path:
-    raw = (
-        raw.strip()
-        or "."
+    raw = raw.strip() or "."
+    requested = Path(raw)
+    root = workspace_root()
+    path = (
+        requested.resolve()
+        if requested.is_absolute()
+        else (root / requested).resolve()
     )
-
-    requested = Path(
-        raw
-    )
-
-    if requested.is_absolute():
-        path = requested.resolve()
-    else:
-        path = (
-            AGENT_WORKDIR
-            / requested
-        ).resolve()
-
     try:
-        path.relative_to(
-            AGENT_WORKDIR
-        )
-
+        path.relative_to(root)
     except ValueError:
         raise ValueError(
-            "path escapes "
-            f"AGENT_WORKDIR: {raw}"
-        )
-
+            f"path escapes AGENT_WORKDIR: {raw}"
+        ) from None
     return path
 
 
@@ -302,7 +292,7 @@ def read_file_tool(
         "ok": True,
         "path": str(
             path.relative_to(
-                AGENT_WORKDIR
+                workspace_root()
             )
         ),
         "start_line":
@@ -354,7 +344,7 @@ def write_file_tool(
         "ok": True,
         "path": str(
             path.relative_to(
-                AGENT_WORKDIR
+                workspace_root()
             )
         ),
         "bytes": len(
@@ -496,7 +486,7 @@ def edit_file_tool(
         "ok": True,
         "path": str(
             path.relative_to(
-                AGENT_WORKDIR
+                workspace_root()
             )
         ),
         "replacements":
@@ -565,10 +555,10 @@ def list_dir_tool(
 
     relative = (
         "."
-        if path == AGENT_WORKDIR
+        if path == workspace_root()
         else str(
             path.relative_to(
-                AGENT_WORKDIR
+                workspace_root()
             )
         )
     )

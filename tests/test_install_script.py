@@ -91,7 +91,10 @@ class InstallScriptTests(unittest.TestCase):
             completed = _run_helper("resolve_dir", "missing", cwd=cwd)
             self.assertEqual(completed.returncode, 0, completed.stderr)
             self.assertFalse((cwd / "missing").exists())
-            self.assertEqual(Path(completed.stdout.strip()), cwd / "missing")
+            self.assertEqual(
+                Path(completed.stdout.strip()),
+                (cwd / "missing").resolve(),
+            )
 
     def test_physical_dir_resolves_symlink(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

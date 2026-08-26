@@ -136,6 +136,27 @@ class FileToolTests(unittest.TestCase):
                 result = tools.list_dir_tool({"max_entries": 1})
         self.assertLessEqual(len(json.dumps(result)), tools.MAX_TOOL_OUTPUT)
 
+    def test_workspace_path_accepts_logical_root(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            real = Path(directory) / "real"
+            real.mkdir()
+            (real / "file.txt").write_text("ok")
+            link = Path(directory) / "link"
+            link.symlink_to(real)
+            with patch.object(tools, "AGENT_WORKDIR", link):
+                path = tools.workspace_path("file.txt")
+                listed = tools.list_dir_tool({"path": "."})
+        self.assertEqual(path, (real / "file.txt").resolve())
+        self.assertEqual(listed["path"], ".")
+        self.assertEqual(listed["entries"][0]["name"], "file.txt")
+
+    def test_workspace_path_rejects_escape(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with patch.object(tools, "AGENT_WORKDIR", root):
+                with self.assertRaises(ValueError):
+                    tools.workspace_path("../outside")
+
 
 if __name__ == "__main__":
     unittest.main()
