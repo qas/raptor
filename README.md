@@ -90,6 +90,7 @@ Process commands:
 
 ```bash
 raptor --status
+raptor --check-proxy
 raptor --stop-daemon
 raptor --daemon
 ```
@@ -421,6 +422,9 @@ match only that host; `*.example.com` matches subdomains such as
 Bypassed hosts use local DNS. Ambient proxy variables and `NO_PROXY` are
 ignored. Managed shell commands and custom provider implementations retain
 their own network configuration and are outside this routing guarantee.
+Run `raptor --check-proxy` to make an explicit bounded request through the
+proxy to `api.ipify.org`; it ignores `RAPTOR_NO_PROXY` and prints the observed
+public egress IP without displaying the configured proxy address.
 
 ```bash
 RAPTOR_PROXY=https://proxy.example:8443 raptor

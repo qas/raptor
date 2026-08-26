@@ -5,7 +5,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import httpx
 from response_errors import MalformedToolCallError
@@ -251,6 +251,36 @@ class ResponseRetryTests(unittest.IsolatedAsyncioTestCase):
             result = await responses.list_models()
         self.assertEqual(result, ["model-a"])
         self.assertEqual(request.await_count, 2)
+
+    async def test_model_listing_can_disable_retries_for_status(self) -> None:
+        request = AsyncMock(side_effect=httpx.ConnectError("offline"))
+        with (
+            patch.object(responses, "_list_models_once", request),
+            patch.object(responses, "log_event"),
+        ):
+            with self.assertRaises(responses.TransientResponsesError):
+                await responses.list_models(max_retries=0)
+        self.assertEqual(request.await_count, 1)
+
+    async def test_model_listing_has_a_bounded_request_timeout(self) -> None:
+        response = Mock()
+        response.json.return_value = {"data": [{"id": "model-a"}]}
+        client = Mock(get=AsyncMock(return_value=response))
+        with (
+            patch.object(responses.session, "responses", client, create=True),
+            patch.object(
+                responses,
+                "RESPONSES_BASE_URL",
+                "http://models.example/v1",
+            ),
+        ):
+            result = await responses._list_models_once()
+        self.assertEqual(result, ["model-a"])
+        timeout = client.get.await_args.kwargs["timeout"]
+        self.assertEqual(timeout.connect, 10.0)
+        self.assertEqual(timeout.read, 10.0)
+        self.assertEqual(timeout.write, 10.0)
+        self.assertEqual(timeout.pool, 10.0)
 
     async def test_stateless_request_uses_common_retry_policy(self) -> None:
         expected = {"status": "completed", "output": []}

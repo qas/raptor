@@ -40,6 +40,7 @@ from response_errors import (
 
 _RETRYABLE_HTTP_STATUSES = {408, 429, 500, 502, 503, 504}
 _ResponseT = TypeVar("_ResponseT")
+MODEL_LIST_TIMEOUT_SECONDS = 10.0
 
 
 @dataclass
@@ -336,6 +337,7 @@ async def _list_models_once() -> list[str]:
     response = await session.responses.get(
         f"{RESPONSES_BASE_URL}/models",
         headers=auth_headers(),
+        timeout=httpx.Timeout(MODEL_LIST_TIMEOUT_SECONDS),
     )
 
     response.raise_for_status()
@@ -352,10 +354,11 @@ async def _list_models_once() -> list[str]:
     ]
 
 
-async def list_models() -> list[str]:
+async def list_models(*, max_retries: int | None = None) -> list[str]:
     return await retry_transient_response(
         _list_models_once,
         operation="Responses model listing",
+        max_retries=max_retries,
     )
 
 

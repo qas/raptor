@@ -234,7 +234,12 @@ finally:
         runtime_module = types.ModuleType("runtime")
         runtime_module.parse_args = lambda: (
             order.append("parse")
-            or Namespace(status=False, stop_daemon=False, daemon=False)
+            or Namespace(
+                status=False,
+                stop_daemon=False,
+                check_proxy=False,
+                daemon=False,
+            )
         )
         runtime_module.cli_runtime_status = lambda: 0
         runtime_module.stop_daemon = lambda: 0
@@ -281,6 +286,7 @@ finally:
         runtime_module.parse_args = lambda: Namespace(
             status=False,
             stop_daemon=False,
+            check_proxy=False,
             daemon=True,
         )
         runtime_module.cli_runtime_status = lambda: 0
@@ -335,6 +341,7 @@ finally:
         runtime_module.parse_args = lambda: Namespace(
             status=False,
             stop_daemon=False,
+            check_proxy=False,
             daemon=True,
         )
         runtime_module.cli_runtime_status = lambda: 0
@@ -439,6 +446,7 @@ finally:
         runtime_module.parse_args = lambda: Namespace(
             status=True,
             stop_daemon=False,
+            check_proxy=False,
             daemon=False,
         )
         runtime_module.cli_runtime_status = lambda: 7
@@ -454,6 +462,80 @@ finally:
             result = raptor.run()
 
         self.assertEqual(result, 7)
+        acquire.assert_not_called()
+
+    def test_proxy_check_reports_egress_without_runtime_ownership(self) -> None:
+        runtime_module = types.ModuleType("runtime")
+        runtime_module.parse_args = lambda: Namespace(
+            status=False,
+            stop_daemon=False,
+            check_proxy=True,
+            daemon=False,
+        )
+        runtime_module.cli_runtime_status = lambda: 0
+        runtime_module.stop_daemon = lambda: 0
+        runtime_module.daemonize = lambda: None
+        runtime_module.set_runtime = lambda **_kw: None
+        runtime_module.clear_runtime_if_ours = lambda: None
+        network_module = types.ModuleType("network")
+        network_module.ProxyNotConfiguredError = type(
+            "ProxyNotConfiguredError",
+            (RuntimeError,),
+            {},
+        )
+        async def proxy_egress_ip() -> str:
+            return "203.0.113.10"
+        network_module.proxy_egress_ip = proxy_egress_ip
+        with (
+            patch.object(raptor, "acquire_runtime_lock") as acquire,
+            patch.dict(
+                sys.modules,
+                {"runtime": runtime_module, "network": network_module},
+            ),
+            redirect_stdout(io.StringIO()) as output,
+        ):
+            result = raptor.run()
+        self.assertEqual(result, 0)
+        self.assertEqual(
+            output.getvalue(),
+            "Proxy: reachable\nEgress IP: 203.0.113.10\n",
+        )
+        acquire.assert_not_called()
+
+    def test_proxy_check_redacts_connection_failures(self) -> None:
+        runtime_module = types.ModuleType("runtime")
+        runtime_module.parse_args = lambda: Namespace(
+            status=False,
+            stop_daemon=False,
+            check_proxy=True,
+            daemon=False,
+        )
+        runtime_module.cli_runtime_status = lambda: 0
+        runtime_module.stop_daemon = lambda: 0
+        runtime_module.daemonize = lambda: None
+        runtime_module.set_runtime = lambda **_kw: None
+        runtime_module.clear_runtime_if_ours = lambda: None
+        network_module = types.ModuleType("network")
+        network_module.ProxyNotConfiguredError = type(
+            "ProxyNotConfiguredError",
+            (RuntimeError,),
+            {},
+        )
+        async def proxy_egress_ip() -> str:
+            raise RuntimeError("proxy-secret")
+        network_module.proxy_egress_ip = proxy_egress_ip
+        with (
+            patch.object(raptor, "acquire_runtime_lock") as acquire,
+            patch.dict(
+                sys.modules,
+                {"runtime": runtime_module, "network": network_module},
+            ),
+            redirect_stderr(io.StringIO()) as error,
+        ):
+            result = raptor.run()
+        self.assertEqual(result, 1)
+        self.assertEqual(error.getvalue(), "Proxy: unreachable\n")
+        self.assertNotIn("proxy-secret", error.getvalue())
         acquire.assert_not_called()
 
     def test_daemon_parent_detaches_its_lock_copy(self) -> None:

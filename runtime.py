@@ -165,6 +165,12 @@ def parse_args() -> argparse.Namespace:
         help="show local runtime status and exit",
     )
 
+    mode.add_argument(
+        "--check-proxy",
+        action="store_true",
+        help="test the configured proxy and show its public egress IP",
+    )
+
     return parser.parse_args()
 
 

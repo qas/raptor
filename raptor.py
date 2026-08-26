@@ -23,11 +23,24 @@ def run() -> int:
     )
 
     args = parse_args()
-    owns_runtime = not (args.status or args.stop_daemon)
+    owns_runtime = not (args.status or args.stop_daemon or args.check_proxy)
     if owns_runtime and not acquire_runtime_lock():
         print("Raptor is already running", file=sys.stderr)
         return 1
     try:
+        if args.check_proxy:
+            from network import ProxyNotConfiguredError, proxy_egress_ip
+            try:
+                address = asyncio.run(proxy_egress_ip())
+            except ProxyNotConfiguredError:
+                print("Proxy: disabled", file=sys.stderr)
+                return 1
+            except Exception:
+                print("Proxy: unreachable", file=sys.stderr)
+                return 1
+            print("Proxy: reachable")
+            print(f"Egress IP: {address}")
+            return 0
         if args.status:
             return cli_runtime_status()
         if args.stop_daemon:

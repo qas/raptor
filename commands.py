@@ -21,6 +21,7 @@ from config import (
     CONTEXT_COMPACT_RATIO,
     CONTEXT_SAFETY_TOKENS,
     MODEL_CONTEXT_TOKENS,
+    RAPTOR_PROXY,
     SUBAGENT_MODEL_CONTEXT_TOKENS,
     RESPONSES_REASONING_EFFORT,
     SUBAGENT_RESPONSES_REASONING_EFFORT,
@@ -74,7 +75,7 @@ from engine import (
     response_text,
 )
 from approval import execute_tool_with_approval
-from responses import list_models, stateless_response
+from responses import MODEL_LIST_TIMEOUT_SECONDS, list_models, stateless_response
 from subagents import cancel_background_subagents, pending_subagent_completions
 from shell_sessions import (
     cancel_shell_sessions,
@@ -448,7 +449,10 @@ async def command(
     if cmd == "/status":
         try:
             models = (
-                await list_models()
+                await asyncio.wait_for(
+                    list_models(max_retries=0),
+                    timeout=MODEL_LIST_TIMEOUT_SECONDS,
+                )
             )
 
             responses_status = "up"
@@ -519,6 +523,7 @@ async def command(
             (
                 f"provider: {get_chat_provider().name}\n"
                 f"Responses: {responses_status}\n"
+                f"proxy: {'enabled' if RAPTOR_PROXY else 'disabled'}\n"
                 f"model: {state.get('model') or '(auto)'}\n"
                 f"reasoning effort: {reasoning_effort}\n"
                 f"subagent reasoning effort: {subagent_reasoning_effort}\n"
