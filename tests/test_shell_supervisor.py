@@ -1,11 +1,17 @@
 import os
+import signal
 import time
 import unittest
+from unittest.mock import patch
 
 import shell_supervisor
 
 
 class SupervisorWaitTests(unittest.TestCase):
+    def test_signal_group_ignores_unsignalable_zombie_group(self) -> None:
+        with patch.object(os, "killpg", side_effect=PermissionError):
+            shell_supervisor._signal_group(123, signal.SIGTERM)
+
     @unittest.skipUnless(hasattr(os, "fork"), "requires fork")
     def test_terminate_group_preserves_exited_leader_status(self) -> None:
         pid = os.fork()

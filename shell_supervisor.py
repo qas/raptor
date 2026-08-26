@@ -17,7 +17,7 @@ _TERMINATION_GRACE_SECONDS = 1.0
 def _signal_group(pgid: int, sig: signal.Signals) -> None:
     try:
         os.killpg(pgid, sig)
-    except ProcessLookupError:
+    except (PermissionError, ProcessLookupError):
         pass
 
 
