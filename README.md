@@ -31,8 +31,31 @@ boundaries.
 
 ## Quick start
 
-Raptor requires Python 3.11 or newer and a Responses-compatible model backend.
-Project metadata declares its Python dependency for `uv`.
+Linux and macOS binaries are published on GitHub Releases. Intel and ARM
+builds are separate artifacts. Windows is not supported. macOS binaries are
+unsigned; Gatekeeper may require a one-time override for a downloaded
+executable.
+
+```bash
+curl -fsSL \
+  https://github.com/qas/raptor/releases/latest/download/install.sh |
+  sh
+```
+
+The installer places `raptor` in `~/.local/bin`. Add that directory to `PATH`
+if the command is not found. Pin a release with `RAPTOR_VERSION=v0.1.0`, or
+override the install locations with `RAPTOR_INSTALL_ROOT` and
+`RAPTOR_BIN_DIR`.
+
+Remove the installed binary without touching workspace data:
+
+```bash
+curl -fsSL \
+  https://github.com/qas/raptor/releases/latest/download/install.sh |
+  sh -s -- --uninstall
+```
+
+`raptor` uses the current directory as `AGENT_WORKDIR` unless configured.
 
 ```bash
 export RESPONSES_BASE_URL=http://127.0.0.1:8000/v1
@@ -42,7 +65,7 @@ export TG_BOT_TOKEN=your-telegram-token
 export TG_USER_ID=123456789
 export TG_CHAT_IDS=123456789
 
-uv run raptor.py
+raptor
 ```
 
 The inbound Responses API listens on `127.0.0.1:8787` by default:
@@ -66,9 +89,9 @@ assistant turn remains durable in the conversation transcript.
 Process commands:
 
 ```bash
-uv run raptor.py --status
-uv run raptor.py --stop-daemon
-uv run raptor.py --daemon
+raptor --status
+raptor --stop-daemon
+raptor --daemon
 ```
 
 Raptor uses an atomic process-lifetime lock. A second instance cannot start
@@ -114,6 +137,8 @@ side effects are not reversible.
 | Path | Responsibility |
 |---|---|
 | `pyproject.toml` | Python runtime requirements for development and tests |
+| `raptor.spec` | Frozen onedir release bundle for GitHub Releases |
+| `install.sh` | Unix installer and uninstaller for published Linux and macOS binaries |
 | `raptor.py` | Ownership-first process entry point and CLI |
 | `application.py` | Long-running provider and agent application lifecycle |
 | `process_lock.py` | State-independent atomic process ownership |
@@ -454,6 +479,20 @@ outside the documented ranges stop startup with a configuration error.
 | `COMPACTION_GENERATION_TOKENS` | output cap + `4096` | Generation allowance including hidden reasoning |
 | `COMPACTION_REASONING_EFFORT` | `low` | Checkpoint-generation reasoning effort |
 
+## Run from source
+
+Raptor requires Python 3.11 or newer and a Responses-compatible model backend.
+Project metadata declares its Python dependency for `uv`. Custom
+`module:attribute` chat providers also require a source checkout; frozen
+releases include the built-in Telegram and Responses API providers.
+
+```bash
+uv run raptor.py
+uv run raptor.py --status
+uv run raptor.py --stop-daemon
+uv run raptor.py --daemon
+```
+
 ## Development
 
 Run the complete test suite from this directory:
@@ -472,6 +511,10 @@ Changes should preserve the core invariants: one root controller per main chat,
 append-only owner-tagged conversation history, provider-affine delivery,
 bounded retained state, atomic process ownership, and explicit recovery after
 transient failure.
+
+To publish Linux and macOS binaries, set `project.version` in
+`pyproject.toml`, then push a matching `v*` tag. GitHub Actions tests, freezes
+`raptor`, and uploads the release assets.
 
 ## Contributing
 

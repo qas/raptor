@@ -1,0 +1,158 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Verify tag matches project version
+        id: version
+        run: |
+          version="$(python3 -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
+          tag="${{ github.ref_name }}"
+          if [ "$tag" != "v${version}" ]; then
+            echo "Tag ${tag} does not match pyproject version ${version}" >&2
+            exit 1
+          fi
+          echo "version=${tag}" >> "$GITHUB_OUTPUT"
+      - name: Check installer syntax
+        run: sh -n install.sh
+
+  build:
+    needs: validate
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            target: linux-x86_64
+            architecture: x86_64
+          - runner: ubuntu-24.04-arm
+            target: linux-aarch64
+            architecture: aarch64
+          - runner: macos-15-intel
+            target: macos-x86_64
+            architecture: x86_64
+          - runner: macos-15
+            target: macos-arm64
+            architecture: arm64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          python-version: "3.11"
+          enable-cache: true
+      - name: Install locked dependencies
+        run: uv sync --frozen --group release
+      - name: Verify runner architecture
+        run: test "$(uname -m)" = "${{ matrix.architecture }}"
+      - name: Run tests
+        env:
+          TG_BOT_TOKEN: test-token
+          TG_USER_ID: "1"
+          TG_CHAT_IDS: "1"
+        run: uv run python -m unittest discover -s tests -p 'test_*.py'
+      - name: Build release bundle
+        run: uv run pyinstaller --noconfirm --clean raptor.spec
+      - name: Smoke-test the binary
+        env:
+          AGENT_WORKDIR: ${{ runner.temp }}/raptor-smoke
+          RAPTOR_HOME: ${{ runner.temp }}/raptor-smoke/.raptor
+        run: |
+          mkdir -p "$AGENT_WORKDIR"
+          ./dist/raptor/raptor --help
+          set +e
+          ./dist/raptor/raptor --status
+          status=$?
+          set -e
+          test "$status" -eq 1
+          python3 - "$AGENT_WORKDIR" <<'PY'
+          import os, subprocess, sys
+          workdir = sys.argv[1]
+          binary = os.path.abspath("dist/raptor/raptor")
+          liveness_read, liveness_write = os.pipe()
+          start_read, start_write = os.pipe()
+          process = subprocess.Popen(
+              [binary, "_shell-supervisor", str(liveness_read),
+               str(start_read), "printf smoke"],
+              cwd=workdir,
+              stdout=subprocess.PIPE,
+              stderr=subprocess.PIPE,
+              pass_fds=(liveness_read, start_read),
+          )
+          os.close(liveness_read)
+          os.close(start_read)
+          os.write(start_write, b"1")
+          os.close(start_write)
+          stdout, stderr = process.communicate(timeout=10)
+          os.close(liveness_write)
+          if process.returncode != 0:
+              raise SystemExit(stderr.decode() or str(process.returncode))
+          if stdout != b"smoke":
+              raise SystemExit(repr(stdout))
+          PY
+      - name: Archive the onedir bundle
+        run: |
+          archive="raptor-${{ needs.validate.outputs.version }}-${{ matrix.target }}.tar.gz"
+          tar -czf "$archive" -C dist raptor
+          echo "ARCHIVE=${archive}" >> "$GITHUB_ENV"
+      - name: Upload bundle
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: bundle-${{ matrix.target }}
+          path: ${{ env.ARCHIVE }}
+          if-no-files-found: error
+
+  publish:
+    needs:
+      - validate
+      - build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Download bundles
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          path: release
+          merge-multiple: true
+      - name: Checksum and publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.validate.outputs.version }}
+        run: |
+          cd release
+          sha256sum raptor-*.tar.gz > SHA256SUMS
+          cp ../install.sh .
+          gh release create "$TAG" \
+            --draft \
+            --title "$TAG" \
+            --generate-notes \
+            raptor-*.tar.gz \
+            SHA256SUMS \
+            install.sh
+          gh release edit "$TAG" --draft=false

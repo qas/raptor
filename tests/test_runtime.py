@@ -375,6 +375,65 @@ finally:
 
         close.assert_not_called()
 
+    def test_supervisor_mode_does_not_acquire_runtime_lock(self) -> None:
+        with (
+            patch.object(
+                sys,
+                "argv",
+                ["raptor", "_shell-supervisor", "3", "4", "true"],
+            ),
+            patch.object(raptor, "acquire_runtime_lock") as acquire,
+            patch("shell_supervisor.main", return_value=9) as supervisor,
+        ):
+            result = raptor.run()
+        self.assertEqual(result, 9)
+        acquire.assert_not_called()
+        supervisor.assert_called_once_with(["raptor", "3", "4", "true"])
+
+    @unittest.skipUnless(hasattr(os, "fork"), "requires fork")
+    def test_entrypoint_supervisor_mode_runs_command(self) -> None:
+        root = Path(__file__).resolve().parent.parent
+        liveness_read, liveness_write = os.pipe()
+        start_read, start_write = os.pipe()
+        try:
+            process = subprocess.Popen(
+                [
+                    sys.executable,
+                    str(root / "raptor.py"),
+                    "_shell-supervisor",
+                    str(liveness_read),
+                    str(start_read),
+                    "printf ok",
+                ],
+                cwd=root,
+                env=os.environ.copy(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                pass_fds=(liveness_read, start_read),
+            )
+        except BaseException:
+            os.close(liveness_read)
+            os.close(liveness_write)
+            os.close(start_read)
+            os.close(start_write)
+            raise
+        os.close(liveness_read)
+        os.close(start_read)
+        try:
+            os.write(start_write, b"1")
+            os.close(start_write)
+            start_write = -1
+            stdout, stderr = process.communicate(timeout=5)
+        finally:
+            os.close(liveness_write)
+            if start_write >= 0:
+                os.close(start_write)
+            if process.poll() is None:
+                process.kill()
+                process.wait(timeout=2)
+        self.assertEqual(process.returncode, 0, stderr.decode())
+        self.assertEqual(stdout, b"ok")
+
     def test_status_does_not_acquire_application_ownership(self) -> None:
         runtime_module = types.ModuleType("runtime")
         runtime_module.parse_args = lambda: Namespace(

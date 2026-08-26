@@ -21,6 +21,7 @@ from shell_sessions import (
     reset_shell_sessions_for_tests,
     run_shell,
     running_shell_sessions,
+    supervisor_argv,
     write_stdin,
 )
 from tools import shell_tool
@@ -526,6 +527,25 @@ class ShellSessionTests(unittest.IsolatedAsyncioTestCase):
             launched.await_args.kwargs["parent_session_id"],
             "root-session",
         )
+
+    def test_supervisor_argv_uses_source_script(self) -> None:
+        argv = supervisor_argv()
+        self.assertEqual(argv[0], shell_sessions._SUPERVISOR_EXECUTABLE)
+        self.assertEqual(argv[1], str(shell_sessions._SUPERVISOR_PATH))
+
+    def test_supervisor_argv_uses_frozen_executable(self) -> None:
+        with (
+            patch.object(
+                shell_sessions,
+                "_SUPERVISOR_EXECUTABLE",
+                "/opt/raptor/raptor",
+            ),
+            patch.object(sys, "frozen", True, create=True),
+        ):
+            self.assertEqual(
+                supervisor_argv(),
+                ["/opt/raptor/raptor", "_shell-supervisor"],
+            )
 
 
 class HeadTailBufferTests(unittest.TestCase):

@@ -6,6 +6,8 @@ import signal
 import sys
 import time
 
+SUPERVISOR_MODE = "_shell-supervisor"
+
 
 _POLL_SECONDS = 0.05
 _TERMINATION_GRACE_SECONDS = 1.0
@@ -77,12 +79,13 @@ def _run(command: str, liveness_fd: int, start_fd: int) -> int:
     return os.waitstatus_to_exitcode(status)
 
 
-def main() -> int:
-    if len(sys.argv) != 4:
+def main(argv: list[str] | None = None) -> int:
+    args = sys.argv if argv is None else argv
+    if len(args) != 4:
         return 2
-    liveness_fd = int(sys.argv[1])
-    start_fd = int(sys.argv[2])
-    command = sys.argv[3]
+    liveness_fd = int(args[1])
+    start_fd = int(args[2])
+    command = args[3]
     try:
         return _run(command, liveness_fd, start_fd)
     finally:

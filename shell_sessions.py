@@ -18,6 +18,7 @@ import session as runtime_session
 from chat_provider import ConversationId
 from config import AGENT_WORKDIR, MAX_TOOL_OUTPUT, SHELL_TIMEOUT
 from observability import log_event, log_shell_start
+from shell_supervisor import SUPERVISOR_MODE
 
 MAX_YIELD_TIME_MS = 30_000
 MAX_POLL_TIME_MS = 300_000
@@ -33,6 +34,14 @@ TERMINATION_GRACE_SECONDS = 2.0
 MAX_RETAINED_SESSIONS = 50
 MAX_LIVE_SESSIONS = 64
 _SUPERVISOR_PATH = Path(__file__).with_name("shell_supervisor.py")
+_SUPERVISOR_EXECUTABLE = os.path.realpath(sys.executable)
+
+
+def supervisor_argv() -> list[str]:
+    """Launch the supervisor through this process's original executable."""
+    if getattr(sys, "frozen", False):
+        return [_SUPERVISOR_EXECUTABLE, SUPERVISOR_MODE]
+    return [_SUPERVISOR_EXECUTABLE, str(_SUPERVISOR_PATH)]
 
 
 class HeadTailBuffer:
@@ -458,8 +467,7 @@ async def run_shell(
             try:
                 try:
                     process = await asyncio.create_subprocess_exec(
-                        sys.executable,
-                        str(_SUPERVISOR_PATH),
+                        *supervisor_argv(),
                         str(liveness_read_fd),
                         str(start_read_fd),
                         command,
@@ -494,8 +502,7 @@ async def run_shell(
             stderr_stream: asyncio.StreamReader | None = None
         else:
             process = await asyncio.create_subprocess_exec(
-                sys.executable,
-                str(_SUPERVISOR_PATH),
+                *supervisor_argv(),
                 str(liveness_read_fd),
                 str(start_read_fd),
                 command,

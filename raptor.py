@@ -5,10 +5,14 @@ import os
 import sys
 
 from process_lock import acquire_runtime_lock, release_runtime_lock
+from shell_supervisor import SUPERVISOR_MODE
 
 
 def run() -> int:
     """Parse the CLI and establish ownership before loading the application."""
+    if len(sys.argv) > 1 and sys.argv[1] == SUPERVISOR_MODE:
+        from shell_supervisor import main
+        return main([sys.argv[0], *sys.argv[2:]])
     from runtime import (
         clear_runtime_if_ours,
         cli_runtime_status,
