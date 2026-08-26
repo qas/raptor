@@ -402,6 +402,7 @@ outside the documented ranges stop startup with a configuration error.
 | `RAPTOR_HOME` | `$AGENT_WORKDIR/.raptor` | Durable state and transcript directory |
 | `RAPTOR_LOG` | `$RAPTOR_HOME/raptor.log` | Daemon stdout/stderr event log |
 | `RAPTOR_PROXY` | empty | Outbound `http`, `https`, or remote-DNS `socks5h` proxy |
+| `RAPTOR_NO_PROXY` | empty | Comma-separated exact hosts or `*.` subdomain patterns routed directly |
 | `CHAT_PROVIDERS` | `telegram,responses_api` | Comma-separated built-ins or `module:attribute` providers |
 | `CHAT_STREAMING` | `1` | Enable streamed draft previews |
 | `CHAT_STREAM_INTERVAL` | `0.35` | Minimum seconds between draft snapshots |
@@ -412,15 +413,21 @@ outside the documented ranges stop startup with a configuration error.
 | `MAX_CHAT_RUNTIMES` | `1024` | Maximum provider conversations admitted per process |
 | `MAX_STATE_LOAD_BYTES` | `16777216` | Maximum state file bytes accepted at startup |
 
-When `RAPTOR_PROXY` is set, Raptor routes all built-in outbound HTTP traffic
-exclusively through that proxy and fails requests if it is unavailable.
-Ambient proxy variables and bypass lists are ignored. Managed shell commands
-and custom provider implementations retain their own network configuration
-and are outside this routing guarantee.
+When `RAPTOR_PROXY` is set, Raptor routes built-in outbound HTTP traffic
+through that proxy and fails non-bypassed requests if it is unavailable.
+`RAPTOR_NO_PROXY` routes matching destination hosts directly. Exact entries
+match only that host; `*.example.com` matches subdomains such as
+`api.example.com`, but not `example.com`. List both forms to bypass both.
+Bypassed hosts use local DNS. Ambient proxy variables and `NO_PROXY` are
+ignored. Managed shell commands and custom provider implementations retain
+their own network configuration and are outside this routing guarantee.
 
 ```bash
 RAPTOR_PROXY=https://proxy.example:8443 raptor
 RAPTOR_PROXY=socks5h://proxy.example:1080 raptor
+RAPTOR_PROXY=socks5h://proxy.example:1080 \
+  RAPTOR_NO_PROXY='models.internal,google.com,*.google.com' \
+  raptor
 ```
 
 ### Telegram

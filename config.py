@@ -1,6 +1,8 @@
 """Configuration and tool schemas."""
+import ipaddress
 import math
 import os
+import re
 from urllib.parse import urlsplit
 
 from runtime_paths import AGENT_WORKDIR, CHAT_DIR, LOG_PATH, RAPTOR_HOME, STATE_PATH
@@ -98,11 +100,61 @@ def _env_proxy(name: str) -> str | None:
         raise ValueError(f"{name} must not include a path, query, or fragment")
     return raw
 
+
+_HOST_LABEL = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?")
+
+
+def _proxy_bypass_host(name: str, raw: str, *, wildcard: bool) -> str:
+    try:
+        address = ipaddress.ip_address(raw)
+    except ValueError:
+        try:
+            host = raw.encode("idna").decode("ascii").lower()
+        except UnicodeError as exc:
+            raise ValueError(f"{name} contains an invalid hostname") from exc
+        labels = host.split(".")
+        if (
+            len(host) > 253
+            or any(not _HOST_LABEL.fullmatch(label) for label in labels)
+        ):
+            raise ValueError(f"{name} contains an invalid hostname")
+        return host
+    if wildcard:
+        raise ValueError(f"{name} cannot wildcard an IP address")
+    return address.compressed
+
+
+def _env_proxy_bypass(name: str) -> tuple[str, ...]:
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return ()
+    parts = raw.split(",")
+    if any(not part.strip() for part in parts):
+        raise ValueError(f"{name} must contain comma-separated hosts")
+    entries = []
+    for part in parts:
+        entry = part.strip()
+        wildcard = entry.startswith("*.")
+        if "*" in entry[2:] or ("*" in entry and not wildcard):
+            raise ValueError(f"{name} only supports leading *. wildcards")
+        host = _proxy_bypass_host(
+            name,
+            entry[2:] if wildcard else entry,
+            wildcard=wildcard,
+        )
+        entries.append(f"*.{host}" if wildcard else host)
+    if len(set(entries)) != len(entries):
+        raise ValueError(f"{name} entries must be unique")
+    return tuple(entries)
+
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
 
 RAPTOR_PROXY = _env_proxy("RAPTOR_PROXY")
+RAPTOR_NO_PROXY = _env_proxy_bypass("RAPTOR_NO_PROXY")
+if RAPTOR_NO_PROXY and RAPTOR_PROXY is None:
+    raise ValueError("RAPTOR_NO_PROXY requires RAPTOR_PROXY")
 
 CHAT_PROVIDERS = tuple(
     name.strip()

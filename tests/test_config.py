@@ -106,6 +106,55 @@ class ProxyConfigurationTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "RAPTOR_PROXY"):
                     runpy.run_path(str(ROOT / "config.py"))
 
+    def test_accepts_exact_and_wildcard_proxy_bypasses(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "RAPTOR_PROXY": "socks5h://proxy.example:1080",
+                "RAPTOR_NO_PROXY": "127.0.0.1, Models.Example ,*.google.com",
+            },
+            clear=True,
+        ):
+            values = runpy.run_path(str(ROOT / "config.py"))
+        self.assertEqual(
+            values["RAPTOR_NO_PROXY"],
+            ("127.0.0.1", "models.example", "*.google.com"),
+        )
+
+    def test_rejects_invalid_proxy_bypasses(self) -> None:
+        for bypass in (
+            "google.com,",
+            "*",
+            "api.*.example",
+            "*.127.0.0.1",
+            "https://google.com",
+            "google.com:443",
+            "bad_host.example",
+            "google.com,GOOGLE.COM",
+        ):
+            with self.subTest(bypass=bypass), patch.dict(
+                os.environ,
+                {
+                    "RAPTOR_PROXY": "socks5h://proxy.example:1080",
+                    "RAPTOR_NO_PROXY": bypass,
+                },
+                clear=True,
+            ):
+                with self.assertRaisesRegex(ValueError, "RAPTOR_NO_PROXY"):
+                    runpy.run_path(str(ROOT / "config.py"))
+
+    def test_proxy_bypasses_require_a_proxy(self) -> None:
+        with patch.dict(
+            os.environ,
+            {"RAPTOR_NO_PROXY": "models.example"},
+            clear=True,
+        ):
+            with self.assertRaisesRegex(
+                ValueError,
+                "RAPTOR_NO_PROXY requires RAPTOR_PROXY",
+            ):
+                runpy.run_path(str(ROOT / "config.py"))
+
 
 class ShellConfigurationTests(unittest.TestCase):
     def test_shell_timeout_defaults_to_unlimited(self) -> None:
