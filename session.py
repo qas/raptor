@@ -30,24 +30,24 @@ from config import (
     MAX_STATE_LOAD_BYTES,
     MAX_SUBAGENT_PENDING_INPUTS,
     MAX_SUBAGENT_RECORDS,
-    RESPONSES_MODEL,
     STATE_PATH,
 )
+from model_providers import MODEL_CONFIGURATION, ModelTarget
 from runtime_events import RuntimeEvent
 from storage import write_text_atomic
 from todos import validate_plan
 
-STATE_SCHEMA_VERSION = 2
+STATE_SCHEMA_VERSION = 3
 _RECOVERY_BYTES_PER_CHAT = 512
 
 GLOBAL_DEFAULT_STATE: dict[str, Any] = {
     "schema_version": STATE_SCHEMA_VERSION,
-    "model": None,
     "runtime": {},
     "chats": {},
 }
 
 CHAT_DEFAULT_STATE: dict[str, Any] = {
+    "model_target": MODEL_CONFIGURATION.default_target.to_dict(),
     "current_session_id": None,
     "todos": [],
     "approval_mode": "off",
@@ -66,7 +66,6 @@ class StateCapacityError(RuntimeError):
 
 # Logical state exposed to domain code and focused tests.
 DEFAULT_STATE: dict[str, Any] = {
-    "model": None,
     **copy.deepcopy(CHAT_DEFAULT_STATE),
     "runtime": {},
 }
@@ -112,6 +111,7 @@ class ChatRuntime:
 _root_state: dict[str, Any]
 _runtimes: dict[str, ChatRuntime] = {}
 _default_runtime_key: str | None = None
+_default_model_target = MODEL_CONFIGURATION.default_target
 _current_runtime: ContextVar[ChatRuntime | None] = ContextVar(
     "raptor_chat_runtime",
     default=None,
@@ -199,6 +199,18 @@ def _normalize_chat_state(value: Any, owner: str) -> dict[str, Any]:
     for key in CHAT_DEFAULT_STATE:
         if key in value:
             result[key] = value[key]
+
+    target = result.get("model_target")
+    if not isinstance(target, dict):
+        raise RuntimeError(f"Persisted model target must be an object: {owner}")
+    provider_id = str(target.get("provider_id") or "").strip()
+    model = str(target.get("model") or "").strip()
+    if not provider_id or not model:
+        raise RuntimeError(f"Persisted model target is incomplete: {owner}")
+    result["model_target"] = {
+        "provider_id": provider_id,
+        "model": model,
+    }
 
     if not isinstance(result.get("subagents"), dict):
         raise RuntimeError(f"Persisted subagents must be an object: {owner}")
@@ -317,6 +329,12 @@ def _normalize_chat_state(value: Any, owner: str) -> dict[str, Any]:
             raise RuntimeError(
                 f"Persisted subagent conversation does not match: {owner}"
             )
+        try:
+            target = ModelTarget.from_value(record.get("model_target"))
+        except ValueError as exc:
+            raise RuntimeError(
+                f"Persisted subagent has invalid model target: {owner}"
+            ) from exc
         record["todos"] = _load_plan(
             record.get("todos"),
             f"{owner} subagent {record.get('id') or 'unknown'}",
@@ -419,7 +437,6 @@ def load_state() -> dict[str, Any]:
                 "Unsupported Raptor state schema; start with a fresh "
                 f"RAPTOR_HOME (expected {STATE_SCHEMA_VERSION})"
             )
-        result["model"] = loaded.get("model")
         runtime = loaded.get("runtime")
         if not isinstance(runtime, dict):
             raise RuntimeError("Persisted runtime metadata must be an object")
@@ -447,8 +464,6 @@ def load_state() -> dict[str, Any]:
                 "state": _normalize_chat_state(entry.get("state"), str(key)),
             }
         result["chats"] = normalized_chats
-    if RESPONSES_MODEL:
-        result["model"] = RESPONSES_MODEL
     return result
 
 
@@ -593,6 +608,31 @@ def set_active_root_turn(marker: dict[str, Any]) -> None:
     _commit_chat_mutation(mutate)
 
 
+def set_default_model_target(target: ModelTarget) -> None:
+    """Set the concrete target inherited by chats and resolve placeholders."""
+    MODEL_CONFIGURATION.validate_target(target)
+    global _default_model_target
+    _default_model_target = target
+    target_value = target.to_dict()
+    CHAT_DEFAULT_STATE["model_target"] = copy.deepcopy(target_value)
+    DEFAULT_STATE["model_target"] = copy.deepcopy(target_value)
+    for runtime in _runtimes.values():
+        current = runtime.state.get("model_target")
+        if not isinstance(current, dict) or not str(current.get("model") or ""):
+            runtime.state["model_target"] = copy.deepcopy(target_value)
+
+
+def current_model_target() -> ModelTarget:
+    """Return the current chat's concrete root-agent target."""
+    return ModelTarget.from_value(current_runtime().state.get("model_target"))
+
+
+def set_current_model_target(target: ModelTarget) -> None:
+    """Persist the target selected for the current root session."""
+    MODEL_CONFIGURATION.validate_target(target)
+    current_runtime().state["model_target"] = target.to_dict()
+
+
 def ensure_chat(conversation_id: ConversationId) -> ChatRuntime:
     """Return the runtime owned by a provider conversation, creating it."""
     key = conversation_key(conversation_id)
@@ -604,10 +644,12 @@ def ensure_chat(conversation_id: ConversationId) -> ChatRuntime:
     if len(_runtimes) >= MAX_CHAT_RUNTIMES:
         raise RuntimeError("Chat runtime capacity reached")
     chat_state = copy.deepcopy(CHAT_DEFAULT_STATE)
+    chat_state["model_target"] = _default_model_target.to_dict()
     ensure_chat_dirs()
     chat_state["current_session_id"] = create_session(
         kind="main",
         chat_key=key,
+        model_target=_default_model_target.to_dict(),
     )
     runtime = ChatRuntime(
         key=key,
@@ -674,7 +716,7 @@ def all_chat_runtimes() -> tuple[ChatRuntime, ...]:
     return tuple(_runtimes.values())
 
 
-GLOBAL_STATE_KEYS = frozenset({"model", "runtime"})
+GLOBAL_STATE_KEYS = frozenset({"runtime"})
 
 
 class StateView(MutableMapping[str, Any]):
@@ -711,10 +753,11 @@ class StateView(MutableMapping[str, Any]):
         runtime = current_runtime()
         if runtime.turns.is_running() or runtime.subagent_tasks:
             raise RuntimeError("Cannot clear a chat runtime while work is active")
-        _root_state["model"] = None
         _root_state["runtime"] = {}
         runtime.state.clear()
-        runtime.state.update(copy.deepcopy(CHAT_DEFAULT_STATE))
+        reset = copy.deepcopy(CHAT_DEFAULT_STATE)
+        reset["model_target"] = _default_model_target.to_dict()
+        runtime.state.update(reset)
         runtime.pending_steers.clear()
         runtime.pending_approvals.clear()
         runtime.steer_queue = asyncio.Queue()
@@ -929,6 +972,7 @@ def bootstrap_runtime_storage() -> dict[str, int]:
             runtime.state["current_session_id"] = create_session(
                 kind="main",
                 chat_key=runtime.key,
+                model_target=runtime.state["model_target"],
             )
             created += 1
             state_changed = True

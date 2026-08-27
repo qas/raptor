@@ -172,7 +172,7 @@ class ShellConfigurationTests(unittest.TestCase):
 
 class ContextBudgetTests(unittest.TestCase):
 
-    def test_subagent_settings_do_not_inherit_main_environment(self) -> None:
+    def test_model_backend_environment_is_not_configuration(self) -> None:
         with patch.dict(
             os.environ,
             {
@@ -188,46 +188,26 @@ class ContextBudgetTests(unittest.TestCase):
         ):
             values = runpy.run_path(str(ROOT / "config.py"))
 
-        self.assertEqual(values["MODEL_CONTEXT_TOKENS"], 100_000)
-        self.assertEqual(values["SUBAGENT_MODEL_CONTEXT_TOKENS"], 0)
-        self.assertEqual(
-            values["SUBAGENT_RESPONSES_BASE_URL"],
-            "http://127.0.0.1:8000/v1",
-        )
-        self.assertEqual(values["SUBAGENT_RESPONSES_API_KEY"], "")
-        self.assertEqual(values["SUBAGENT_RESPONSES_MODEL"], "")
-        self.assertIsNone(values["SUBAGENT_RESPONSES_REASONING_EFFORT"])
-        self.assertEqual(
-            values["SUBAGENT_RESPONSES_REASONING_SUMMARY"],
-            "auto",
-        )
-        self.assertEqual(values["SUBAGENT_RESPONSES_MAX_RETRIES"], 3)
-        self.assertEqual(
-            values["SUBAGENT_RESPONSES_RETRY_BASE_SECONDS"],
-            0.5,
-        )
+        self.assertNotIn("MODEL_CONTEXT_TOKENS", values)
+        self.assertNotIn("RESPONSES_BASE_URL", values)
+        self.assertNotIn("SUBAGENT_RESPONSES_MODEL", values)
 
-    def test_main_and_subagent_windows_are_independent(self) -> None:
+    def test_budget_is_derived_from_each_supplied_model_window(self) -> None:
         with (
-            patch.object(config, "MODEL_CONTEXT_TOKENS", 100_000),
-            patch.object(config, "SUBAGENT_MODEL_CONTEXT_TOKENS", 20_000),
             patch.object(config, "CONTEXT_COMPACT_RATIO", 0.82),
             patch.object(config, "CONTEXT_SAFETY_TOKENS", 4_096),
         ):
-            self.assertEqual(config.context_input_budget(), 82_000)
-            self.assertEqual(config.subagent_context_input_budget(), 15_904)
+            self.assertEqual(config.model_context_input_budget(100_000), 82_000)
+            self.assertEqual(config.model_context_input_budget(20_000), 15_904)
 
-    def test_rejects_out_of_range_environment_values(self) -> None:
+    def test_old_model_retry_environment_is_ignored(self) -> None:
         with patch.dict(
             os.environ,
             {"RESPONSES_MAX_RETRIES": "-1"},
             clear=True,
         ):
-            with self.assertRaisesRegex(
-                ValueError,
-                "RESPONSES_MAX_RETRIES must be at least 0",
-            ):
-                runpy.run_path(str(ROOT / "config.py"))
+            values = runpy.run_path(str(ROOT / "config.py"))
+        self.assertNotIn("RESPONSES_MAX_RETRIES", values)
 
     def test_rejects_unknown_boolean_environment_values(self) -> None:
         with patch.dict(

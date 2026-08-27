@@ -27,6 +27,7 @@ from response_errors import MalformedToolCallError
 import session
 from turn_runtime import turns
 import subagents
+from model_providers import ModelTarget
 
 
 async def _noop(*_a, **_k):
@@ -35,6 +36,8 @@ async def _noop(*_a, **_k):
 
 class TranscriptDurabilityTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
+        self.target = ModelTarget("local", "model-a")
+        session.set_default_model_target(self.target)
         self._chat_dir = Path(tempfile.mkdtemp(prefix="chats-"))
         self._chat_patch = patch.object(
             chat_store,
@@ -44,11 +47,22 @@ class TranscriptDurabilityTests(unittest.IsolatedAsyncioTestCase):
         self._chat_patch.start()
         self.addCleanup(self._chat_patch.stop)
         chat_store._SEQ_CACHE.clear()
+        self._runtime_context = session.bound_chat(
+            f"durability:{self._chat_dir.name}"
+        )
+        self._runtime_context.__enter__()
+        self.addCleanup(
+            self._runtime_context.__exit__,
+            None,
+            None,
+            None,
+        )
         session.state.clear()
         session.state.update(copy.deepcopy(session.DEFAULT_STATE))
         sid = chat_store.create_session(
             kind="main",
             chat_key=session.current_runtime().key,
+            model_target=self.target.to_dict(),
         )
         session.state["current_session_id"] = sid
         turns.finish()
@@ -64,7 +78,7 @@ class TranscriptDurabilityTests(unittest.IsolatedAsyncioTestCase):
         sid = session.state["current_session_id"]
         seen_before_tool: list[int] = []
 
-        async def fake_stream(chat_id, items, extra_instructions=""):
+        async def fake_stream(_target, chat_id, items, extra_instructions=""):
             # After user append + before/during model, user item exists.
             items_now = chat_store.item_events(sid)
             self.assertTrue(
@@ -223,7 +237,7 @@ class TranscriptDurabilityTests(unittest.IsolatedAsyncioTestCase):
 
         seen_work: list[dict] = []
 
-        async def answer(_chat_id, work, **_kwargs):
+        async def answer(_target, _chat_id, work, **_kwargs):
             seen_work.extend(copy.deepcopy(work))
             return {
                 "output": [
@@ -301,7 +315,7 @@ class TranscriptDurabilityTests(unittest.IsolatedAsyncioTestCase):
     ) -> None:
         sid = session.state["current_session_id"]
 
-        async def fake_stream(chat_id, items, extra_instructions=""):
+        async def fake_stream(_target, chat_id, items, extra_instructions=""):
             return {
                 "output": [
                     {
@@ -441,7 +455,7 @@ class TranscriptDurabilityTests(unittest.IsolatedAsyncioTestCase):
         ]
         seen: dict[str, str] = {}
 
-        async def fake_stream(chat_id, items, extra_instructions=""):
+        async def fake_stream(_target, chat_id, items, extra_instructions=""):
             seen["instructions"] = extra_instructions
             return {
                 "output": [

@@ -17,9 +17,8 @@ from config import (
     COMPACT_KEEP_RECENT_TOKENS,
     COMPACTION_MAX_RECORD_CHARS,
     COMPACTION_OUTPUT_TOKENS,
+    COMPACTION_GENERATION_TOKENS,
     COMPACTION_USER_ANCHOR_TOKENS,
-    compaction_generation_budget,
-    context_input_budget,
 )
 from engine import estimate_tokens, response_text
 from response_errors import ContextLengthError, TransientResponsesError
@@ -72,6 +71,16 @@ CreateCompactionResponse = Callable[
 _CHECKPOINT_TRUNCATION_MARKER = (
     "\n\n[checkpoint middle truncated]\n\n"
 )
+
+
+def context_input_budget() -> int:
+    """Default for provider-neutral callers; production agents pass a target budget."""
+    return 0
+
+
+def compaction_generation_budget() -> int:
+    """Default for provider-neutral callers; agents pass a target allowance."""
+    return COMPACTION_GENERATION_TOKENS
 
 
 def checkpoint_summary_item(summary: str) -> dict[str, Any]:
@@ -741,8 +750,8 @@ async def ensure_context_under_budget(
     """Compact until rebuilt active context is under the input budget.
 
     Never returns work known to exceed the selected input budget when one is
-    configured—raises ``RuntimeError`` instead. Root callers use the main
-    budget by default; subagents pass their independent budget explicitly.
+    configured—raises ``RuntimeError`` instead. Agent callers pass the budget
+    derived from their immutable provider/model target.
     """
     budget = (
         context_input_budget()

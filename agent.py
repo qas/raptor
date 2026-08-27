@@ -18,8 +18,8 @@ from chat_store import (
 from config import (
     COMPACTION_REASONING_EFFORT,
     MAX_TOOL_ROUNDS,
-    compaction_generation_budget,
-    context_input_budget,
+    model_compaction_generation_budget,
+    model_context_input_budget,
 )
 from context import (
     build_active_context,
@@ -58,9 +58,11 @@ from presentation import (
 from observability import log_agent_activity, log_event
 from responses import (
     estimate_response_request_tokens,
+    model_provider,
     responses_create,
     responses_create_stream,
 )
+from model_providers import ModelTarget
 from response_errors import (
     ContextLengthError,
     MalformedToolCallError,
@@ -210,7 +212,20 @@ def context_tokens() -> int:
     )
 
 
+def _context_window(target: ModelTarget) -> int | None:
+    return model_provider(target).settings_for(target.model).context_window
+
+
+def _input_budget(target: ModelTarget) -> int:
+    return model_context_input_budget(_context_window(target))
+
+
+def _generation_budget(target: ModelTarget) -> int:
+    return model_compaction_generation_budget(_context_window(target))
+
+
 def estimate_compaction_request(
+    target: ModelTarget,
     items: list[dict[str, Any]],
     instructions: str,
 ) -> int:
@@ -218,7 +233,7 @@ def estimate_compaction_request(
         items,
         tools=None,
         extra_instructions=instructions,
-        max_output_tokens=compaction_generation_budget(),
+        max_output_tokens=_generation_budget(target),
         reasoning_effort=COMPACTION_REASONING_EFFORT,
     )
 
@@ -269,14 +284,16 @@ def _recovery_prompt_payload(
 
 
 async def create_compaction_response(
+    target: ModelTarget,
     items: list[dict[str, Any]],
     instructions: str,
 ) -> dict[str, Any]:
     return await responses_create(
+        target,
         items,
         tools=None,
         extra_instructions=instructions,
-        max_output_tokens=compaction_generation_budget(),
+        max_output_tokens=_generation_budget(target),
         reasoning_effort=COMPACTION_REASONING_EFFORT,
     )
 
@@ -288,14 +305,21 @@ async def compact_context(
 ) -> None:
     typing_task = asyncio.create_task(typing_loop(chat_id))
     try:
+        target = session.current_model_target()
         session_id = current_session_id()
         async with compacting_indicator(chat_id):
             ok = await compact_session(
                 session_id,
-                estimate_compaction_request=estimate_compaction_request,
-                create_compaction_response=create_compaction_response,
+                estimate_compaction_request=lambda items, instructions: (
+                    estimate_compaction_request(target, items, instructions)
+                ),
+                create_compaction_response=lambda items, instructions: (
+                    create_compaction_response(target, items, instructions)
+                ),
                 force=False,
                 reason=reason,
+                input_budget=_input_budget(target),
+                generation_budget=_generation_budget(target),
             )
         if not ok:
             await send(chat_id, "Nothing to compact.")
@@ -321,7 +345,8 @@ async def compact_context(
 
 
 async def maybe_auto_compact(chat_id: ConversationId) -> None:
-    budget = context_input_budget()
+    target = session.current_model_target()
+    budget = _input_budget(target)
     if not budget:
         return
     session_id = current_session_id()
@@ -340,10 +365,16 @@ async def maybe_auto_compact(chat_id: ConversationId) -> None:
                     extra_instructions=goal_instructions(),
                 )
             ),
-            estimate_compaction_request=estimate_compaction_request,
-            create_compaction_response=create_compaction_response,
+            estimate_compaction_request=lambda items, instructions: (
+                estimate_compaction_request(target, items, instructions)
+            ),
+            create_compaction_response=lambda items, instructions: (
+                create_compaction_response(target, items, instructions)
+            ),
             reason="threshold",
             log_source="agent",
+            input_budget=budget,
+            generation_budget=_generation_budget(target),
         )
     stats = session_context_stats(session_id)
     await send(
@@ -365,6 +396,7 @@ async def agent_turn(
     input_recorded: bool = False,
 ) -> bool | RetryableTurnFailure:
     typing_task = asyncio.create_task(typing_loop(chat_id))
+    target = session.current_model_target()
     session_id = current_session_id()
     continue_pending = True
     response_delivered = False
@@ -559,7 +591,7 @@ async def agent_turn(
         async def create_response(
             active_work: list[dict[str, Any]],
         ) -> dict[str, Any]:
-            budget = context_input_budget()
+            budget = _input_budget(target)
             estimate: int | None = None
             if budget:
                 estimate = estimate_response_request_tokens(
@@ -579,13 +611,23 @@ async def agent_turn(
                                 )
                             ),
                             estimate_compaction_request=(
-                                estimate_compaction_request
+                                lambda items, instructions: (
+                                    estimate_compaction_request(
+                                        target, items, instructions
+                                    )
+                                )
                             ),
                             create_compaction_response=(
-                                create_compaction_response
+                                lambda items, instructions: (
+                                    create_compaction_response(
+                                        target, items, instructions
+                                    )
+                                )
                             ),
                             reason="threshold",
                             log_source="agent",
+                            input_budget=budget,
+                            generation_budget=_generation_budget(target),
                         )
                     active_work[:] = fitted
                     estimate = estimate_response_request_tokens(
@@ -597,6 +639,7 @@ async def agent_turn(
                 items: list[dict[str, Any]],
             ) -> dict[str, Any]:
                 return await responses_create_stream(
+                    target,
                     chat_id,
                     items,
                     extra_instructions=extra_instructions,
@@ -617,15 +660,25 @@ async def agent_turn(
                             )
                         ),
                         estimate_compaction_request=(
-                            estimate_compaction_request
+                            lambda items, instructions: (
+                                estimate_compaction_request(
+                                    target, items, instructions
+                                )
+                            )
                         ),
                         create_compaction_response=(
-                            create_compaction_response
+                            lambda items, instructions: (
+                                create_compaction_response(
+                                    target, items, instructions
+                                )
+                            )
                         ),
                         reason="overflow",
                         force=True,
                         include_continuation=True,
                         log_source="agent",
+                        input_budget=_input_budget(target),
+                        generation_budget=_generation_budget(target),
                     )
                 log_event(
                     "agent",
@@ -665,6 +718,7 @@ async def agent_turn(
         ) -> dict[str, Any]:
             exec_state = dict(state)
             exec_state["session_id"] = session_id
+            exec_state["model_target"] = target.to_dict()
             exec_state["todo_state"] = todo_store_for_execution()
             return await execute_tool_with_approval(
                 chat_id,
@@ -679,7 +733,7 @@ async def agent_turn(
         ) -> list[dict[str, Any]] | None:
             reason = "overflow" if force else "threshold"
             if not force:
-                budget = context_input_budget()
+                budget = _input_budget(target)
                 if not budget:
                     return None
                 est = estimate_response_request_tokens(
@@ -698,15 +752,25 @@ async def agent_turn(
                         )
                     ),
                     estimate_compaction_request=(
-                        estimate_compaction_request
+                        lambda items, instructions: (
+                            estimate_compaction_request(
+                                target, items, instructions
+                            )
+                        )
                     ),
                     create_compaction_response=(
-                        create_compaction_response
+                        lambda items, instructions: (
+                            create_compaction_response(
+                                target, items, instructions
+                            )
+                        )
                     ),
                     reason=reason,
                     force=force,
                     include_continuation=force,
                     log_source="agent",
+                    input_budget=_input_budget(target),
+                    generation_budget=_generation_budget(target),
                 )
             log_event(
                 "agent",

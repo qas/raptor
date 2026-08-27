@@ -24,19 +24,17 @@ from config import (
     CONTEXT_COMPACT_RATIO,
     CONTEXT_SAFETY_TOKENS,
     MAX_TOOL_ROUNDS,
-    MODEL_CONTEXT_TOKENS,
     RAPTOR_HOME,
     STATE_PATH,
-    SUBAGENT_MODEL_CONTEXT_TOKENS,
-    context_input_budget,
-    subagent_context_input_budget,
+    model_context_input_budget,
 )
 from controller import ensure_root_session, interrupt_root_turn
 from goals import goal_is_active, pause_goal, prepare_goal_on_startup
 from loop import COMMANDS, accepts_event, handle_event
 from network import outbound_http_client
 from observability import log_event, log_exception
-from responses import ensure_model
+from model_providers import MODEL_CONFIGURATION
+from responses import ensure_target
 from session import bootstrap_runtime_storage, rehydrate_pending_inputs, state
 from shell_sessions import cancel_shell_sessions
 from skills import close_skill_discovery, start_skill_discovery
@@ -109,12 +107,12 @@ async def main(on_ready: Callable[[], None] | None = None) -> None:
     cursor: object | None = None
 
     try:
+        default_target = await ensure_target(MODEL_CONFIGURATION.default_target)
+        session.set_default_model_target(default_target)
         # Metadata discovery overlaps provider/model startup. Full skill
         # bodies remain unloaded until a turn invokes read_skill.
         start_skill_discovery()
         await provider.initialize(COMMANDS)
-        await ensure_model()
-
         ensure_chat_dirs()
         RAPTOR_HOME.mkdir(parents=True, exist_ok=True)
         CHAT_DIR.mkdir(parents=True, exist_ok=True)
@@ -131,6 +129,7 @@ async def main(on_ready: Callable[[], None] | None = None) -> None:
                 )
         with session.bound_runtime(primary_runtime):
             session_id = state.get("current_session_id")
+            primary_target = session.current_model_target()
             rehydrated = rehydrated_by_chat.get(primary_runtime.key, 0)
         for runtime in session.all_chat_runtimes():
             with session.bound_runtime(runtime):
@@ -181,7 +180,8 @@ async def main(on_ready: Callable[[], None] | None = None) -> None:
             "runtime",
             "ready",
             {
-                "model": state["model"],
+                "model_provider": primary_target.provider_id,
+                "model": primary_target.model,
                 "chat_provider": provider.name,
                 "user": provider.authorized_user_id,
                 "conversation": conversation_id,
@@ -189,12 +189,16 @@ async def main(on_ready: Callable[[], None] | None = None) -> None:
                 "chat_path": (
                     str(chat_path(str(session_id))) if session_id else None
                 ),
-                "context_limit": MODEL_CONTEXT_TOKENS,
+                "context_limit": (
+                    MODEL_CONFIGURATION.provider(primary_target.provider_id)
+                    .settings_for(primary_target.model)
+                    .context_window
+                ),
                 "context_compact_ratio": CONTEXT_COMPACT_RATIO,
-                "context_input_budget": context_input_budget(),
-                "subagent_context_limit": SUBAGENT_MODEL_CONTEXT_TOKENS,
-                "subagent_context_input_budget": (
-                    subagent_context_input_budget()
+                "context_input_budget": model_context_input_budget(
+                    MODEL_CONFIGURATION.provider(primary_target.provider_id)
+                    .settings_for(primary_target.model)
+                    .context_window
                 ),
                 "context_safety_tokens": CONTEXT_SAFETY_TOKENS,
                 "tool_round_limit": MAX_TOOL_ROUNDS,

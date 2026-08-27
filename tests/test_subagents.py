@@ -17,6 +17,12 @@ os.environ["AGENT_WORKDIR"] = str(_HOME)
 import controller
 import session
 import subagents
+import responses
+from model_providers import (
+    ModelConfiguration,
+    ModelProvider,
+    ModelTarget,
+)
 from response_errors import (
     IncompleteResponsesStreamError,
     MalformedToolCallError,
@@ -26,6 +32,33 @@ from response_errors import (
 
 class BackgroundSubagentTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
+        self.target = ModelTarget("local", "main-model")
+        self.configuration = ModelConfiguration(
+            providers={
+                "local": ModelProvider(
+                    id="local",
+                    base_url="http://local.example/v1",
+                    default_model="main-model",
+                    retry_base_seconds=0,
+                ),
+                "worker": ModelProvider(
+                    id="worker",
+                    base_url="http://worker.example/v1",
+                    default_model="worker-model",
+                    retry_base_seconds=0,
+                ),
+            },
+            default_target=self.target,
+        )
+        for module in (subagents, responses, session):
+            provider_patch = patch.object(
+                module,
+                "MODEL_CONFIGURATION",
+                self.configuration,
+            )
+            provider_patch.start()
+            self.addCleanup(provider_patch.stop)
+        session.set_default_model_target(self.target)
         self.runtime_context = session.bound_chat("telegram:123")
         self.runtime_context.__enter__()
         self.addCleanup(
@@ -35,28 +68,22 @@ class BackgroundSubagentTests(unittest.IsolatedAsyncioTestCase):
             None,
         )
         session.subagent_records.clear()
+        session.set_current_model_target(self.target)
 
     def test_subagent_payload_rejects_instruction_roles_in_history(self) -> None:
-        with (
-            patch.object(subagents, "SUBAGENT_RESPONSES_MODEL", "test-model"),
-            self.assertRaisesRegex(ValueError, "instructions field"),
-        ):
+        with self.assertRaisesRegex(ValueError, "instructions field"):
             subagents.build_subagent_payload(
+                self.target,
                 [{"role": "developer", "content": "late instruction"}],
                 allow_subagents=False,
                 depth=1,
             )
 
-    async def test_subagent_model_never_falls_back_to_main_selection(self) -> None:
-        with (
-            patch.object(subagents, "SUBAGENT_RESPONSES_MODEL", ""),
-            patch.dict(subagents.state, {"model": "main-model"}),
-        ):
-            with self.assertRaisesRegex(
-                RuntimeError,
-                "SUBAGENT_RESPONSES_MODEL is not configured",
-            ):
-                subagents.subagent_model()
+    async def test_subagent_inherits_parent_model_target(self) -> None:
+        self.assertEqual(
+            self.configuration.select_target(parent=self.target),
+            self.target,
+        )
 
     async def test_foreground_request_classifies_malformed_tool_call(
         self,
@@ -75,12 +102,10 @@ class BackgroundSubagentTests(unittest.IsolatedAsyncioTestCase):
         client = AsyncMock()
         client.post.return_value = response
 
-        with (
-            patch.object(session, "responses", client, create=True),
-            patch.object(subagents, "SUBAGENT_RESPONSES_MODEL", "model-a"),
-        ):
+        with patch.object(session, "responses", client, create=True):
             with self.assertRaises(MalformedToolCallError):
                 await subagents._create_subagent_response_once(
+                    self.target,
                     [],
                     agent_id="worker-1",
                     allow_subagents=False,
@@ -88,7 +113,7 @@ class BackgroundSubagentTests(unittest.IsolatedAsyncioTestCase):
                     tools=[],
                 )
 
-    async def test_subagent_stream_uses_independent_backend_and_callbacks(
+    async def test_subagent_stream_uses_selected_provider_and_callbacks(
         self,
     ) -> None:
         completed = {"status": "completed", "output": []}
@@ -96,16 +121,9 @@ class BackgroundSubagentTests(unittest.IsolatedAsyncioTestCase):
         on_text = AsyncMock()
         on_reasoning = AsyncMock()
 
-        with (
-            patch.object(subagents, "SUBAGENT_RESPONSES_MODEL", "worker-model"),
-            patch.object(
-                subagents,
-                "SUBAGENT_RESPONSES_BASE_URL",
-                "http://worker.example/v1",
-            ),
-            patch.object(subagents, "stream_response_payload", stream),
-        ):
+        with patch.object(subagents, "stream_response_payload", stream):
             result = await subagents._create_subagent_response_once(
+                ModelTarget("worker", "worker-model"),
                 [],
                 agent_id="worker-1",
                 allow_subagents=False,
@@ -130,28 +148,21 @@ class BackgroundSubagentTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(callback=callback_name):
                 attempts = 0
 
-                async def interrupted(_items, **kwargs):
+                async def interrupted(_target, _items, **kwargs):
                     nonlocal attempts
                     attempts += 1
                     await kwargs[callback_name]("public output")
                     raise IncompleteResponsesStreamError("disconnected")
 
                 callbacks = {callback_name: AsyncMock()}
-                with (
-                    patch.object(
-                        subagents,
-                        "_create_subagent_response_once",
-                        interrupted,
-                    ),
-                    patch.object(subagents, "SUBAGENT_RESPONSES_MAX_RETRIES", 3),
-                    patch.object(
-                        subagents,
-                        "SUBAGENT_RESPONSES_RETRY_BASE_SECONDS",
-                        0,
-                    ),
+                with patch.object(
+                    subagents,
+                    "_create_subagent_response_once",
+                    interrupted,
                 ):
                     with self.assertRaises(PartialResponsesStreamError):
                         await subagents.create_subagent_response(
+                            self.target,
                             [],
                             agent_id="worker-1",
                             allow_subagents=False,
@@ -164,6 +175,7 @@ class BackgroundSubagentTests(unittest.IsolatedAsyncioTestCase):
     async def test_background_runtime_projects_reasoning_and_reply(self) -> None:
         record = {
             "id": "worker-1",
+            "model_target": self.target.to_dict(),
             "session_id": "session-1",
             "background": True,
             "activity_surface_id": "telegram:42/77",
@@ -173,7 +185,7 @@ class BackgroundSubagentTests(unittest.IsolatedAsyncioTestCase):
         }
         session.subagent_records["worker-1"] = record
 
-        async def create_response(_items, **kwargs):
+        async def create_response(_target, _items, **kwargs):
             await kwargs["on_reasoning_summary"]("Checking files")
             await kwargs["on_text"]("Found the issue")
             return {
@@ -200,7 +212,7 @@ class BackgroundSubagentTests(unittest.IsolatedAsyncioTestCase):
                 "skill_catalog_instructions",
                 AsyncMock(return_value=""),
             ),
-            patch.object(subagents, "subagent_context_input_budget", return_value=0),
+            patch.object(subagents, "target_input_budget", return_value=0),
             patch.object(subagents, "create_subagent_response", create_response),
             patch.object(subagents, "append_item"),
             patch.object(subagents, "save_state"),
@@ -230,6 +242,7 @@ class BackgroundSubagentTests(unittest.IsolatedAsyncioTestCase):
     async def test_failed_subagent_turn_records_terminal_outcome(self) -> None:
         record = {
             "id": "worker-1",
+            "model_target": self.target.to_dict(),
             "session_id": "session-1",
             "background": False,
             "pending_inputs": [],
@@ -263,7 +276,7 @@ class BackgroundSubagentTests(unittest.IsolatedAsyncioTestCase):
             ),
             patch.object(
                 subagents,
-                "subagent_context_input_budget",
+                "target_input_budget",
                 return_value=0,
             ),
             patch.object(subagents, "create_subagent_response", malformed),
@@ -322,6 +335,7 @@ class BackgroundSubagentTests(unittest.IsolatedAsyncioTestCase):
 
         record = {
             "id": "worker-1",
+            "model_target": self.target.to_dict(),
             "chat_id": "telegram:123",
             "chat_key": "telegram:123",
             "depth": 1,
@@ -356,6 +370,7 @@ class BackgroundSubagentTests(unittest.IsolatedAsyncioTestCase):
     async def test_provider_prefixed_conversation_id_is_preserved(self) -> None:
         record = {
             "id": "worker-1",
+            "model_target": self.target.to_dict(),
             "chat_id": "telegram:123",
             "depth": 1,
             "allow_subagents": False,
@@ -400,6 +415,41 @@ class BackgroundSubagentTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.gather(task, return_exceptions=True)
             session.subagent_tasks.pop(result["agent_id"], None)
 
+    async def test_new_subagent_can_select_a_different_provider(self) -> None:
+        started = asyncio.Event()
+
+        async def wait_forever(_record):
+            started.set()
+            await asyncio.Event().wait()
+
+        with (
+            patch.object(subagents, "open_subagent_activity", AsyncMock()),
+            patch.object(subagents, "run_background_subagent", wait_forever),
+            patch.object(subagents, "save_state"),
+        ):
+            result = await subagents.subagent_tool(
+                {
+                    "task": "inspect with worker",
+                    "background": True,
+                    "model_provider": "worker",
+                },
+                chat_id="telegram:123",
+                execution_context={
+                    "depth": 0,
+                    "model_target": self.target.to_dict(),
+                },
+            )
+            await started.wait()
+            record = session.subagent_records[result["agent_id"]]
+            self.assertEqual(
+                record["model_target"],
+                {"provider_id": "worker", "model": "worker-model"},
+            )
+            task = session.subagent_tasks[result["agent_id"]]
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            session.subagent_tasks.pop(result["agent_id"], None)
+
         self.assertEqual(result["status"], "running")
         self.assertEqual(result["completion_notification"], "automatic")
 
@@ -422,6 +472,7 @@ class BackgroundSubagentTests(unittest.IsolatedAsyncioTestCase):
         release = asyncio.Event()
         record = {
             "id": "worker-1",
+            "model_target": self.target.to_dict(),
             "chat_id": "telegram:123",
             "chat_key": "telegram:123",
             "depth": 1,
@@ -458,6 +509,69 @@ class BackgroundSubagentTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertNotIn("worker-1", session.subagent_tasks)
 
+    async def test_continuation_checks_the_childs_stored_provider(self) -> None:
+        child_target = ModelTarget("worker", "worker-model")
+        configuration = ModelConfiguration(
+            providers={
+                "local": ModelProvider(
+                    id="local",
+                    base_url="http://local.example/v1",
+                    api_key_env="MISSING_PARENT_KEY",
+                    default_model="main-model",
+                ),
+                "worker": ModelProvider(
+                    id="worker",
+                    base_url="http://worker.example/v1",
+                    api_key_env="WORKER_TEST_KEY",
+                    default_model="worker-model",
+                ),
+            },
+            default_target=self.target,
+        )
+        record = {
+            "id": "worker-1",
+            "model_target": self.target.to_dict(),
+            "chat_id": "telegram:123",
+            "chat_key": "telegram:123",
+            "session_id": "subagent-session",
+            "model_target": child_target.to_dict(),
+            "status": "completed",
+            "task_count": 1,
+            "pending_inputs": [],
+            "allow_subagents": False,
+            "run_generation": 1,
+        }
+        session.subagent_records["worker-1"] = record
+        with (
+            patch.object(subagents, "MODEL_CONFIGURATION", configuration),
+            patch.object(responses, "MODEL_CONFIGURATION", configuration),
+            patch.dict(os.environ, {"WORKER_TEST_KEY": "worker-secret"}, clear=True),
+            patch.object(
+                subagents,
+                "finish_subagent_activity",
+                AsyncMock(return_value=True),
+            ),
+            patch.object(
+                subagents,
+                "run_subagent",
+                AsyncMock(return_value="continued"),
+            ),
+            patch.object(subagents, "append_item"),
+            patch.object(subagents, "save_state"),
+            patch.object(subagents, "prune_subagent_records"),
+        ):
+            result = await subagents.subagent_tool(
+                {"agent_id": "worker-1", "task": "continue"},
+                chat_id="telegram:123",
+                execution_context={
+                    "depth": 0,
+                    "model_target": self.target.to_dict(),
+                },
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["result"], "continued")
+
     async def test_parent_notification_does_not_wait_for_topic_finalization(
         self,
     ) -> None:
@@ -467,6 +581,7 @@ class BackgroundSubagentTests(unittest.IsolatedAsyncioTestCase):
         enqueue = Mock(return_value=completion)
         record = {
             "id": "worker-1",
+            "model_target": self.target.to_dict(),
             "chat_id": "telegram:123",
             "chat_key": "telegram:123",
             "depth": 1,
@@ -583,6 +698,7 @@ class BackgroundSubagentTests(unittest.IsolatedAsyncioTestCase):
     async def test_running_steer_is_appended_to_activity_surface(self) -> None:
         record = {
             "id": "worker-1",
+            "model_target": self.target.to_dict(),
             "chat_id": "telegram:123",
             "chat_key": "telegram:123",
             "status": "running",
@@ -615,6 +731,7 @@ class BackgroundSubagentTests(unittest.IsolatedAsyncioTestCase):
     ) -> None:
         record = {
             "id": "worker-1",
+            "model_target": self.target.to_dict(),
             "chat_id": "telegram:123",
             "chat_key": "telegram:123",
             "session_id": "subagent-session",
@@ -655,6 +772,7 @@ class BackgroundSubagentTests(unittest.IsolatedAsyncioTestCase):
     async def test_continuation_hands_pending_completion_to_parent(self) -> None:
         record = {
             "id": "worker-1",
+            "model_target": self.target.to_dict(),
             "chat_id": "telegram:123",
             "chat_key": "telegram:123",
             "session_id": "subagent-session",
@@ -699,6 +817,7 @@ class BackgroundSubagentTests(unittest.IsolatedAsyncioTestCase):
     ) -> None:
         record = {
             "id": "worker-1",
+            "model_target": self.target.to_dict(),
             "chat_id": "telegram:123",
             "chat_key": "telegram:123",
             "session_id": "subagent-session",
@@ -868,6 +987,7 @@ class BackgroundSubagentTests(unittest.IsolatedAsyncioTestCase):
     async def test_running_subagent_pending_input_queue_is_bounded(self) -> None:
         record = {
             "id": "worker-1",
+            "model_target": self.target.to_dict(),
             "status": "running",
             "task_count": 1,
             "pending_inputs": ["already queued"],
@@ -1091,6 +1211,7 @@ class BackgroundSubagentTests(unittest.IsolatedAsyncioTestCase):
     async def test_rejected_background_continuation_preserves_record(self) -> None:
         record = {
             "id": "worker-1",
+            "model_target": self.target.to_dict(),
             "chat_id": "telegram:123",
             "chat_key": "telegram:123",
             "session_id": "subagent-session",

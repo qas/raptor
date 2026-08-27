@@ -19,12 +19,16 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 import chat_store
+import commands
 import session
 from session import pending_approvals
 from turn_runtime import turns
 from commands import command
 from goals import replace_goal
 from tools import chat_history_tool
+from model_providers import ModelProvider, ModelTarget
+
+TEST_MODEL_TARGET = {"provider_id": "local", "model": "test-model"}
 
 
 async def _noop(*_a, **_k):
@@ -33,6 +37,8 @@ async def _noop(*_a, **_k):
 
 class SessionRotationTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
+        self.target = ModelTarget("local", "model-a")
+        session.set_default_model_target(self.target)
         self._chat_dir = Path(tempfile.mkdtemp(prefix="chats-"))
         self._chat_patch = patch.object(
             chat_store,
@@ -57,9 +63,10 @@ class SessionRotationTests(unittest.IsolatedAsyncioTestCase):
         sid = chat_store.create_session(
             kind="main",
             chat_key=session.current_runtime().key,
+            model_target=self.target.to_dict(),
         )
         session.state["current_session_id"] = sid
-        session.state["model"] = "model-a"
+        session.state["model_target"] = self.target.to_dict()
         session.state["approval_mode"] = "on"
         session.state["todos"] = [
             {"step": "old", "status": "pending"}
@@ -103,7 +110,7 @@ class SessionRotationTests(unittest.IsolatedAsyncioTestCase):
             "old",
         )
         self.assertEqual(session.state["todos"], [])
-        self.assertEqual(session.state["model"], "model-a")
+        self.assertEqual(session.state["model_target"], self.target.to_dict())
         self.assertEqual(session.state["approval_mode"], "on")
         hits = chat_history_tool(
             {
@@ -161,7 +168,7 @@ class SessionRotationTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_chats_lists_main_sessions_and_marks_current(self) -> None:
         current = session.state["current_session_id"]
-        previous = chat_store.create_session(
+        previous = chat_store.create_session(model_target=TEST_MODEL_TARGET,
             kind="main",
             chat_key=session.current_runtime().key,
         )
@@ -170,7 +177,7 @@ class SessionRotationTests(unittest.IsolatedAsyncioTestCase):
             {"role": "user", "content": "find this launch note"},
             source="user",
         )
-        child = chat_store.create_session(
+        child = chat_store.create_session(model_target=TEST_MODEL_TARGET,
             kind="subagent",
             chat_key=session.current_runtime().key,
             agent_id="child",
@@ -192,7 +199,7 @@ class SessionRotationTests(unittest.IsolatedAsyncioTestCase):
     async def test_chats_keeps_an_old_resumed_session_visible(self) -> None:
         current = session.state["current_session_id"]
         for _index in range(25):
-            chat_store.create_session(
+            chat_store.create_session(model_target=TEST_MODEL_TARGET,
                 kind="main",
                 chat_key=session.current_runtime().key,
             )
@@ -208,7 +215,7 @@ class SessionRotationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(f"{current} ·", sent[0].splitlines()[1])
 
     async def test_chats_searches_transcript_content(self) -> None:
-        matching = chat_store.create_session(
+        matching = chat_store.create_session(model_target=TEST_MODEL_TARGET,
             kind="main",
             chat_key=session.current_runtime().key,
         )
@@ -217,7 +224,7 @@ class SessionRotationTests(unittest.IsolatedAsyncioTestCase):
             {"role": "user", "content": "NeedleProject details"},
             source="user",
         )
-        other = chat_store.create_session(
+        other = chat_store.create_session(model_target=TEST_MODEL_TARGET,
             kind="main",
             chat_key=session.current_runtime().key,
         )
@@ -242,6 +249,7 @@ class SessionRotationTests(unittest.IsolatedAsyncioTestCase):
         target = chat_store.create_session(
             kind="main",
             chat_key=session.current_runtime().key,
+            model_target=self.target.to_dict(),
         )
         archived_todos = [{"step": "continue this", "status": "pending"}]
         chat_store.end_session(
@@ -274,9 +282,40 @@ class SessionRotationTests(unittest.IsolatedAsyncioTestCase):
         ]
         self.assertEqual(resumed[-1]["data"]["from_session_id"], current)
 
+    async def test_resume_checks_target_credentials_before_archiving_current(
+        self,
+    ) -> None:
+        current = session.state["current_session_id"]
+        target = chat_store.create_session(
+            kind="main",
+            chat_key=session.current_runtime().key,
+            model_target=self.target.to_dict(),
+        )
+        chat_store.end_session(target, reason="new_session")
+        sent: list[str] = []
+
+        async def capture(_chat_id, text, **_kwargs):
+            sent.append(text)
+
+        provider = ModelProvider(
+            id="local",
+            base_url="http://local.example/v1",
+            api_key_env="MISSING_RESUME_KEY",
+        )
+        with (
+            patch("commands.send", capture),
+            patch("commands.model_provider", return_value=provider),
+            patch.dict(os.environ, {}, clear=True),
+        ):
+            await command(1, f"/resume {target}")
+
+        self.assertEqual(session.state["current_session_id"], current)
+        self.assertFalse(chat_store.session_is_ended(current))
+        self.assertIn("MISSING_RESUME_KEY", sent[0])
+
     async def test_resume_rejects_subagent_session(self) -> None:
         current = session.state["current_session_id"]
-        child = chat_store.create_session(
+        child = chat_store.create_session(model_target=TEST_MODEL_TARGET,
             kind="subagent",
             chat_key=session.current_runtime().key,
             agent_id="child",
@@ -431,7 +470,7 @@ class SessionRotationTests(unittest.IsolatedAsyncioTestCase):
 
     def test_persisted_thread_with_orphaned_parent_is_not_promoted(self) -> None:
         owner = session.current_runtime().key
-        branch = chat_store.create_session(
+        branch = chat_store.create_session(model_target=TEST_MODEL_TARGET,
             kind="thread",
             chat_key=owner,
             parent_session_id=session.state["current_session_id"],
@@ -475,6 +514,7 @@ class SessionRotationTests(unittest.IsolatedAsyncioTestCase):
                 "chat_key": "local",
                 "chat_id": "local",
                 "status": "running",
+                "model_target": self.target.to_dict(),
                 "pending_inputs": ["first steer", "second steer"],
                 "todos": [],
             }

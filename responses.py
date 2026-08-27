@@ -16,15 +16,8 @@ from config import (
     CHAT_STREAM_INTERVAL,
     CHAT_STREAMING,
     TOOLS,
-    RESPONSES_API_KEY,
-    RESPONSES_BASE_URL,
-    RESPONSES_MODEL,
-    RESPONSES_REASONING_EFFORT,
-    RESPONSES_REASONING_SUMMARY,
-    RESPONSES_MAX_RETRIES,
-    RESPONSES_RETRY_BASE_SECONDS,
 )
-from session import save_state, state
+from model_providers import MODEL_CONFIGURATION, ModelProvider, ModelTarget
 import session
 from chat_runtime import send_draft, send_reasoning_summary
 from observability import log_event
@@ -190,15 +183,9 @@ async def retry_transient_response(
     max_retries: int | None = None,
     retry_base_seconds: float | None = None,
 ) -> _ResponseT:
-    max_retries = (
-        RESPONSES_MAX_RETRIES
-        if max_retries is None
-        else max(0, max_retries)
-    )
+    max_retries = 3 if max_retries is None else max(0, max_retries)
     retry_base_seconds = (
-        RESPONSES_RETRY_BASE_SECONDS
-        if retry_base_seconds is None
-        else max(0.0, retry_base_seconds)
+        0.5 if retry_base_seconds is None else max(0.0, retry_base_seconds)
     )
     total_attempts = max_retries + 1
     for attempt in range(1, total_attempts + 1):
@@ -319,24 +306,19 @@ def parse_context_length_error(
     )
 
 
-def auth_headers() -> dict[str, str]:
-    if RESPONSES_API_KEY:
-        return {
-            "Authorization":
-                f"Bearer {RESPONSES_API_KEY}"
-        }
-
-    return {}
+def model_provider(target: ModelTarget) -> ModelProvider:
+    return MODEL_CONFIGURATION.provider(target.provider_id)
 
 
 # ---------------------------------------------------------------------------
 # Responses API
 # ---------------------------------------------------------------------------
 
-async def _list_models_once() -> list[str]:
+async def _list_models_once(provider_id: str) -> list[str]:
+    provider = MODEL_CONFIGURATION.provider(provider_id)
     response = await session.responses.get(
-        f"{RESPONSES_BASE_URL}/models",
-        headers=auth_headers(),
+        f"{provider.base_url}/models",
+        headers=provider.headers(),
         timeout=httpx.Timeout(MODEL_LIST_TIMEOUT_SECONDS),
     )
 
@@ -348,44 +330,41 @@ async def _list_models_once() -> list[str]:
             "data",
             [],
         )
-        if model.get(
+        if isinstance(model, dict) and model.get(
             "id"
         )
     ]
 
 
-async def list_models(*, max_retries: int | None = None) -> list[str]:
+async def list_models(
+    provider_id: str,
+    *,
+    max_retries: int | None = None,
+) -> list[str]:
+    provider = MODEL_CONFIGURATION.provider(provider_id)
     return await retry_transient_response(
-        _list_models_once,
+        lambda: _list_models_once(provider_id),
         operation="Responses model listing",
-        max_retries=max_retries,
+        max_retries=(
+            provider.request_max_retries
+            if max_retries is None
+            else max_retries
+        ),
+        retry_base_seconds=provider.retry_base_seconds,
     )
 
 
-async def ensure_model() -> str:
-    model = state.get(
-        "model"
-    )
-
-    if model:
-        return str(
-            model
-        )
-
-    models = await list_models()
-
+async def ensure_target(target: ModelTarget) -> ModelTarget:
+    provider = MODEL_CONFIGURATION.provider(target.provider_id)
+    provider.api_key()
+    if target.model:
+        return target
+    models = await list_models(target.provider_id)
     if not models:
         raise RuntimeError(
-            "Responses API returned no models"
+            f"Model provider {target.provider_id!r} returned no models"
         )
-
-    state["model"] = (
-        models[0]
-    )
-
-    save_state()
-
-    return models[0]
+    return ModelTarget(target.provider_id, models[0])
 
 
 def instructions(
@@ -463,6 +442,7 @@ def build_response_payload(
 
 
 async def _responses_create_once(
+    target: ModelTarget,
     input_items: list[
         dict[str, Any]
     ],
@@ -474,8 +454,11 @@ async def _responses_create_once(
     extra_instructions: str = "",
     max_output_tokens: int
     | None = None,
-    reasoning_effort: str | None = RESPONSES_REASONING_EFFORT,
+    reasoning_effort: str | None = None,
 ) -> dict[str, Any]:
+    target = await ensure_target(target)
+    provider = model_provider(target)
+    settings = provider.settings_for(target.model)
     payload = build_response_payload(
         input_items,
         tools=tools,
@@ -485,16 +468,14 @@ async def _responses_create_once(
         max_output_tokens=(
             max_output_tokens
         ),
-        reasoning_effort=reasoning_effort,
+        reasoning_effort=(reasoning_effort or settings.reasoning_effort),
         stream=False,
     )
 
-    payload[
-        "model"
-    ] = await ensure_model()
+    payload["model"] = target.model
     response = await session.responses.post(
-        f"{RESPONSES_BASE_URL}/responses",
-        headers=auth_headers(),
+        f"{provider.base_url}/responses",
+        headers=provider.headers(),
         json=payload,
         timeout=None,
     )
@@ -509,15 +490,18 @@ async def _responses_create_once(
 
 
 async def responses_create(
+    target: ModelTarget,
     input_items: list[dict[str, Any]],
     *,
     tools: list[dict[str, Any]] | None = TOOLS,
     extra_instructions: str = "",
     max_output_tokens: int | None = None,
-    reasoning_effort: str | None = RESPONSES_REASONING_EFFORT,
+    reasoning_effort: str | None = None,
 ) -> dict[str, Any]:
+    provider = model_provider(target)
     async def request() -> dict[str, Any]:
         return await _responses_create_once(
+            target,
             input_items,
             tools=tools,
             extra_instructions=extra_instructions,
@@ -528,6 +512,8 @@ async def responses_create(
     return await retry_transient_response(
         request,
         operation="Responses request",
+        max_retries=provider.request_max_retries,
+        retry_base_seconds=provider.retry_base_seconds,
     )
 
 
@@ -536,6 +522,7 @@ def build_stateless_response_payload(
     model: str,
     *,
     tools: list[dict[str, Any]] | None = TOOLS,
+    reasoning_effort: str | None = None,
 ) -> dict[str, Any]:
     """Build an instruction-free request for the in-memory ``/ask`` loop."""
     validate_chronological_input(input_items)
@@ -547,27 +534,29 @@ def build_stateless_response_payload(
     if tools:
         payload["tools"] = tools
         payload["parallel_tool_calls"] = False
-    if RESPONSES_REASONING_EFFORT is not None:
+    if reasoning_effort is not None:
         payload["reasoning"] = {
-            "effort": RESPONSES_REASONING_EFFORT,
+            "effort": reasoning_effort,
         }
     return payload
 
 
 async def _stateless_response_once(
+    target: ModelTarget,
     input_items: list[dict[str, Any]],
 ) -> dict[str, Any]:
     """Call the selected model without instructions or durable history."""
-    model = str(state.get("model") or RESPONSES_MODEL or "")
-    if not model:
-        models = await list_models()
-        if not models:
-            raise RuntimeError("Responses API returned no models")
-        model = models[0]
+    target = await ensure_target(target)
+    provider = model_provider(target)
+    settings = provider.settings_for(target.model)
     response = await session.responses.post(
-        f"{RESPONSES_BASE_URL}/responses",
-        headers=auth_headers(),
-        json=build_stateless_response_payload(input_items, model),
+        f"{provider.base_url}/responses",
+        headers=provider.headers(),
+        json=build_stateless_response_payload(
+            input_items,
+            target.model,
+            reasoning_effort=settings.reasoning_effort,
+        ),
         timeout=None,
     )
     if response.is_error:
@@ -579,11 +568,15 @@ async def _stateless_response_once(
 
 
 async def stateless_response(
+    target: ModelTarget,
     input_items: list[dict[str, Any]],
 ) -> dict[str, Any]:
+    provider = model_provider(target)
     return await retry_transient_response(
-        lambda: _stateless_response_once(input_items),
+        lambda: _stateless_response_once(target, input_items),
         operation="Stateless Responses request",
+        max_retries=provider.request_max_retries,
+        retry_base_seconds=provider.retry_base_seconds,
     )
 
 
@@ -666,6 +659,7 @@ async def stream_response_payload(
 
 
 async def _responses_create_stream_once(
+    target: ModelTarget,
     chat_id: ConversationId,
     input_items: list[
         dict[str, Any]
@@ -678,10 +672,13 @@ async def _responses_create_stream_once(
     extra_instructions: str = "",
     max_output_tokens: int
     | None = None,
-    reasoning_effort: str | None = RESPONSES_REASONING_EFFORT,
-    reasoning_summary: str | None = RESPONSES_REASONING_SUMMARY,
+    reasoning_effort: str | None = None,
+    reasoning_summary: str | None = None,
     replay_guard: ResponsesStreamReplayGuard | None = None,
 ) -> dict[str, Any]:
+    target = await ensure_target(target)
+    provider = model_provider(target)
+    settings = provider.settings_for(target.model)
     payload = build_response_payload(
         input_items,
         tools=tools,
@@ -691,14 +688,12 @@ async def _responses_create_stream_once(
         max_output_tokens=(
             max_output_tokens
         ),
-        reasoning_effort=reasoning_effort,
-        reasoning_summary=reasoning_summary,
+        reasoning_effort=(reasoning_effort or settings.reasoning_effort),
+        reasoning_summary=(reasoning_summary or settings.reasoning_summary),
         stream=True,
     )
 
-    payload[
-        "model"
-    ] = await ensure_model()
+    payload["model"] = target.model
     draft_id = max(
         1,
         int(
@@ -772,8 +767,8 @@ async def _responses_create_stream_once(
 
     try:
         final_response = await stream_response_payload(
-            url=f"{RESPONSES_BASE_URL}/responses",
-            headers=auth_headers(),
+            url=f"{provider.base_url}/responses",
+            headers=provider.headers(),
             payload=payload,
             on_text=collect_text,
             on_reasoning_summary=collect_reasoning,
@@ -798,20 +793,23 @@ async def _responses_create_stream_once(
 
 
 async def responses_create_stream(
+    target: ModelTarget,
     chat_id: ConversationId,
     input_items: list[dict[str, Any]],
     *,
     tools: list[dict[str, Any]] | None = TOOLS,
     extra_instructions: str = "",
     max_output_tokens: int | None = None,
-    reasoning_effort: str | None = RESPONSES_REASONING_EFFORT,
-    reasoning_summary: str | None = RESPONSES_REASONING_SUMMARY,
+    reasoning_effort: str | None = None,
+    reasoning_summary: str | None = None,
 ) -> dict[str, Any]:
+    provider = model_provider(target)
     replay_guard = ResponsesStreamReplayGuard()
 
     async def request() -> dict[str, Any]:
         try:
             return await _responses_create_stream_once(
+                target,
                 chat_id,
                 input_items,
                 tools=tools,
@@ -832,6 +830,8 @@ async def responses_create_stream(
         request,
         operation="Responses stream",
         log_data={"conversation_id": str(chat_id)},
+        max_retries=provider.request_max_retries,
+        retry_base_seconds=provider.retry_base_seconds,
     )
 
 

@@ -44,6 +44,7 @@ async def start_thread(conversation_id: ConversationId) -> dict[str, Any]:
         kind="thread",
         chat_key=session.current_runtime().key,
         parent_session_id=parent_id,
+        model_target=session.current_model_target().to_dict(),
     )
     seed = build_active_context(parent_id)
     for item in seed:

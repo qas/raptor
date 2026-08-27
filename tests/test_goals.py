@@ -15,6 +15,7 @@ os.environ["TG_USER_ID"] = "1"
 os.environ["RAPTOR_HOME"] = str(_STATE_DIR)
 os.environ["AGENT_WORKDIR"] = str(_STATE_DIR)
 os.environ.setdefault("MODEL_CONTEXT_TOKENS", "131072")
+TEST_MODEL_TARGET = {"provider_id": "local", "model": "test-model"}
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
@@ -23,6 +24,7 @@ import controller
 import session
 from chat_provider import ProviderCapabilities
 from chat_runtime import set_chat_provider
+from model_providers import ModelTarget
 from goals import (
     GOAL_ACTIVE,
     GOAL_BLOCKED,
@@ -53,6 +55,10 @@ from goals import (
 )
 from runtime_events import RuntimeEvent, RuntimeEventKind
 from turn_runtime import TurnKind, turns
+
+_MODEL_TARGET = ModelTarget("local", "model-a")
+session.set_default_model_target(_MODEL_TARGET)
+session.set_default_chat("goals-tests")
 
 
 async def _noop(*_a, **_k):
@@ -145,7 +151,7 @@ class GoalTests(unittest.IsolatedAsyncioTestCase):
         self._chat_patch.start()
         self.addCleanup(self._chat_patch.stop)
         chat_store._SEQ_CACHE.clear()
-        session.state["current_session_id"] = create_session(
+        session.state["current_session_id"] = create_session(model_target=TEST_MODEL_TARGET,
             kind="main",
             chat_key=session.current_runtime().key,
         )
@@ -904,16 +910,12 @@ class GoalTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("update_goal", names)
         self.assertNotIn("set_goal", names)
         self.assertNotIn("cancel", names)
-        session.state["model"] = "main-model"
-        with patch(
-            "subagents.SUBAGENT_RESPONSES_MODEL",
-            "subagent-model",
-        ):
-            payload = build_subagent_payload(
-                [{"role": "user", "content": "task"}],
-                allow_subagents=False,
-                depth=1,
-            )
+        payload = build_subagent_payload(
+            ModelTarget("local", "subagent-model"),
+            [{"role": "user", "content": "task"}],
+            allow_subagents=False,
+            depth=1,
+        )
         self.assertEqual(payload["model"], "subagent-model")
         self.assertNotIn(
             "Active persistent goal",
@@ -1038,6 +1040,7 @@ class GoalTests(unittest.IsolatedAsyncioTestCase):
             fake_estimate,
         ):
             agent_mod.estimate_compaction_request(
+                session.current_model_target(),
                 [{"role": "user", "content": "x"}],
                 "checkpoint instructions only",
             )
@@ -1055,7 +1058,7 @@ class GoalTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(
             captured["max_output_tokens"],
-            agent_mod.compaction_generation_budget(),
+            agent_mod._generation_budget(session.current_model_target()),
         )
         self.assertEqual(
             captured["reasoning_effort"],
@@ -1700,7 +1703,7 @@ class GoalPinTests(unittest.IsolatedAsyncioTestCase):
         self._chat_patch.start()
         self.addCleanup(self._chat_patch.stop)
         chat_store._SEQ_CACHE.clear()
-        session.state["current_session_id"] = create_session(
+        session.state["current_session_id"] = create_session(model_target=TEST_MODEL_TARGET,
             kind="main",
             chat_key=session.current_runtime().key,
         )
@@ -2271,7 +2274,7 @@ class SetGoalToolTests(unittest.IsolatedAsyncioTestCase):
         self._chat_patch.start()
         self.addCleanup(self._chat_patch.stop)
         chat_store._SEQ_CACHE.clear()
-        session.state["current_session_id"] = create_session(
+        session.state["current_session_id"] = create_session(model_target=TEST_MODEL_TARGET,
             kind="main",
             chat_key=session.current_runtime().key,
         )
@@ -2503,7 +2506,7 @@ class SetGoalToolTests(unittest.IsolatedAsyncioTestCase):
     ) -> None:
         during = {"authorized": None}
 
-        async def fake_stream(chat_id, items, extra_instructions=""):
+        async def fake_stream(_target, chat_id, items, extra_instructions=""):
             during["authorized"] = (
                 session.current_runtime().goal_creation_authorized
             )

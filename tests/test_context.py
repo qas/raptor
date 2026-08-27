@@ -22,6 +22,8 @@ import chat_store
 import context
 from responses import ContextLengthError, TransientResponsesError
 
+TEST_MODEL_TARGET = {"provider_id": "local", "model": "test-model"}
+
 
 class ContextTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
@@ -34,7 +36,7 @@ class ContextTests(unittest.IsolatedAsyncioTestCase):
         self._chat_patch.start()
         self.addCleanup(self._chat_patch.stop)
         chat_store._SEQ_CACHE.clear()
-        self.session_id = chat_store.create_session(kind="main", chat_key="local")
+        self.session_id = chat_store.create_session(model_target=TEST_MODEL_TARGET, kind="main", chat_key="local")
 
     def _add_user(self, text: str) -> dict:
         return chat_store.append_item(
@@ -698,7 +700,7 @@ class EnsureUnderBudgetTests(unittest.IsolatedAsyncioTestCase):
         self._chat_patch.start()
         self.addCleanup(self._chat_patch.stop)
         chat_store._SEQ_CACHE.clear()
-        self.session_id = chat_store.create_session(kind="main", chat_key="local")
+        self.session_id = chat_store.create_session(model_target=TEST_MODEL_TARGET, kind="main", chat_key="local")
 
     async def test_real_estimator_compacts_huge_archive_under_budget(
         self,

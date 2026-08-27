@@ -57,9 +57,21 @@ curl -fsSL \
 
 `raptor` uses the current directory as `AGENT_WORKDIR` unless configured.
 
+Create `.raptor/config.toml` in the workspace:
+
+```toml
+model_provider = "local"
+model = "your-model"
+
+[model_providers.local]
+base_url = "http://127.0.0.1:8000/v1"
+default_model = "your-model"
+context_window = 131072
+```
+
+Then configure chat transports and start Raptor:
+
 ```bash
-export RESPONSES_BASE_URL=http://127.0.0.1:8000/v1
-export RESPONSES_MODEL=your-model
 export CHAT_PROVIDERS=telegram,responses_api
 export TG_BOT_TOKEN=your-telegram-token
 export TG_USER_ID=123456789
@@ -116,7 +128,9 @@ the daemon (the launch workspace's `.raptor` directory by default).
 | `/stop` | Interrupt the current root turn; background work continues |
 | `/stop all` | Interrupt and cancel background work in the current main chat |
 | `/compact` | Create a durable context checkpoint |
-| `/model` | List or switch backend models |
+| `/models [provider]` | List models served by a configured provider |
+| `/model` | Show the current model target and configured providers |
+| `/model <provider> <model>` | Start a fresh chat session on that target |
 | `/approval` | Toggle tool approval |
 | `/todos` | Show the active execution plan |
 | `/goal` | Inspect or manage the persistent goal |
@@ -152,6 +166,7 @@ side effects are not reversible.
 | `runtime_events.py` | Typed background-completion events delivered to the root |
 | `observability.py` | Structured runtime events and activity labels |
 | `responses.py` | Outbound Responses client, streaming, and retry policy |
+| `model_providers.py` | `.raptor/config.toml` model-provider registry and target selection |
 | `response_errors.py` | Shared Responses protocol errors |
 | `chat_provider.py` | Provider protocol and normalized event types |
 | `chat_runtime.py` | Provider loading, binding, and deferred delivery context |
@@ -233,7 +248,8 @@ is paused instead of blocked. Providers may show a temporary animated
 Transient transport errors include connection failures, disconnects such as
 `RemoteProtocolError`, incomplete streams, and retryable HTTP statuses (`408`,
 `429`, `500`, `502`, `503`, and `504`). The initial request is followed by up
-to `RESPONSES_MAX_RETRIES` exponential-backoff retries. A valid HTTP
+to the selected provider's `request_max_retries` exponential-backoff retries.
+A valid HTTP
 `Retry-After` delay takes precedence over a shorter local delay. Once a stream
 has exposed public output, Raptor does not replay it automatically after a
 disconnect because doing so could duplicate visible output or tool effects.
@@ -260,13 +276,16 @@ completions re-enter through the root controller and retry delivery if the
 controller temporarily fails. `/stop all` terminates every live process group
 owned by the current main chat.
 
-Subagents have isolated transcripts and independent backend, reasoning, retry,
-and context-window configuration. Completed record retention and recovery tool
-events are bounded; running, interrupted, and undelivered completion records
-are protected from pruning. Their private tool history is never projected into
-the parent. A subagent compacts lazily when its next model request needs room,
-so finishing a child does not trigger speculative compaction or delay its
-result.
+Subagents have isolated transcripts and immutable model targets. A new child
+inherits its parent's provider and model unless the parent selects another
+configured provider/model in the subagent call. Continuations keep the target
+stored with the child transcript. Provider-specific reasoning, retry, and
+context-window settings follow that target. Completed record retention and
+recovery tool events are bounded; running, interrupted, and undelivered
+completion records are protected from pruning. Their private tool history is
+never projected into the parent. A subagent compacts lazily when its next
+model request needs room, so finishing a child does not trigger speculative
+compaction or delay its result.
 
 The background-subagent limit is process-wide. Providers may project safe,
 bounded activity without receiving the child's transcript or tool payloads. In
@@ -391,9 +410,11 @@ stays in the provider-neutral core.
 
 ## Configuration
 
-Subagent backend settings are independent; they never inherit main-agent
-backend settings. Invalid numbers, booleans, duplicate providers, and values
-outside the documented ranges stop startup with a configuration error.
+Subagents inherit their parent's model target by default. An explicit provider
+or model selects a different configured target for that new child, and the
+child keeps it for every continuation. Invalid fields, numbers, booleans,
+duplicate providers, and values outside the documented ranges stop startup
+with a configuration error.
 
 ### Runtime and providers
 
@@ -401,6 +422,7 @@ outside the documented ranges stop startup with a configuration error.
 |---|---:|---|
 | `AGENT_WORKDIR` | launch directory | Workspace, shell working directory, and `.skills` parent |
 | `RAPTOR_HOME` | `$AGENT_WORKDIR/.raptor` | Durable state and transcript directory |
+| `RAPTOR_CONFIG` | `$RAPTOR_HOME/config.toml` | Model-provider TOML configuration file |
 | `RAPTOR_LOG` | `$RAPTOR_HOME/raptor.log` | Daemon stdout/stderr event log |
 | `RAPTOR_PROXY` | empty | Outbound `http`, `https`, or remote-DNS `socks5h` proxy |
 | `RAPTOR_NO_PROXY` | empty | Comma-separated exact hosts or `*.` subdomain patterns routed directly |
@@ -458,29 +480,48 @@ RAPTOR_PROXY=socks5h://proxy.example:1080 \
 | `RESPONSES_SERVER_MAX_STREAM_EVENTS` | `256` | Buffered SSE events per active response |
 | `RESPONSES_SERVER_READ_TIMEOUT` | `10.0` | Header and body read deadline in seconds |
 
-### Main model backend
+### Model providers
+
+Outbound model configuration lives in `.raptor/config.toml`, or the file set
+by `RAPTOR_CONFIG`. Environment variables are used only for secrets named by
+`api_key_env`; secret values are never persisted in transcripts or state.
+
+```toml
+model_provider = "openai"
+model = "gpt-5"
+
+[model_providers.openai]
+base_url = "https://api.openai.com/v1"
+api_key_env = "OPENAI_API_KEY"
+default_model = "gpt-5"
+request_max_retries = 3
+retry_base_seconds = 0.5
+context_window = 400000
+reasoning_effort = "high"
+reasoning_summary = "auto"
+
+[model_providers.local]
+base_url = "http://127.0.0.1:8000/v1"
+default_model = "local-model"
+context_window = 131072
+
+[model_providers.local.models."small-model"]
+context_window = 32768
+reasoning_effort = "low"
+```
+
+Each provider must expose Responses-compatible `/responses` and `/models`
+endpoints. Model tables override provider defaults. Omitting top-level `model`
+uses the selected provider's `default_model`; with no config file, Raptor
+probes the local provider and selects its first served model.
+
+Changing `/model` archives the current root transcript and starts a fresh one,
+so provider-private response items never cross provider boundaries.
+
+### Subagents
 
 | Variable | Default | Purpose |
 |---|---:|---|
-| `RESPONSES_BASE_URL` | `http://127.0.0.1:8000/v1` | Responses-compatible backend |
-| `RESPONSES_API_KEY` | empty | Backend bearer token |
-| `RESPONSES_MODEL` | empty | Initial model; otherwise discovered from the backend |
-| `RESPONSES_REASONING_EFFORT` | empty | Main-agent reasoning effort; empty uses the model default |
-| `RESPONSES_REASONING_SUMMARY` | `auto` | Public reasoning-summary mode; empty omits it |
-| `RESPONSES_MAX_RETRIES` | `3` | Retries after the initial transiently failed request |
-| `RESPONSES_RETRY_BASE_SECONDS` | `0.5` | Initial exponential-backoff delay |
-
-### Subagent backend
-
-| Variable | Default | Purpose |
-|---|---:|---|
-| `SUBAGENT_RESPONSES_BASE_URL` | `http://127.0.0.1:8000/v1` | Independent subagent backend |
-| `SUBAGENT_RESPONSES_API_KEY` | empty | Independent backend bearer token |
-| `SUBAGENT_RESPONSES_MODEL` | empty | Required subagent model |
-| `SUBAGENT_RESPONSES_REASONING_EFFORT` | empty | Independent reasoning effort |
-| `SUBAGENT_RESPONSES_REASONING_SUMMARY` | `auto` | Public reasoning-summary mode |
-| `SUBAGENT_RESPONSES_MAX_RETRIES` | `3` | Independent retries after the initial request |
-| `SUBAGENT_RESPONSES_RETRY_BASE_SECONDS` | `0.5` | Independent initial backoff delay |
 | `MAX_SUBAGENT_DEPTH` | `3` | Maximum recursive delegation depth; minimum 1 |
 | `MAX_SUBAGENT_RECORDS` | `100` | Retained subagent records and persistent activity surfaces |
 | `MAX_SUBAGENT_TOOL_EVENTS` | `500` | Recent recovery tool events retained per record |
@@ -491,8 +532,6 @@ RAPTOR_PROXY=socks5h://proxy.example:1080 \
 
 | Variable | Default | Purpose |
 |---|---:|---|
-| `MODEL_CONTEXT_TOKENS` | `0` | Main context window; `0` disables proactive checks |
-| `SUBAGENT_MODEL_CONTEXT_TOKENS` | `0` | Independent subagent context window |
 | `CONTEXT_COMPACT_RATIO` | `0.82` | Proactive compaction ratio; must be 0.50–0.95 |
 | `CONTEXT_SAFETY_TOKENS` | `4096` | Tokens reserved below each window |
 | `COMPACT_KEEP_RECENT_TOKENS` | `20000` | Native tail retained by normal compaction |

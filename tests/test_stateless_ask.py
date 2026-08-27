@@ -22,6 +22,7 @@ import chat_store
 import commands
 import responses
 import session
+from model_providers import ModelTarget
 
 
 class _Response:
@@ -45,6 +46,8 @@ class _Client:
 
 class StatelessAskTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
+        session.set_default_model_target(ModelTarget("local", "model-a"))
+        session.set_default_chat("ask-tests")
         self._chat_dir = Path(tempfile.mkdtemp(prefix="chats-"))
         self._chat_patch = patch.object(
             chat_store,
@@ -59,8 +62,12 @@ class StatelessAskTests(unittest.IsolatedAsyncioTestCase):
         session.state["current_session_id"] = chat_store.create_session(
             kind="main",
             chat_key=session.current_runtime().key,
+            model_target={"provider_id": "local", "model": "model-a"},
         )
-        session.state["model"] = "model-a"
+        session.state["model_target"] = {
+            "provider_id": "local",
+            "model": "model-a",
+        }
 
     def test_payload_has_one_user_message_and_tools(self) -> None:
         tools = [{"type": "function", "name": "read_file"}]
@@ -89,6 +96,7 @@ class StatelessAskTests(unittest.IsolatedAsyncioTestCase):
 
         with patch.object(session, "responses", client, create=True):
             await responses.stateless_response(
+                ModelTarget("local", "model-a"),
                 [{"role": "user", "content": "side question"}]
             )
 
@@ -134,6 +142,7 @@ class StatelessAskTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(handled)
         create.assert_awaited_once_with(
+            ModelTarget("local", "model-a"),
             [{"role": "user", "content": "side question"}]
         )
         send.assert_awaited_once_with(1, "isolated answer")
@@ -179,7 +188,7 @@ class StatelessAskTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(handled)
         execute.assert_awaited_once()
-        second_work = create.await_args_list[1].args[0]
+        second_work = create.await_args_list[1].args[1]
         self.assertEqual(second_work[0]["content"], "inspect the readme")
         self.assertEqual(second_work[1], call)
         self.assertEqual(second_work[2]["type"], "function_call_output")
@@ -190,7 +199,7 @@ class StatelessAskTests(unittest.IsolatedAsyncioTestCase):
         started = asyncio.Event()
         release = asyncio.Event()
 
-        async def respond(_work):
+        async def respond(_target, _work):
             started.set()
             await release.wait()
             return {

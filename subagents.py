@@ -31,16 +31,9 @@ from config import (
     MAX_SUBAGENT_TOOL_EVENTS,
     MAX_TOOL_OUTPUT,
     MAX_TOOL_ROUNDS,
-    SUBAGENT_RESPONSES_API_KEY,
-    SUBAGENT_RESPONSES_BASE_URL,
-    SUBAGENT_RESPONSES_MAX_RETRIES,
-    SUBAGENT_RESPONSES_MODEL,
-    SUBAGENT_RESPONSES_REASONING_EFFORT,
-    SUBAGENT_RESPONSES_REASONING_SUMMARY,
-    SUBAGENT_RESPONSES_RETRY_BASE_SECONDS,
     TOOLS,
-    subagent_compaction_generation_budget,
-    subagent_context_input_budget,
+    model_compaction_generation_budget,
+    model_context_input_budget,
 )
 from context import (
     build_active_context,
@@ -61,7 +54,9 @@ from responses import (
     retry_transient_response,
     stream_response_payload,
     validate_chronological_input,
+    model_provider,
 )
+from model_providers import MODEL_CONFIGURATION, ModelTarget
 from session import (
     bounded_interrupted_subagents,
     prune_subagent_records,
@@ -180,22 +175,18 @@ def subagent_instructions(
     )
 
 
-def subagent_headers() -> dict[str, str]:
-    if not SUBAGENT_RESPONSES_API_KEY:
-        return {}
-    return {
-        "Authorization":
-            f"Bearer {SUBAGENT_RESPONSES_API_KEY}"
-    }
+def record_model_target(record: dict[str, Any]) -> ModelTarget:
+    return ModelTarget.from_value(record.get("model_target"))
 
 
-def subagent_model() -> str:
-    model = SUBAGENT_RESPONSES_MODEL
-    if not model:
-        raise RuntimeError(
-            "SUBAGENT_RESPONSES_MODEL is not configured"
-        )
-    return str(model)
+def target_input_budget(target: ModelTarget) -> int:
+    window = model_provider(target).settings_for(target.model).context_window
+    return model_context_input_budget(window)
+
+
+def target_generation_budget(target: ModelTarget) -> int:
+    window = model_provider(target).settings_for(target.model).context_window
+    return model_compaction_generation_budget(window)
 
 
 def _recovery_prompt_payload(
@@ -221,6 +212,7 @@ def _recovery_prompt_payload(
 
 
 def build_subagent_payload(
+    target: ModelTarget,
     work: list[dict[str, Any]],
     *,
     allow_subagents: bool,
@@ -228,7 +220,7 @@ def build_subagent_payload(
     tools: list[dict[str, Any]] | None = None,
     extra_instructions: str = "",
     max_output_tokens: int | None = None,
-    reasoning_effort: str | None = SUBAGENT_RESPONSES_REASONING_EFFORT,
+    reasoning_effort: str | None = None,
     reasoning_summary: str | None = None,
     stream: bool = False,
 ) -> dict[str, Any]:
@@ -236,8 +228,9 @@ def build_subagent_payload(
     instructions = subagent_instructions(allow_subagents)
     if extra_instructions:
         instructions += "\n\n" + extra_instructions
+    settings = model_provider(target).settings_for(target.model)
     payload: dict[str, Any] = {
-        "model": subagent_model(),
+        "model": target.model,
         "input": work,
         "instructions": instructions,
         "stream": stream,
@@ -252,6 +245,7 @@ def build_subagent_payload(
         payload["parallel_tool_calls"] = False
     if max_output_tokens is not None:
         payload["max_output_tokens"] = max_output_tokens
+    reasoning_effort = reasoning_effort or settings.reasoning_effort
     if reasoning_effort is not None or reasoning_summary is not None:
         payload["reasoning"] = {}
         if reasoning_effort is not None:
@@ -262,6 +256,7 @@ def build_subagent_payload(
 
 
 def estimate_subagent_request_tokens(
+    target: ModelTarget,
     work: list[dict[str, Any]],
     *,
     allow_subagents: bool,
@@ -269,10 +264,11 @@ def estimate_subagent_request_tokens(
     tools: list[dict[str, Any]] | None = None,
     extra_instructions: str = "",
     max_output_tokens: int | None = None,
-    reasoning_effort: str | None = SUBAGENT_RESPONSES_REASONING_EFFORT,
+    reasoning_effort: str | None = None,
 ) -> int:
     return estimate_tokens(
         build_subagent_payload(
+            target,
             work,
             allow_subagents=allow_subagents,
             depth=depth,
@@ -285,6 +281,7 @@ def estimate_subagent_request_tokens(
 
 
 async def _create_subagent_response_once(
+    target: ModelTarget,
     work: list[dict[str, Any]],
     *,
     agent_id: str,
@@ -293,13 +290,16 @@ async def _create_subagent_response_once(
     tools: list[dict[str, Any]] | None = None,
     extra_instructions: str = "",
     max_output_tokens: int | None = None,
-    reasoning_effort: str | None = SUBAGENT_RESPONSES_REASONING_EFFORT,
+    reasoning_effort: str | None = None,
     reasoning_summary: str | None = None,
     on_text: Callable[[str], Awaitable[None]] | None = None,
     on_reasoning_summary: Callable[[str], Awaitable[None]] | None = None,
 ) -> dict[str, Any]:
     streaming = on_text is not None or on_reasoning_summary is not None
+    provider = model_provider(target)
+    settings = provider.settings_for(target.model)
     payload = build_subagent_payload(
+        target,
         work,
         allow_subagents=allow_subagents,
         depth=depth,
@@ -307,13 +307,17 @@ async def _create_subagent_response_once(
         extra_instructions=extra_instructions,
         max_output_tokens=max_output_tokens,
         reasoning_effort=reasoning_effort,
-        reasoning_summary=reasoning_summary if streaming else None,
+        reasoning_summary=(
+            reasoning_summary or settings.reasoning_summary
+            if streaming
+            else None
+        ),
         stream=streaming,
     )
     if streaming:
         return await stream_response_payload(
-            url=f"{SUBAGENT_RESPONSES_BASE_URL}/responses",
-            headers=subagent_headers(),
+            url=f"{provider.base_url}/responses",
+            headers=provider.headers(),
             payload=payload,
             on_text=on_text,
             on_reasoning_summary=on_reasoning_summary,
@@ -321,8 +325,8 @@ async def _create_subagent_response_once(
             log_data={"agent_id": agent_id},
         )
     response = await session.responses.post(
-        f"{SUBAGENT_RESPONSES_BASE_URL}/responses",
-        headers=subagent_headers(),
+        f"{provider.base_url}/responses",
+        headers=provider.headers(),
         json=payload,
         timeout=None,
     )
@@ -344,6 +348,7 @@ async def _create_subagent_response_once(
 
 
 async def create_subagent_response(
+    target: ModelTarget,
     work: list[dict[str, Any]],
     *,
     agent_id: str,
@@ -352,7 +357,7 @@ async def create_subagent_response(
     tools: list[dict[str, Any]] | None = None,
     extra_instructions: str = "",
     max_output_tokens: int | None = None,
-    reasoning_effort: str | None = SUBAGENT_RESPONSES_REASONING_EFFORT,
+    reasoning_effort: str | None = None,
     reasoning_summary: str | None = None,
     on_text: Callable[[str], Awaitable[None]] | None = None,
     on_reasoning_summary: Callable[[str], Awaitable[None]] | None = None,
@@ -362,6 +367,7 @@ async def create_subagent_response(
     async def request() -> dict[str, Any]:
         try:
             return await _create_subagent_response_once(
+                target,
                 work,
                 agent_id=agent_id,
                 allow_subagents=allow_subagents,
@@ -381,12 +387,13 @@ async def create_subagent_response(
             )
             raise
 
+    provider = model_provider(target)
     return await retry_transient_response(
         request,
         operation="Subagent Responses request",
         log_data={"agent_id": agent_id},
-        max_retries=SUBAGENT_RESPONSES_MAX_RETRIES,
-        retry_base_seconds=SUBAGENT_RESPONSES_RETRY_BASE_SECONDS,
+        max_retries=provider.request_max_retries,
+        retry_base_seconds=provider.retry_base_seconds,
     )
 
 
@@ -399,27 +406,32 @@ async def compact_subagent_session(
 ) -> bool:
     session_id = str(record["session_id"])
     agent_id = str(record["id"])
+    target = record_model_target(record)
+    generation_budget = target_generation_budget(target)
+    input_budget = target_input_budget(target)
 
     def estimate(items, instructions):
         return estimate_subagent_request_tokens(
+            target,
             items,
             allow_subagents=allow_subagents,
             depth=depth,
             tools=[],
             extra_instructions=instructions,
-            max_output_tokens=subagent_compaction_generation_budget(),
+            max_output_tokens=generation_budget,
             reasoning_effort=COMPACTION_REASONING_EFFORT,
         )
 
     async def create(items, instructions):
         return await create_subagent_response(
+            target,
             items,
             agent_id=agent_id,
             allow_subagents=allow_subagents,
             depth=depth,
             tools=[],
             extra_instructions=instructions,
-            max_output_tokens=subagent_compaction_generation_budget(),
+            max_output_tokens=generation_budget,
             reasoning_effort=COMPACTION_REASONING_EFFORT,
         )
 
@@ -429,8 +441,8 @@ async def compact_subagent_session(
         create_compaction_response=create,
         force=reason == "overflow",
         reason=reason,
-        input_budget=subagent_context_input_budget(),
-        generation_budget=subagent_compaction_generation_budget(),
+        input_budget=input_budget,
+        generation_budget=generation_budget,
     )
 
 
@@ -443,6 +455,9 @@ async def run_subagent(
 ) -> str:
     from approval import execute_tool_with_approval
     record = session.subagent_records[agent_id]
+    target = record_model_target(record)
+    input_budget = target_input_budget(target)
+    generation_budget = target_generation_budget(target)
     session_id = str(record["session_id"])
     work = build_active_context(session_id)
     if not work:
@@ -480,7 +495,7 @@ async def run_subagent(
     async def create_response(
         active_work: list[dict[str, Any]],
     ) -> dict[str, Any]:
-        budget = subagent_context_input_budget()
+        budget = input_budget
         estimate: int | None = None
         recovery_inst = (
             (
@@ -504,6 +519,7 @@ async def run_subagent(
             )
         if budget:
             estimate = estimate_subagent_request_tokens(
+                target,
                 active_work,
                 allow_subagents=allow_subagents,
                 depth=depth,
@@ -514,6 +530,7 @@ async def run_subagent(
                     session_id,
                     estimate_active_fn=lambda items: (
                         estimate_subagent_request_tokens(
+                            target,
                             items,
                             allow_subagents=allow_subagents,
                             depth=depth,
@@ -522,34 +539,37 @@ async def run_subagent(
                     ),
                     estimate_compaction_request=lambda items, instructions: (
                         estimate_subagent_request_tokens(
+                            target,
                             items,
                             allow_subagents=allow_subagents,
                             depth=depth,
                             tools=[],
                             extra_instructions=instructions,
-                            max_output_tokens=subagent_compaction_generation_budget(),
+                            max_output_tokens=generation_budget,
                             reasoning_effort=COMPACTION_REASONING_EFFORT,
                         )
                     ),
                     create_compaction_response=lambda items, instructions: (
                         create_subagent_response(
+                            target,
                             items,
                             agent_id=agent_id,
                             allow_subagents=allow_subagents,
                             depth=depth,
                             tools=[],
                             extra_instructions=instructions,
-                            max_output_tokens=subagent_compaction_generation_budget(),
+                            max_output_tokens=generation_budget,
                             reasoning_effort=COMPACTION_REASONING_EFFORT,
                         )
                     ),
                     reason="threshold",
                     log_source="subagent",
                     input_budget=budget,
-                    generation_budget=subagent_compaction_generation_budget(),
+                    generation_budget=generation_budget,
                 )
                 active_work[:] = fitted
                 estimate = estimate_subagent_request_tokens(
+                    target,
                     active_work,
                     allow_subagents=allow_subagents,
                     depth=depth,
@@ -559,6 +579,7 @@ async def run_subagent(
         async def _request(items):
             if not record.get("activity_surface_id"):
                 return await create_subagent_response(
+                    target,
                     items,
                     agent_id=agent_id,
                     allow_subagents=allow_subagents,
@@ -582,12 +603,12 @@ async def run_subagent(
                 )
 
             return await create_subagent_response(
+                target,
                 items,
                 agent_id=agent_id,
                 allow_subagents=allow_subagents,
                 depth=depth,
                 extra_instructions=recovery_inst,
-                reasoning_summary=SUBAGENT_RESPONSES_REASONING_SUMMARY,
                 on_text=publish_text,
                 on_reasoning_summary=publish_reasoning,
             )
@@ -597,6 +618,7 @@ async def run_subagent(
                 session_id,
                 estimate_active_fn=lambda work: (
                     estimate_subagent_request_tokens(
+                        target,
                         work,
                         allow_subagents=allow_subagents,
                         depth=depth,
@@ -605,24 +627,26 @@ async def run_subagent(
                 ),
                 estimate_compaction_request=lambda work, instructions: (
                     estimate_subagent_request_tokens(
+                        target,
                         work,
                         allow_subagents=allow_subagents,
                         depth=depth,
                         tools=[],
                         extra_instructions=instructions,
-                        max_output_tokens=subagent_compaction_generation_budget(),
+                        max_output_tokens=generation_budget,
                         reasoning_effort=COMPACTION_REASONING_EFFORT,
                     )
                 ),
                 create_compaction_response=lambda work, instructions: (
                     create_subagent_response(
+                        target,
                         work,
                         agent_id=agent_id,
                         allow_subagents=allow_subagents,
                         depth=depth,
                         tools=[],
                         extra_instructions=instructions,
-                        max_output_tokens=subagent_compaction_generation_budget(),
+                        max_output_tokens=generation_budget,
                         reasoning_effort=COMPACTION_REASONING_EFFORT,
                     )
                 ),
@@ -630,8 +654,8 @@ async def run_subagent(
                 force=True,
                 include_continuation=True,
                 log_source="subagent",
-                input_budget=subagent_context_input_budget(),
-                generation_budget=subagent_compaction_generation_budget(),
+                input_budget=input_budget,
+                generation_budget=generation_budget,
             )
             return rebuilt
 
@@ -659,6 +683,7 @@ async def run_subagent(
         # Keep chat_history scoped to this subagent transcript.
         tool_context = dict(record)
         tool_context["session_id"] = session_id
+        tool_context["model_target"] = target.to_dict()
         tool_context["todo_state"] = record
         return await execute_tool_with_approval(
             chat_id,
@@ -673,10 +698,11 @@ async def run_subagent(
     ) -> list[dict[str, Any]] | None:
         reason = "overflow" if force else "threshold"
         if not force:
-            budget = subagent_context_input_budget()
+            budget = input_budget
             if not budget:
                 return None
             est = estimate_subagent_request_tokens(
+                target,
                 active_work,
                 allow_subagents=allow_subagents,
                 depth=depth,
@@ -761,6 +787,7 @@ async def run_subagent(
 def new_record(
     task: str,
     *,
+    target: ModelTarget,
     chat_id: ConversationId,
     depth: int,
     background: bool,
@@ -778,6 +805,7 @@ def new_record(
             if parent_session_id
             else None
         ),
+        model_target=target.to_dict(),
     )
     append_item(
         session_id,
@@ -790,6 +818,7 @@ def new_record(
         "session_id": session_id,
         "parent_session_id": parent_session_id,
         "root_session_id": root_session_id,
+        "model_target": target.to_dict(),
         "task": task,
         "last_task": task,
         "task_count": 1,
@@ -831,6 +860,7 @@ def lifecycle_record(
             ),
         "depth":
             record.get("depth"),
+        "model_target": record.get("model_target"),
         "started_at":
             record.get(
                 "started_at"
@@ -885,6 +915,7 @@ def subagent_summaries() -> list[
                 "task": record.get("task"),
                 "last_task": record.get("last_task"),
                 "depth": record.get("depth"),
+                "model_target": record.get("model_target"),
                 "background": record.get("background"),
                 "session_id": record.get("session_id"),
                 "parent_session_id": record.get(
@@ -907,6 +938,7 @@ def subagent_status(record: dict[str, Any]) -> dict[str, Any]:
         "task_count": record.get("task_count", 1),
         "depth": record.get("depth"),
         "background": record.get("background"),
+        "model_target": record.get("model_target"),
         "started_at": record.get("started_at"),
         "completed_at": record.get("completed_at"),
         "result": record.get("result"),
@@ -1152,7 +1184,14 @@ async def subagent_tool(
             "",
         )
     ).strip()
+    requested_provider = str(args.get("model_provider") or "").strip()
+    requested_model = str(args.get("model") or "").strip()
     delete_requested = bool(args.get("delete", False))
+    if not task and (requested_provider or requested_model):
+        return {
+            "ok": False,
+            "error": "model_provider and model are only valid when starting a subagent",
+        }
     if delete_requested:
         if task:
             return {
@@ -1195,6 +1234,14 @@ async def subagent_tool(
             "subagents":
                 subagent_summaries(),
         }
+    if requested_id and (requested_provider or requested_model):
+        return {
+            "ok": False,
+            "error": (
+                "A continued subagent keeps its original model target; "
+                "start a new subagent to use another provider or model"
+            ),
+        }
     if len(task) > MAX_TOOL_OUTPUT:
         return {
             "ok": False,
@@ -1229,6 +1276,24 @@ async def subagent_tool(
         or immediate_parent_session_id
         or ""
     ) or None
+    selected_target: ModelTarget | None = None
+    if not requested_id:
+        raw_parent_target = execution_context.get("model_target")
+        try:
+            parent_target = (
+                ModelTarget.from_value(raw_parent_target)
+                if raw_parent_target is not None
+                else session.current_model_target()
+            )
+            selected_target = MODEL_CONFIGURATION.select_target(
+                parent=parent_target,
+                provider_id=requested_provider or None,
+                model=requested_model or None,
+            )
+            # Resolve credentials before admitting durable work.
+            model_provider(selected_target).api_key()
+        except (RuntimeError, ValueError) as exc:
+            return {"ok": False, "error": str(exc)}
     if (
         parent_depth > 0
         and not execution_context.get(
@@ -1280,6 +1345,12 @@ async def subagent_tool(
                     f"subagent {requested_id} not found"
                 ),
             }
+        try:
+            # Continuations are bound to the child's durable, immutable target.
+            # The caller's current target is irrelevant after child creation.
+            model_provider(record_model_target(record)).api_key()
+        except (RuntimeError, ValueError) as exc:
+            return {"ok": False, "error": str(exc)}
         owner_task = session.subagent_tasks.get(requested_id)
         if owner_task is not None and not owner_task.done():
             if record.get("status") != "running":
@@ -1364,6 +1435,8 @@ async def subagent_tool(
             ),
         )
     else:
+        if selected_target is None:
+            return {"ok": False, "error": "model target was not selected"}
         open_surfaces = sum(
             bool(item.get("activity_surface_id"))
             for item in session.subagent_records.values()
@@ -1389,6 +1462,7 @@ async def subagent_tool(
         )
         record = new_record(
             task,
+            target=selected_target,
             chat_id=chat_id,
             depth=depth,
             background=background,

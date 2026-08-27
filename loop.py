@@ -31,6 +31,7 @@ COMMANDS: tuple[tuple[str, str], ...] = (
     ("stop", "Abort current run"),
     ("compact", "Compact context"),
     ("model", "List/switch model"),
+    ("models", "List models from provider"),
     ("approval", "Toggle tool approval"),
     ("todos", "Show todo list"),
     ("goal", "Show or set persistent goal"),

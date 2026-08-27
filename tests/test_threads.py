@@ -25,6 +25,7 @@ from chat_provider import IncomingAction, IncomingMessage
 from context import build_active_context
 from goals import ensure_goal_pin, goal_instructions, replace_goal, sync_goal_pin
 import session
+from model_providers import ModelTarget
 from tests.test_chat_provider import FakeProvider
 from threads import (
     finish_thread,
@@ -38,6 +39,8 @@ from turn_runtime import TurnKind, turns
 
 class ThreadTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
+        self.target = ModelTarget("local", "model-a")
+        session.set_default_model_target(self.target)
         self._chat_dir = Path(tempfile.mkdtemp(prefix="chats-"))
         self._chat_patch = patch.object(
             chat_store,
@@ -62,9 +65,10 @@ class ThreadTests(unittest.IsolatedAsyncioTestCase):
         self.parent = chat_store.create_session(
             kind="main",
             chat_key=session.current_runtime().key,
+            model_target=self.target.to_dict(),
         )
         session.state["current_session_id"] = self.parent
-        session.state["model"] = "model-a"
+        session.state["model_target"] = self.target.to_dict()
         turns.finish()
         session.subagent_tasks.clear()
         session.pending_approvals.clear()
@@ -228,7 +232,7 @@ class ThreadTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_real_agent_turn_writes_only_to_branch(self) -> None:
-        async def fake_stream(_chat_id, _items, **_kwargs):
+        async def fake_stream(_target, _chat_id, _items, **_kwargs):
             return {
                 "output": [{
                     "type": "message",

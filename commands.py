@@ -20,15 +20,10 @@ from config import (
     AGENT_WORKDIR,
     CONTEXT_COMPACT_RATIO,
     CONTEXT_SAFETY_TOKENS,
-    MODEL_CONTEXT_TOKENS,
     RAPTOR_PROXY,
-    SUBAGENT_MODEL_CONTEXT_TOKENS,
-    RESPONSES_REASONING_EFFORT,
-    SUBAGENT_RESPONSES_REASONING_EFFORT,
     CHAT_STREAMING,
     MAX_TOOL_ROUNDS,
-    context_input_budget,
-    subagent_context_input_budget,
+    model_context_input_budget,
 )
 from session import pending_approvals, save_state, state
 import session
@@ -75,7 +70,13 @@ from engine import (
     response_text,
 )
 from approval import execute_tool_with_approval
-from responses import MODEL_LIST_TIMEOUT_SECONDS, list_models, stateless_response
+from model_providers import MODEL_CONFIGURATION, ModelSettings, ModelTarget
+from responses import (
+    MODEL_LIST_TIMEOUT_SECONDS,
+    list_models,
+    model_provider,
+    stateless_response,
+)
 from subagents import cancel_background_subagents, pending_subagent_completions
 from shell_sessions import (
     cancel_shell_sessions,
@@ -106,10 +107,11 @@ async def _run_stateless_ask(
     try:
         with bound_delivery_context(chat_id, delivery_context):
             try:
+                target = session.current_model_target()
                 work: list[dict] = [{"role": "user", "content": prompt}]
                 tool_rounds = 0
                 while True:
-                    response = await stateless_response(work)
+                    response = await stateless_response(target, work)
                     output = response_output(response)
                     calls = response_calls(response)
                     if not calls:
@@ -126,6 +128,7 @@ async def _run_stateless_ask(
                         execution_context["session_id"] = state.get(
                             "current_session_id"
                         )
+                        execution_context["model_target"] = target.to_dict()
                         execution_context["todo_state"] = state
                         result = await execute_tool_with_approval(
                             chat_id,
@@ -288,8 +291,9 @@ async def command(
                 "/thread - fork into a temporary conversation\n"
                 "/thread <message> - fork or continue, then send\n"
                 "/thread status|clear|merge\n"
-                "/model - list models\n"
-                "/model <id> - switch model\n"
+                "/models [provider] - list provider models\n"
+                "/model - show current target and providers\n"
+                "/model <provider> <model> - switch target\n"
                 "/approval - show approval mode\n"
                 "/approval on - require approval for side effects\n"
                 "/approval off - allow tools immediately\n"
@@ -447,10 +451,13 @@ async def command(
         return True
 
     if cmd == "/status":
+        target = session.current_model_target()
         try:
+            target_provider = model_provider(target)
+            target_settings = target_provider.settings_for(target.model)
             models = (
                 await asyncio.wait_for(
-                    list_models(max_retries=0),
+                    list_models(target.provider_id, max_retries=0),
                     timeout=MODEL_LIST_TIMEOUT_SECONDS,
                 )
             )
@@ -459,26 +466,19 @@ async def command(
 
         except Exception as exc:
             log_exception("responses", "model_list_error", exc)
+            target_settings = ModelSettings()
             models = []
             responses_status = (
-                "down/unreachable"
+                "unconfigured"
+                if target.provider_id not in MODEL_CONFIGURATION.providers
+                else "down/unreachable"
             )
 
         running = turns.is_running()
         task_age = turns.elapsed_seconds()
 
-        budget = context_input_budget()
-        subagent_budget = subagent_context_input_budget()
-        subagent_limit_line = (
-            f"subagent context limit: "
-            f"{SUBAGENT_MODEL_CONTEXT_TOKENS:,} tokens\n"
-            f"subagent compact threshold: {subagent_budget:,} tokens"
-            if SUBAGENT_MODEL_CONTEXT_TOKENS
-            else (
-                "subagent context limit: unknown\n"
-                "subagent auto-compact: disabled"
-            )
-        )
+        context_window = target_settings.context_window
+        budget = model_context_input_budget(context_window)
         session_id = state.get("current_session_id") or "(none)"
         stats = (
             session_context_stats(str(session_id))
@@ -491,21 +491,19 @@ async def command(
                 "active_native_events": 0,
             }
         )
-        if MODEL_CONTEXT_TOKENS:
+        if context_window:
             context_limit_line = (
                 f"context estimate: ~{context_tokens():,} tokens\n"
-                f"main context limit: {MODEL_CONTEXT_TOKENS:,} tokens\n"
-                f"main compact threshold: {budget:,} tokens "
+                f"context limit: {context_window:,} tokens\n"
+                f"compact threshold: {budget:,} tokens "
                 f"({int(CONTEXT_COMPACT_RATIO * 100)}%)\n"
-                f"{subagent_limit_line}\n"
-                f"shared safety reserve: {CONTEXT_SAFETY_TOKENS:,} tokens"
+                f"safety reserve: {CONTEXT_SAFETY_TOKENS:,} tokens"
             )
         else:
             context_limit_line = (
                 f"context estimate: ~{context_tokens():,} tokens\n"
-                f"main context limit: unknown\n"
-                f"main auto-compact: disabled\n"
-                f"{subagent_limit_line}"
+                f"context limit: unknown\n"
+                f"auto-compact: disabled"
             )
         checkpoint_line = (
             f"checkpoint: yes\n"
@@ -513,20 +511,17 @@ async def command(
             if stats["checkpoint"]
             else "checkpoint: no"
         )
-        reasoning_effort = RESPONSES_REASONING_EFFORT or "(model default)"
-        subagent_reasoning_effort = (
-            SUBAGENT_RESPONSES_REASONING_EFFORT or "(model default)"
-        )
+        reasoning_effort = target_settings.reasoning_effort or "(model default)"
         interrupted_subagents = len(state.get("interrupted_subagents", []))
         await send(
             chat_id,
             (
-                f"provider: {get_chat_provider().name}\n"
+                f"chat provider: {get_chat_provider().name}\n"
+                f"model provider: {target.provider_id}\n"
                 f"Responses: {responses_status}\n"
                 f"proxy: {'enabled' if RAPTOR_PROXY else 'disabled'}\n"
-                f"model: {state.get('model') or '(auto)'}\n"
+                f"model: {target.model}\n"
                 f"reasoning effort: {reasoning_effort}\n"
-                f"subagent reasoning effort: {subagent_reasoning_effort}\n"
                 f"served models: {len(models)}\n"
                 f"pid: {os.getpid()}\n"
                 f"process: {'daemon' if session.DAEMON_MODE else 'foreground'}\n"
@@ -734,6 +729,14 @@ async def command(
         if arg == current_id:
             await send(chat_id, f"Already using chat: {arg}")
             return True
+        try:
+            resumed_target = ModelTarget.from_value(target.get("model_target"))
+            MODEL_CONFIGURATION.validate_target(resumed_target)
+            # Preflight before archiving the currently usable session.
+            model_provider(resumed_target).api_key()
+        except (RuntimeError, ValueError) as exc:
+            await send(chat_id, f"Cannot resume chat: {exc}")
+            return True
         if current_id and session_exists(current_id):
             end_session(
                 current_id,
@@ -741,6 +744,7 @@ async def command(
                 todos=list(state.get("todos") or []),
             )
         state["current_session_id"] = arg
+        session.set_current_model_target(resumed_target)
         state["todos"] = _archived_todos(arg)
         state["pending_inputs"] = []
         state["active_root_turn"] = None
@@ -774,6 +778,7 @@ async def command(
         new_session_id = create_session(
             kind="main",
             chat_key=session.current_runtime().key,
+            model_target=session.current_model_target().to_dict(),
         )
         state["current_session_id"] = new_session_id
         state["todos"] = []
@@ -845,77 +850,98 @@ async def command(
 
         return True
 
+    if cmd == "/models":
+        provider_id = arg.strip() or session.current_model_target().provider_id
+        try:
+            provider = MODEL_CONFIGURATION.provider(provider_id)
+            models = await list_models(provider_id)
+        except Exception as exc:
+            await send(
+                chat_id,
+                f"Models error for {provider_id}: {type(exc).__name__}: {exc}",
+            )
+            return True
+        current = session.current_model_target()
+        lines = [
+            f"{'*' if provider_id == current.provider_id and item == current.model else ' '} {item}"
+            for item in models
+        ]
+        header = f"Models from {provider.id}:"
+        await send(chat_id, header + ("\n" + "\n".join(lines) if lines else " none"))
+        return True
+
     if cmd == "/model":
-        if turns.is_running():
-            await send(
-                chat_id,
-                "Busy. Use /stop first.",
-            )
-
-            return True
-
-        models = (
-            await list_models()
-        )
-
         if not arg:
-            current = state.get(
-                "model"
-            )
-
-            lines = [
-                (
-                    f"{'*' if model == current else ' '} "
-                    f"{model}"
+            current = session.current_model_target()
+            providers = "\n".join(
+                f"  {provider_id} (default: {provider.default_model or 'none'})"
+                for provider_id, provider in sorted(
+                    MODEL_CONFIGURATION.providers.items()
                 )
-                for model in models
-            ]
-
+            )
             await send(
                 chat_id,
                 (
-                    "Models:\n"
-                    + "\n".join(
-                        lines
-                    )
+                    f"Model target: {current.provider_id} / {current.model}\n"
+                    f"Providers:\n{providers}\n"
+                    "Usage: /model <provider> <model>\n"
+                    "Use /models [provider] to list served models."
                 ),
             )
-
             return True
-
-        if arg not in models:
+        if thread_active():
+            await send(chat_id, "Clear or merge the active thread first.")
+            return True
+        if session_transition_busy():
             await send(
                 chat_id,
-                (
-                    "Unknown model. "
-                    "Use /model to list "
-                    "served models."
-                ),
+                "Busy. Use /stop all first.",
             )
-
             return True
-
-        state[
-            "model"
-        ] = arg
-
+        parts = arg.split(maxsplit=1)
+        if len(parts) != 2:
+            await send(
+                chat_id,
+                "Usage: /model <provider> <model>",
+            )
+            return True
+        provider_id, model = parts
+        try:
+            selected = MODEL_CONFIGURATION.select_target(
+                parent=session.current_model_target(),
+                provider_id=provider_id,
+                model=model,
+            )
+            model_provider(selected).api_key()
+        except (RuntimeError, ValueError) as exc:
+            await send(chat_id, f"Model target error: {exc}")
+            return True
+        old_session_id = str(state.get("current_session_id") or "")
+        if old_session_id and session_exists(old_session_id):
+            end_session(
+                old_session_id,
+                reason="model_target_changed",
+                todos=list(state.get("todos") or []),
+            )
+        new_session_id = create_session(
+            kind="main",
+            chat_key=session.current_runtime().key,
+            model_target=selected.to_dict(),
+        )
+        session.set_current_model_target(selected)
+        state["current_session_id"] = new_session_id
+        state["todos"] = []
+        state["pending_inputs"] = []
+        state["active_root_turn"] = None
+        state["interrupted_subagents"] = []
         save_state()
-        sid = state.get("current_session_id")
-        if sid:
-            append_meta(
-                str(sid),
-                "model_changed",
-                {"model": arg},
-            )
-
         await send(
             chat_id,
             (
-                f"Model: {arg}\n"
-                "Session kept."
+                f"Model target: {selected.provider_id} / {selected.model}\n"
+                "Started a fresh session; the previous transcript was archived."
             ),
         )
-
         return True
 
     return False

@@ -28,24 +28,23 @@ from responses_provider import ResponsesApiProvider, input_text
 from responses import build_response_payload, reasoning_summary_delta
 from responses import responses_create_stream
 from subagents import build_subagent_payload
-from config import (
-    RESPONSES_REASONING_EFFORT,
-    SUBAGENT_RESPONSES_REASONING_EFFORT,
-)
+from model_providers import ModelTarget
 import session
 from turn_runtime import TurnKind, turns
 
 
 class ResponsesInputTests(unittest.TestCase):
-    def test_reasoning_effort_defaults_are_wired_per_client(self) -> None:
-        self.assertEqual(
-            responses_create_stream.__kwdefaults__["reasoning_effort"],
-            RESPONSES_REASONING_EFFORT,
+    def test_reasoning_effort_defaults_are_provider_driven(self) -> None:
+        self.assertIsNone(
+            responses_create_stream.__kwdefaults__["reasoning_effort"]
         )
-        self.assertEqual(
-            build_subagent_payload.__kwdefaults__["reasoning_effort"],
-            SUBAGENT_RESPONSES_REASONING_EFFORT,
+        payload = build_subagent_payload(
+            ModelTarget("local", "test-model"),
+            [{"role": "user", "content": "hello"}],
+            allow_subagents=False,
+            depth=1,
         )
+        self.assertNotIn("reasoning", payload)
 
     def test_requests_summary_without_exposing_raw_reasoning(self) -> None:
         payload = build_response_payload(

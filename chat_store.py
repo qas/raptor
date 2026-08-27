@@ -222,25 +222,32 @@ def create_session(
     chat_key: str,
     agent_id: str | None = None,
     parent_session_id: str | None = None,
+    model_target: dict[str, str],
 ) -> str:
     owner = str(chat_key).strip()
     if not owner:
         raise ValueError("chat_key must not be empty")
+    provider_id = str(model_target.get("provider_id") or "").strip()
+    model = str(model_target.get("model") or "").strip()
+    if not provider_id or not model:
+        raise ValueError("model_target requires provider_id and model")
     ensure_chat_dirs()
     session_id = new_session_id()
     parent = None
     if parent_session_id:
         parent = validate_session_id(parent_session_id)
     _SEQ_CACHE[session_id] = 0
+    event: dict[str, Any] = {
+        "type": "session_start",
+        "kind": kind,
+        "chat_key": owner,
+        "agent_id": agent_id,
+        "parent_session_id": parent,
+    }
+    event["model_target"] = {"provider_id": provider_id, "model": model}
     append_event(
         session_id,
-        {
-            "type": "session_start",
-            "kind": kind,
-            "chat_key": owner,
-            "agent_id": agent_id,
-            "parent_session_id": parent,
-        },
+        event,
     )
     return session_id
 
@@ -464,6 +471,7 @@ def _session_summary(path: Path) -> dict[str, Any] | None:
         "chat_key": start.get("chat_key"),
         "parent_session_id": start.get("parent_session_id"),
         "agent_id": start.get("agent_id"),
+        "model_target": start.get("model_target"),
         "started_at": start.get("ts"),
         "last_seq": last.get("seq"),
     }

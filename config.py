@@ -169,8 +169,8 @@ if not CHAT_PROVIDERS:
 if len(set(CHAT_PROVIDERS)) != len(CHAT_PROVIDERS):
     raise ValueError("CHAT_PROVIDERS entries must be unique")
 
-# Inbound, OpenAI Responses-compatible chat provider.  This is deliberately
-# separate from RESPONSES_BASE_URL, which is the model backend the agent calls.
+# Inbound, OpenAI Responses-compatible chat provider. This is independent from
+# outbound model providers configured in ``.raptor/config.toml``.
 RESPONSES_SERVER_HOST = os.getenv(
     "RESPONSES_SERVER_HOST",
     "127.0.0.1",
@@ -228,70 +228,6 @@ TG_MAX_RETRIES = _env_int(
     "TG_MAX_RETRIES",
     3,
     minimum=0,
-)
-
-RESPONSES_BASE_URL = os.getenv(
-    "RESPONSES_BASE_URL",
-    "http://127.0.0.1:8000/v1",
-).rstrip("/")
-
-RESPONSES_API_KEY = os.getenv("RESPONSES_API_KEY", "")
-RESPONSES_MODEL = os.getenv("RESPONSES_MODEL", "")
-RESPONSES_REASONING_EFFORT = (
-    os.getenv("RESPONSES_REASONING_EFFORT", "").strip() or None
-)
-RESPONSES_REASONING_SUMMARY = (
-    os.getenv("RESPONSES_REASONING_SUMMARY", "auto").strip() or None
-)
-RESPONSES_MAX_RETRIES = _env_int(
-    "RESPONSES_MAX_RETRIES",
-    3,
-    minimum=0,
-)
-RESPONSES_RETRY_BASE_SECONDS = _env_float(
-    "RESPONSES_RETRY_BASE_SECONDS",
-    0.5,
-    minimum=0.0,
-)
-
-SUBAGENT_RESPONSES_BASE_URL = os.getenv(
-    "SUBAGENT_RESPONSES_BASE_URL",
-    "http://127.0.0.1:8000/v1",
-).rstrip("/")
-
-SUBAGENT_RESPONSES_API_KEY = os.getenv(
-    "SUBAGENT_RESPONSES_API_KEY",
-    "",
-)
-
-SUBAGENT_RESPONSES_MODEL = os.getenv(
-    "SUBAGENT_RESPONSES_MODEL",
-    "",
-)
-
-SUBAGENT_RESPONSES_REASONING_EFFORT = (
-    os.getenv(
-        "SUBAGENT_RESPONSES_REASONING_EFFORT",
-        "",
-    ).strip()
-    or None
-)
-SUBAGENT_RESPONSES_REASONING_SUMMARY = (
-    os.getenv(
-        "SUBAGENT_RESPONSES_REASONING_SUMMARY",
-        "auto",
-    ).strip()
-    or None
-)
-SUBAGENT_RESPONSES_MAX_RETRIES = _env_int(
-    "SUBAGENT_RESPONSES_MAX_RETRIES",
-    3,
-    minimum=0,
-)
-SUBAGENT_RESPONSES_RETRY_BASE_SECONDS = _env_float(
-    "SUBAGENT_RESPONSES_RETRY_BASE_SECONDS",
-    0.5,
-    minimum=0.0,
 )
 
 MAX_SUBAGENT_DEPTH = _env_int(
@@ -374,18 +310,6 @@ COMPACTION_REASONING_EFFORT = (
     os.getenv("COMPACTION_REASONING_EFFORT", "low").strip() or None
 )
 
-MODEL_CONTEXT_TOKENS = _env_int(
-    "MODEL_CONTEXT_TOKENS",
-    0,
-    minimum=0,
-)
-
-SUBAGENT_MODEL_CONTEXT_TOKENS = _env_int(
-    "SUBAGENT_MODEL_CONTEXT_TOKENS",
-    0,
-    minimum=0,
-)
-
 COMPACT_KEEP_RECENT_TOKENS = _env_int(
     "COMPACT_KEEP_RECENT_TOKENS",
     20_000,
@@ -443,12 +367,8 @@ def _context_input_budget(model_context_tokens: int) -> int:
     )
 
 
-def context_input_budget() -> int:
-    return _context_input_budget(MODEL_CONTEXT_TOKENS)
-
-
-def subagent_context_input_budget() -> int:
-    return _context_input_budget(SUBAGENT_MODEL_CONTEXT_TOKENS)
+def model_context_input_budget(model_context_tokens: int | None) -> int:
+    return _context_input_budget(model_context_tokens or 0)
 
 
 def _compaction_generation_budget(model_context_tokens: int) -> int:
@@ -461,12 +381,10 @@ def _compaction_generation_budget(model_context_tokens: int) -> int:
     )
 
 
-def compaction_generation_budget() -> int:
-    return _compaction_generation_budget(MODEL_CONTEXT_TOKENS)
-
-
-def subagent_compaction_generation_budget() -> int:
-    return _compaction_generation_budget(SUBAGENT_MODEL_CONTEXT_TOKENS)
+def model_compaction_generation_budget(
+    model_context_tokens: int | None,
+) -> int:
+    return _compaction_generation_budget(model_context_tokens or 0)
 
 
 CHAT_STREAMING = _env_bool("CHAT_STREAMING", True)
@@ -965,7 +883,8 @@ TOOLS = [
         "name": "subagent",
         "description": (
             "List, start, or continue durable subagent threads using the "
-            "configured subagent Responses host and model. Call without "
+            "parent agent's model target or an explicitly selected configured "
+            "model provider and model. Call without "
             "arguments to list threads, agent_id alone to inspect stored "
             "public status and final result, task to start a new thread, or "
             "task plus agent_id to continue one, or agent_id plus delete to "
@@ -985,6 +904,20 @@ TOOLS = [
                     "description": (
                         "Existing subagent thread to inspect, continue, or "
                         "steer while running."
+                    ),
+                },
+                "model_provider": {
+                    "type": "string",
+                    "description": (
+                        "Configured model-provider ID for a new subagent. "
+                        "Omit to inherit the parent provider."
+                    ),
+                },
+                "model": {
+                    "type": "string",
+                    "description": (
+                        "Model ID for a new subagent. Omit to inherit the "
+                        "parent model, or use the selected provider's default."
                     ),
                 },
                 "background": {

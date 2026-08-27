@@ -20,9 +20,37 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 import responses
+from model_providers import (
+    ModelConfiguration,
+    ModelProvider,
+    ModelTarget,
+)
+
+TARGET = ModelTarget("test", "model-a")
 
 
 class ResponseRetryTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self) -> None:
+        configuration = ModelConfiguration(
+            providers={
+                "test": ModelProvider(
+                    id="test",
+                    base_url="http://backend/v1",
+                    default_model="model-a",
+                    request_max_retries=3,
+                    retry_base_seconds=0,
+                )
+            },
+            default_target=TARGET,
+        )
+        provider_patch = patch.object(
+            responses,
+            "MODEL_CONFIGURATION",
+            configuration,
+        )
+        provider_patch.start()
+        self.addCleanup(provider_patch.stop)
+
     def test_response_payload_rejects_instruction_roles_in_history(self) -> None:
         with self.assertRaisesRegex(ValueError, "instructions field"):
             responses.build_response_payload(
@@ -41,12 +69,10 @@ class ResponseRetryTests(unittest.IsolatedAsyncioTestCase):
             ]
         )
         with (
-            patch.object(responses, "RESPONSES_MAX_RETRIES", 3),
-            patch.object(responses, "RESPONSES_RETRY_BASE_SECONDS", 0),
             patch.object(responses, "_responses_create_stream_once", request),
             patch.object(responses, "log_event"),
         ):
-            result = await responses.responses_create_stream(1, [])
+            result = await responses.responses_create_stream(TARGET, 1, [])
         self.assertEqual(result, completed)
         self.assertEqual(request.await_count, 2)
 
@@ -55,25 +81,28 @@ class ResponseRetryTests(unittest.IsolatedAsyncioTestCase):
             side_effect=responses.IncompleteResponsesStreamError("early close")
         )
         with (
-            patch.object(responses, "RESPONSES_MAX_RETRIES", 1),
-            patch.object(responses, "RESPONSES_RETRY_BASE_SECONDS", 0),
             patch.object(responses, "_responses_create_stream_once", request),
             patch.object(responses, "log_event"),
+            patch.object(
+                responses,
+                "model_provider",
+                return_value=Mock(
+                    request_max_retries=1,
+                    retry_base_seconds=0,
+                ),
+            ),
         ):
             with self.assertRaises(responses.TransientResponsesError):
-                await responses.responses_create_stream(1, [])
+                await responses.responses_create_stream(TARGET, 1, [])
         self.assertEqual(request.await_count, 2)
 
     async def test_context_overflow_bypasses_transport_retries(self) -> None:
         request = AsyncMock(
             side_effect=responses.ContextLengthError("too large")
         )
-        with (
-            patch.object(responses, "RESPONSES_MAX_RETRIES", 3),
-            patch.object(responses, "_responses_create_stream_once", request),
-        ):
+        with patch.object(responses, "_responses_create_stream_once", request):
             with self.assertRaises(responses.ContextLengthError):
-                await responses.responses_create_stream(1, [])
+                await responses.responses_create_stream(TARGET, 1, [])
         self.assertEqual(request.await_count, 1)
 
     def test_retryable_http_statuses_are_classified_narrowly(self) -> None:
@@ -114,12 +143,9 @@ class ResponseRetryTests(unittest.IsolatedAsyncioTestCase):
         request = AsyncMock(
             side_effect=MalformedToolCallError("invalid generated arguments")
         )
-        with (
-            patch.object(responses, "RESPONSES_MAX_RETRIES", 3),
-            patch.object(responses, "_responses_create_stream_once", request),
-        ):
+        with patch.object(responses, "_responses_create_stream_once", request):
             with self.assertRaises(MalformedToolCallError):
-                await responses.responses_create_stream(1, [])
+                await responses.responses_create_stream(TARGET, 1, [])
         self.assertEqual(request.await_count, 1)
 
     async def test_stream_classifies_malformed_tool_call_response(self) -> None:
@@ -175,23 +201,20 @@ class ResponseRetryTests(unittest.IsolatedAsyncioTestCase):
                 client,
                 create=True,
             ),
-            patch.object(responses, "state", {"model": "model-a"}),
         ):
             with self.assertRaises(MalformedToolCallError):
-                await responses._stateless_response_once([])
+                await responses._stateless_response_once(TARGET, [])
 
     async def test_remote_disconnect_retries_three_times(self) -> None:
         request = AsyncMock(
             side_effect=httpx.RemoteProtocolError("server disconnected")
         )
         with (
-            patch.object(responses, "RESPONSES_MAX_RETRIES", 3),
-            patch.object(responses, "RESPONSES_RETRY_BASE_SECONDS", 0),
             patch.object(responses, "_responses_create_stream_once", request),
             patch.object(responses, "log_event"),
         ):
             with self.assertRaises(responses.TransientResponsesError):
-                await responses.responses_create_stream(1, [])
+                await responses.responses_create_stream(TARGET, 1, [])
         self.assertEqual(request.await_count, 4)
 
     async def test_retry_after_delays_retry_without_extending_attempts(
@@ -231,11 +254,10 @@ class ResponseRetryTests(unittest.IsolatedAsyncioTestCase):
 
         attempt = AsyncMock(side_effect=request)
         with (
-            patch.object(responses, "RESPONSES_MAX_RETRIES", 3),
             patch.object(responses, "_responses_create_stream_once", attempt),
         ):
             with self.assertRaises(responses.PartialResponsesStreamError):
-                await responses.responses_create_stream(1, [])
+                await responses.responses_create_stream(TARGET, 1, [])
 
         self.assertEqual(attempt.await_count, 1)
 
@@ -244,11 +266,10 @@ class ResponseRetryTests(unittest.IsolatedAsyncioTestCase):
             side_effect=[httpx.ConnectError("offline"), ["model-a"]]
         )
         with (
-            patch.object(responses, "RESPONSES_RETRY_BASE_SECONDS", 0),
             patch.object(responses, "_list_models_once", request),
             patch.object(responses, "log_event"),
         ):
-            result = await responses.list_models()
+            result = await responses.list_models("test")
         self.assertEqual(result, ["model-a"])
         self.assertEqual(request.await_count, 2)
 
@@ -259,22 +280,15 @@ class ResponseRetryTests(unittest.IsolatedAsyncioTestCase):
             patch.object(responses, "log_event"),
         ):
             with self.assertRaises(responses.TransientResponsesError):
-                await responses.list_models(max_retries=0)
+                await responses.list_models("test", max_retries=0)
         self.assertEqual(request.await_count, 1)
 
     async def test_model_listing_has_a_bounded_request_timeout(self) -> None:
         response = Mock()
         response.json.return_value = {"data": [{"id": "model-a"}]}
         client = Mock(get=AsyncMock(return_value=response))
-        with (
-            patch.object(responses.session, "responses", client, create=True),
-            patch.object(
-                responses,
-                "RESPONSES_BASE_URL",
-                "http://models.example/v1",
-            ),
-        ):
-            result = await responses._list_models_once()
+        with patch.object(responses.session, "responses", client, create=True):
+            result = await responses._list_models_once("test")
         self.assertEqual(result, ["model-a"])
         timeout = client.get.await_args.kwargs["timeout"]
         self.assertEqual(timeout.connect, 10.0)
@@ -288,11 +302,10 @@ class ResponseRetryTests(unittest.IsolatedAsyncioTestCase):
             side_effect=[httpx.ReadError("disconnected"), expected]
         )
         with (
-            patch.object(responses, "RESPONSES_RETRY_BASE_SECONDS", 0),
             patch.object(responses, "_stateless_response_once", request),
             patch.object(responses, "log_event"),
         ):
-            result = await responses.stateless_response([])
+            result = await responses.stateless_response(TARGET, [])
         self.assertEqual(result, expected)
         self.assertEqual(request.await_count, 2)
 
@@ -338,13 +351,12 @@ class ResponseRetryTests(unittest.IsolatedAsyncioTestCase):
                 FakeClient(),
                 create=True,
             ),
-            patch.object(responses, "ensure_model", AsyncMock(return_value="m")),
             patch.object(responses, "send_draft", slow_draft),
             patch.object(responses, "CHAT_STREAMING", True),
             patch.object(responses, "CHAT_STREAM_INTERVAL", 0),
         ):
             task = asyncio.create_task(
-                responses._responses_create_stream_once(1, [])
+                responses._responses_create_stream_once(TARGET, 1, [])
             )
             await asyncio.wait_for(stream_consumed.wait(), timeout=1)
             self.assertFalse(task.done())
@@ -372,13 +384,12 @@ class ResponseRetryTests(unittest.IsolatedAsyncioTestCase):
 
         with (
             patch.object(responses, "stream_response_payload", fail_stream),
-            patch.object(responses, "ensure_model", AsyncMock(return_value="m")),
             patch.object(responses, "send_draft", blocked_draft),
             patch.object(responses, "CHAT_STREAMING", True),
             patch.object(responses, "CHAT_STREAM_INTERVAL", 0),
         ):
             with self.assertRaises(httpx.ReadError):
-                await responses._responses_create_stream_once(1, [])
+                await responses._responses_create_stream_once(TARGET, 1, [])
 
         self.assertTrue(draft_cancelled.is_set())
 

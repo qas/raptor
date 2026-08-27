@@ -19,6 +19,8 @@ if str(_ROOT) not in sys.path:
 import session
 import chat_store
 
+TEST_MODEL_TARGET = {"provider_id": "local", "model": "test-model"}
+
 
 class RehydrateTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -66,7 +68,7 @@ class RehydrateTests(unittest.TestCase):
         chat_dir = Path(tempfile.mkdtemp(prefix="rehydrate-chats-"))
         with patch.object(chat_store, "CHAT_DIR", chat_dir):
             chat_store._SEQ_CACHE.clear()
-            session_id = chat_store.create_session(
+            session_id = chat_store.create_session(model_target=TEST_MODEL_TARGET,
                 kind="main",
                 chat_key=session.current_runtime().key,
             )

@@ -20,6 +20,8 @@ import chat_store
 import session
 from tools import chat_history_tool
 
+TEST_MODEL_TARGET = {"provider_id": "local", "model": "test-model"}
+
 
 class HistoryToolTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
@@ -32,11 +34,11 @@ class HistoryToolTests(unittest.IsolatedAsyncioTestCase):
         self._chat_patch.start()
         self.addCleanup(self._chat_patch.stop)
         chat_store._SEQ_CACHE.clear()
-        self.main = chat_store.create_session(
+        self.main = chat_store.create_session(model_target=TEST_MODEL_TARGET,
             kind="main",
             chat_key=session.current_runtime().key,
         )
-        self.old = chat_store.create_session(
+        self.old = chat_store.create_session(model_target=TEST_MODEL_TARGET,
             kind="main",
             chat_key=session.current_runtime().key,
         )
@@ -133,7 +135,7 @@ class HistoryToolTests(unittest.IsolatedAsyncioTestCase):
             )
 
     def test_subagent_defaults_to_own_transcript(self) -> None:
-        child = chat_store.create_session(
+        child = chat_store.create_session(model_target=TEST_MODEL_TARGET,
             kind="subagent",
             chat_key=session.current_runtime().key,
             agent_id="abcd",
@@ -156,7 +158,7 @@ class HistoryToolTests(unittest.IsolatedAsyncioTestCase):
     ) -> None:
         from tools import execute_tool
 
-        child = chat_store.create_session(
+        child = chat_store.create_session(model_target=TEST_MODEL_TARGET,
             kind="subagent",
             chat_key=session.current_runtime().key,
             agent_id="abcd",
@@ -202,7 +204,7 @@ class HistoryToolTests(unittest.IsolatedAsyncioTestCase):
     def test_list_sessions_payload_fits_max_output(self) -> None:
         import tools as tools_mod
         for _ in range(40):
-            chat_store.create_session(
+            chat_store.create_session(model_target=TEST_MODEL_TARGET,
                 kind="main",
                 chat_key=session.current_runtime().key,
             )

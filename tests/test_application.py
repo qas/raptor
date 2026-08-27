@@ -20,6 +20,7 @@ if str(_ROOT) not in sys.path:
 import application
 from chat_provider import IncomingMessage, ProviderCapabilities
 from chat_runtime import get_chat_provider, set_chat_provider
+from model_providers import ModelTarget
 
 
 class ApplicationLifecycleTests(unittest.IsolatedAsyncioTestCase):
@@ -173,7 +174,11 @@ class ApplicationLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 "outbound_http_client",
                 client_factory,
             ),
-            patch.object(application, "ensure_model", AsyncMock()),
+            patch.object(
+                application,
+                "ensure_target",
+                AsyncMock(return_value=ModelTarget("local", "test")),
+            ),
             patch.object(application, "start_skill_discovery"),
             patch.object(application, "close_skill_discovery", AsyncMock()),
             patch.object(application, "ensure_chat_dirs"),
@@ -198,7 +203,13 @@ class ApplicationLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 return_value=nullcontext(),
             ),
             patch.object(application, "rehydrate_pending_inputs", return_value=0),
-            patch.object(application, "state", {"model": "test"}),
+            patch.object(
+                application,
+                "state",
+                {"current_session_id": None, "model_target": {
+                    "provider_id": "local", "model": "test"
+                }},
+            ),
             patch.object(application, "repair_interrupted_root_turn"),
             patch.object(
                 application,
@@ -259,6 +270,11 @@ class ApplicationLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 return_value=client,
             ),
             patch.object(application, "start_skill_discovery"),
+            patch.object(
+                application,
+                "ensure_target",
+                AsyncMock(return_value=ModelTarget("local", "test")),
+            ),
             patch.object(application, "close_skill_discovery", close_skills),
             patch.object(application, "cancel_background_subagents", AsyncMock()),
             patch.object(application, "cancel_shell_sessions", AsyncMock()),
