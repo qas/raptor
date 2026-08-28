@@ -74,6 +74,24 @@ class TranscriptDurabilityTests(unittest.IsolatedAsyncioTestCase):
             except Exception:
                 break
 
+    def test_checkpoint_notice_uses_transcript_sequence(self) -> None:
+        session_id = str(session.state["current_session_id"])
+        user = chat_store.append_item(
+            session_id,
+            {"role": "user", "content": "compact me"},
+            source="user",
+        )
+        checkpoint = chat_store.append_checkpoint(
+            session_id,
+            summary="durable summary",
+            through_seq=int(user["seq"]),
+        )
+
+        self.assertEqual(
+            agent_mod._checkpoint_saved_message(session_id),
+            f"Checkpoint saved · #{checkpoint['seq']}.",
+        )
+
     async def test_items_written_during_turn(self) -> None:
         sid = session.state["current_session_id"]
         seen_before_tool: list[int] = []

@@ -250,7 +250,7 @@ class GoalTests(unittest.IsolatedAsyncioTestCase):
     async def test_goal_survives_compaction(self) -> None:
         replace_goal("Survive compaction")
         goal_before = copy.deepcopy(current_goal())
-        from chat_store import append_item
+        from chat_store import append_checkpoint, append_item
         session_id = session.state["current_session_id"]
         append_item(
             session_id,
@@ -259,6 +259,11 @@ class GoalTests(unittest.IsolatedAsyncioTestCase):
         )
 
         async def fake_compact(*_a, **_k):
+            append_checkpoint(
+                session_id,
+                summary="durable summary",
+                through_seq=2,
+            )
             return True
 
         with (
@@ -280,15 +285,6 @@ class GoalTests(unittest.IsolatedAsyncioTestCase):
                 agent_mod,
                 "typing_loop",
                 _noop,
-            ),
-            patch(
-                "agent.session_context_stats",
-                lambda _sid: {
-                    "archive_events": 2,
-                    "checkpoint": True,
-                    "checkpoint_through": 1,
-                    "active_native_events": 1,
-                },
             ),
         ):
             await agent_mod.compact_context(

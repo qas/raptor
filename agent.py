@@ -8,6 +8,7 @@ import httpx
 from chat_provider import ConversationId
 
 from chat_store import (
+    active_checkpoint,
     append_item,
     append_meta,
     event_at_seq,
@@ -26,7 +27,6 @@ from context import (
     compact_session,
     ensure_context_under_budget,
     request_with_checkpoint_retry,
-    session_context_stats,
 )
 from engine import (
     assistant_message,
@@ -77,6 +77,15 @@ TURN_ABORTED_GUIDANCE = (
     "tool may have partially changed external state; inspect before retrying. "
     "Managed background resources may still be running."
 )
+
+
+def _checkpoint_saved_message(session_id: str) -> str:
+    checkpoint = active_checkpoint(session_id)
+    seq = checkpoint.get("seq") if checkpoint else None
+    if not isinstance(seq, int) or seq <= 0:
+        raise RuntimeError("compaction completed without an active checkpoint")
+    return f"Checkpoint saved · #{seq}."
+
 
 MALFORMED_TOOL_CALL_MESSAGE = (
     "The model generated an invalid tool call. Nothing was executed, and "
@@ -325,14 +334,7 @@ async def compact_context(
         if not ok:
             await send(chat_id, "Nothing to compact.")
             return
-        stats = session_context_stats(session_id)
-        await send(
-            chat_id,
-            (
-                "Checkpoint saved. "
-                f"Active native events: {stats['active_native_events']}."
-            ),
-        )
+        await send(chat_id, _checkpoint_saved_message(session_id))
     except asyncio.CancelledError:
         raise
     except Exception as exc:
@@ -377,14 +379,7 @@ async def maybe_auto_compact(chat_id: ConversationId) -> None:
             input_budget=budget,
             generation_budget=_generation_budget(target),
         )
-    stats = session_context_stats(session_id)
-    await send(
-        chat_id,
-        (
-            "Checkpoint saved. "
-            f"Active native events: {stats['active_native_events']}."
-        ),
-    )
+    await send(chat_id, _checkpoint_saved_message(session_id))
 
 
 async def agent_turn(
