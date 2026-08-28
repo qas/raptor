@@ -147,6 +147,7 @@ the daemon (the launch workspace's `.raptor` directory by default).
 | `/model <provider> <model>` | Start a fresh chat session on that target |
 | `/approval` | Toggle tool approval |
 | `/todos` | Show the active execution plan |
+| `/subagents` | Show subagent status, provider, and model |
 | `/goal` | Inspect or manage the persistent goal |
 | `/help` | Show available commands |
 

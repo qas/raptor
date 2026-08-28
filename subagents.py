@@ -923,6 +923,10 @@ def subagent_summaries() -> list[
                 ),
                 "started_at": record.get("started_at"),
                 "completed_at": record.get("completed_at"),
+                "completion_pending": record.get(
+                    "completion_pending",
+                    False,
+                ),
             }
         )
     return rows

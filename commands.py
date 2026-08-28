@@ -83,7 +83,11 @@ from responses import (
     model_provider,
     stateless_response,
 )
-from subagents import cancel_background_subagents, pending_subagent_completions
+from subagents import (
+    cancel_background_subagents,
+    pending_subagent_completions,
+    subagent_summaries,
+)
 from shell_sessions import (
     cancel_shell_sessions,
     pending_shell_completions,
@@ -180,6 +184,34 @@ def format_todos() -> str:
         )
         for item in todos
     )
+
+
+def format_subagents() -> str:
+    rows = subagent_summaries()
+    if not rows:
+        return "No subagents."
+    lines = ["Subagents:"]
+    for row in rows:
+        target = row.get("model_target")
+        if isinstance(target, dict):
+            provider = str(target.get("provider_id") or "unknown")
+            model = str(target.get("model") or "unknown")
+            model_label = f"{provider}/{model}"
+        else:
+            model_label = "unknown/unknown"
+        mode = "background" if row.get("background") else "foreground"
+        pending = " · result pending" if row.get("completion_pending") else ""
+        task = " ".join(
+            str(row.get("last_task") or row.get("task") or "").split()
+        )
+        if len(task) > 100:
+            task = task[:99] + "…"
+        task_suffix = f" — {task}" if task else ""
+        lines.append(
+            f"{row.get('id')} [{row.get('status')}] · {mode} · "
+            f"{model_label}{pending}{task_suffix}"
+        )
+    return "\n".join(lines)
 
 
 def _main_chat_sessions(
@@ -306,6 +338,7 @@ async def command(
                 "/approval on - require approval for side effects\n"
                 "/approval off - allow tools immediately\n"
                 "/todos - show todo list\n"
+                "/subagents - show subagent status\n"
                 "/goal - show persistent goal\n"
                 "/goal <objective> - start or replace goal\n"
                 "/goal pause|resume|complete|clear"
@@ -1084,6 +1117,10 @@ async def command(
             format_todos(),
         )
 
+        return True
+
+    if cmd == "/subagents":
+        await send(chat_id, format_subagents())
         return True
 
     if cmd == "/models":

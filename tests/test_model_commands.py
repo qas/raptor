@@ -109,6 +109,60 @@ class ModelCommandTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(handled)
         self.assertIn(f"version: {VERSION}\n", send.await_args.args[1])
 
+    async def test_subagents_reports_current_session_records(self) -> None:
+        session.subagent_records["worker-1"] = {
+            "id": "worker-1",
+            "status": "running",
+            "task": "inspect\nprovider routing",
+            "background": True,
+            "model_target": {
+                "provider_id": "worker",
+                "model": "worker-model",
+            },
+            "parent_session_id": self.session_id,
+            "completion_pending": False,
+        }
+        session.subagent_records["worker-2"] = {
+            "id": "worker-2",
+            "status": "completed",
+            "task": "write tests",
+            "background": False,
+            "model_target": {
+                "provider_id": "local",
+                "model": "main-model",
+            },
+            "parent_session_id": self.session_id,
+            "completion_pending": True,
+        }
+        session.subagent_records["historical"] = {
+            "id": "historical",
+            "status": "completed",
+            "parent_session_id": "another-session",
+        }
+        send = AsyncMock()
+
+        with patch.object(commands, "send", send):
+            handled = await commands.command(1, "/subagents")
+
+        self.assertTrue(handled)
+        self.assertEqual(
+            send.await_args.args[1],
+            "Subagents:\n"
+            "worker-1 [running] · background · worker/worker-model "
+            "— inspect provider routing\n"
+            "worker-2 [completed] · foreground · local/main-model "
+            "· result pending — write tests",
+        )
+
+    async def test_subagents_reports_empty_state(self) -> None:
+        send = AsyncMock()
+
+        with patch.object(commands, "send", send):
+            handled = await commands.command(1, "/subagents")
+
+        self.assertTrue(handled)
+        send.assert_awaited_once_with(1, "No subagents.")
+
     async def test_models_lists_the_requested_provider(self) -> None:
         send = AsyncMock()
         listing = AsyncMock(return_value=["beta-model", "beta-small"])

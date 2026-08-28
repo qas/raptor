@@ -35,6 +35,7 @@ COMMANDS: tuple[tuple[str, str], ...] = (
     ("models", "List models from provider"),
     ("approval", "Toggle tool approval"),
     ("todos", "Show todo list"),
+    ("subagents", "Show subagent status"),
     ("goal", "Show or set persistent goal"),
     ("help", "Show commands"),
 )
