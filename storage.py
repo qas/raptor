@@ -75,6 +75,39 @@ def write_bytes_atomic(
     fsync_directory(path.parent)
 
 
+def write_bytes_exclusive_atomic(
+    path: Path,
+    data: bytes,
+    *,
+    mode: int | None = None,
+) -> None:
+    """Publish a complete new file atomically without replacing a target."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary_name = tempfile.mkstemp(
+        dir=path.parent,
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+    )
+    temporary_path = Path(temporary_name)
+    linked = False
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        if mode is not None:
+            os.chmod(temporary_path, mode)
+        os.link(temporary_path, path, follow_symlinks=False)
+        linked = True
+    finally:
+        try:
+            temporary_path.unlink()
+        except FileNotFoundError:
+            pass
+    if linked:
+        fsync_directory(path.parent)
+
+
 def write_text_atomic(
     path: Path,
     text: str,

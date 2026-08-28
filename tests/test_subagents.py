@@ -415,6 +415,36 @@ class BackgroundSubagentTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.gather(task, return_exceptions=True)
             session.subagent_tasks.pop(result["agent_id"], None)
 
+    async def test_foreground_start_projects_and_finishes_activity_surface(
+        self,
+    ) -> None:
+        opened = AsyncMock()
+        finished = AsyncMock()
+
+        async def mark_open(record):
+            record["activity_surface_id"] = "telegram:42/77"
+
+        opened.side_effect = mark_open
+        with (
+            patch.object(subagents, "open_subagent_activity", opened),
+            patch.object(subagents, "finish_subagent_activity", finished),
+            patch.object(
+                subagents,
+                "run_subagent",
+                AsyncMock(return_value="finished"),
+            ),
+            patch.object(subagents, "save_state"),
+        ):
+            result = await subagents.subagent_tool(
+                {"task": "inspect"},
+                chat_id="telegram:123",
+                execution_context={"depth": 0},
+            )
+
+        self.assertEqual(result["status"], "completed")
+        opened.assert_awaited_once()
+        finished.assert_awaited_once()
+
     async def test_new_subagent_can_select_a_different_provider(self) -> None:
         started = asyncio.Event()
 
@@ -1253,18 +1283,21 @@ class BackgroundSubagentTests(unittest.IsolatedAsyncioTestCase):
         append_item.assert_not_called()
 
     async def test_persistent_topic_capacity_is_bounded(self) -> None:
-        session.subagent_records["existing"] = {
-            "activity_surface_id": "42/77",
-        }
-        with patch.object(subagents, "MAX_SUBAGENT_RECORDS", 1):
-            result = await subagents.subagent_tool(
-                {"task": "another", "background": True},
-                chat_id="telegram:123",
-                execution_context={"depth": 0},
-            )
+        for background in (False, True):
+            with self.subTest(background=background):
+                session.subagent_records.clear()
+                session.subagent_records["existing"] = {
+                    "activity_surface_id": "42/77",
+                }
+                with patch.object(subagents, "MAX_SUBAGENT_RECORDS", 1):
+                    result = await subagents.subagent_tool(
+                        {"task": "another", "background": background},
+                        chat_id="telegram:123",
+                        execution_context={"depth": 0},
+                    )
 
-        self.assertFalse(result["ok"])
-        self.assertEqual(result["status"], "capacity_reached")
+                self.assertFalse(result["ok"])
+                self.assertEqual(result["status"], "capacity_reached")
 
     async def test_completion_delivery_exception_is_deferred(self) -> None:
         record = {

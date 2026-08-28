@@ -12,10 +12,13 @@ from typing import Any, Generic, TypeVar
 
 from chat_provider import ConversationId
 from chat_store import (
+    append_meta,
     append_item,
     create_session,
+    end_session,
     ensure_chat_dirs,
     event_at_seq,
+    iter_events,
     next_event_seq,
     repair_all_chat_files,
     repair_chat_file,
@@ -23,6 +26,7 @@ from chat_store import (
     session_exists,
     session_is_ended,
     steer_is_recorded,
+    validate_session_id,
 )
 from config import (
     MAX_CHAT_RUNTIMES,
@@ -37,7 +41,7 @@ from runtime_events import RuntimeEvent
 from storage import write_text_atomic
 from todos import validate_plan
 
-STATE_SCHEMA_VERSION = 3
+STATE_SCHEMA_VERSION = 4
 _RECOVERY_BYTES_PER_CHAT = 512
 
 GLOBAL_DEFAULT_STATE: dict[str, Any] = {
@@ -58,6 +62,7 @@ CHAT_DEFAULT_STATE: dict[str, Any] = {
     "subagents": {},
     "goal": None,
     "thread": None,
+    "session_transition": None,
 }
 
 
@@ -211,6 +216,42 @@ def _normalize_chat_state(value: Any, owner: str) -> dict[str, Any]:
         "provider_id": provider_id,
         "model": model,
     }
+
+    transition = result.get("session_transition")
+    if transition is not None:
+        if not isinstance(transition, dict):
+            raise RuntimeError(f"Persisted session transition is invalid: {owner}")
+        if transition.get("kind") != "history_truncate":
+            raise RuntimeError(f"Persisted session transition is invalid: {owner}")
+        phase = transition.get("phase")
+        if phase not in {"preparing", "committed"}:
+            raise RuntimeError(f"Persisted session transition is invalid: {owner}")
+        normalized_transition: dict[str, Any] = {
+            "kind": transition["kind"],
+            "phase": phase,
+        }
+        for field in ("source_session_id", "destination_session_id"):
+            try:
+                normalized_transition[field] = validate_session_id(
+                    transition.get(field)
+                )
+            except (TypeError, ValueError) as exc:
+                raise RuntimeError(
+                    f"Persisted session transition is invalid: {owner}"
+                ) from exc
+        for field in ("turns", "copied_items"):
+            number = transition.get(field)
+            minimum = 1 if field == "turns" else 0
+            if (
+                isinstance(number, bool)
+                or not isinstance(number, int)
+                or number < minimum
+            ):
+                raise RuntimeError(
+                    f"Persisted session transition is invalid: {owner}"
+                )
+            normalized_transition[field] = number
+        result["session_transition"] = normalized_transition
 
     if not isinstance(result.get("subagents"), dict):
         raise RuntimeError(f"Persisted subagents must be an object: {owner}")
@@ -932,11 +973,85 @@ def rehydrate_pending_inputs(chat_id: ConversationId) -> int:
     return count
 
 
+def _recover_session_transition(runtime: ChatRuntime) -> bool:
+    marker = runtime.state.get("session_transition")
+    if not isinstance(marker, dict):
+        return False
+    source_id = str(marker["source_session_id"])
+    destination_id = str(marker["destination_session_id"])
+    if source_id == destination_id:
+        raise RuntimeError("History truncation transition has identical sessions")
+    for candidate in (source_id, destination_id):
+        if session_exists(candidate) and session_chat_key(candidate) != runtime.key:
+            raise RuntimeError("History truncation transition crosses chat owners")
+    source_live = session_exists(source_id) and not session_is_ended(source_id)
+    destination_live = (
+        session_exists(destination_id) and not session_is_ended(destination_id)
+    )
+    current_id = str(runtime.state.get("current_session_id") or "")
+    current_is_related = current_id in (source_id, destination_id)
+    if marker.get("phase") == "preparing":
+        if destination_live:
+            end_session(destination_id, reason="history_truncate_aborted")
+        if source_live:
+            runtime.state["current_session_id"] = source_id
+        elif current_is_related:
+            runtime.state["current_session_id"] = None
+        runtime.state["session_transition"] = None
+        return True
+    if current_id == destination_id and destination_live:
+        if source_live:
+            end_session(
+                source_id,
+                reason="history_truncated",
+                todos=list(runtime.state.get("todos") or []),
+            )
+        completed = any(
+            event.get("type") == "meta"
+            and event.get("name") == "history_truncated_complete"
+            for event in iter_events(destination_id)
+        )
+        if not completed:
+            append_meta(
+                destination_id,
+                "history_truncated_complete",
+                {"source_session_id": source_id},
+            )
+        for record in runtime.state.get("subagents", {}).values():
+            if (
+                isinstance(record, dict)
+                and str(record.get("parent_session_id") or "") == source_id
+            ):
+                record.setdefault("origin_parent_session_id", source_id)
+                record["parent_session_id"] = destination_id
+        runtime.state["session_transition"] = None
+        return True
+    if source_live and current_is_related:
+        if destination_live:
+            end_session(destination_id, reason="history_truncate_aborted")
+        runtime.state["current_session_id"] = source_id
+        runtime.state["session_transition"] = None
+        return True
+    if destination_live:
+        end_session(destination_id, reason="history_truncate_aborted")
+    if source_live:
+        end_session(source_id, reason="history_truncate_aborted")
+    if not current_is_related and session_exists(current_id):
+        runtime.state["current_session_id"] = current_id
+    else:
+        runtime.state["current_session_id"] = None
+    runtime.state["session_transition"] = None
+    return True
+
+
 def bootstrap_runtime_storage() -> dict[str, int]:
     """Repair transcripts and ensure every registered chat has a session."""
     repaired = repair_all_chat_files()
     created = 0
     state_changed = False
+    for runtime in all_chat_runtimes():
+        if _recover_session_transition(runtime):
+            state_changed = True
     for runtime in all_chat_runtimes():
         session_id = runtime.state.get("current_session_id")
         session_valid = bool(session_id and session_exists(str(session_id)))

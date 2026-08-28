@@ -1,17 +1,23 @@
 """Provider-neutral text commands."""
 import asyncio
+import copy
 import os
+import re
 from datetime import datetime, timezone
 from typing import Any
 
 from chat_provider import ConversationId
 
 from chat_store import (
+    TruncationCleanupError,
     append_meta,
     create_session,
     end_session,
     iter_events,
     list_sessions,
+    materialize_session_truncation,
+    new_session_id as generate_session_id,
+    plan_session_truncation,
     session_contains_text,
     session_exists,
     session_summary,
@@ -92,6 +98,7 @@ from threads import (
 from thread_state import current_thread, thread_active
 from turn_runtime import TurnKind, turns
 from todos import validate_plan
+from version import VERSION
 
 # ---------------------------------------------------------------------------
 # Chat commands
@@ -287,6 +294,7 @@ async def command(
                 "/stop - interrupt the current root turn\n"
                 "/stop all - also stop background agents and shells\n"
                 "/compact - compact context\n"
+                "/truncate <n> - remove the last n user turns\n"
                 "/ask <message> - isolated tool-capable query\n"
                 "/thread - fork into a temporary conversation\n"
                 "/thread <message> - fork or continue, then send\n"
@@ -516,6 +524,7 @@ async def command(
         await send(
             chat_id,
             (
+                f"version: {VERSION}\n"
                 f"chat provider: {get_chat_provider().name}\n"
                 f"model provider: {target.provider_id}\n"
                 f"Responses: {responses_status}\n"
@@ -792,6 +801,192 @@ async def command(
             (
                 f"New session: {short_id}\n"
                 "Previous transcript archived."
+            ),
+        )
+        return True
+
+    if cmd == "/truncate":
+        parts = arg.split()
+        if len(parts) != 1:
+            await send(chat_id, "Usage: /truncate <positive integer>")
+            return True
+        if re.fullmatch(r"[0-9]+", parts[0]) is None:
+            await send(chat_id, "Usage: /truncate <positive integer>")
+            return True
+        try:
+            turns_to_remove = int(parts[0])
+        except ValueError:
+            await send(chat_id, "Usage: /truncate <positive integer>")
+            return True
+        if turns_to_remove <= 0:
+            await send(chat_id, "Usage: /truncate <positive integer>")
+            return True
+        if thread_active():
+            await send(chat_id, "Clear or merge the active thread first.")
+            return True
+        if session_transition_busy():
+            await send(chat_id, "Busy. Use /stop all first.")
+            return True
+        current_id = str(state.get("current_session_id") or "")
+        pending_delivery = state.get("pending_delivery")
+        if pending_delivery is not None:
+            await send(
+                chat_id,
+                "A response is awaiting delivery; try /truncate again later.",
+            )
+            return True
+        if not current_id or not session_exists(current_id):
+            await send(chat_id, "Cannot truncate: no active session.")
+            return True
+        try:
+            truncation_plan = plan_session_truncation(
+                current_id,
+                turns=turns_to_remove,
+                chat_key=session.current_runtime().key,
+                model_target=session.current_model_target().to_dict(),
+            )
+        except (OSError, RuntimeError, ValueError) as exc:
+            await send(chat_id, f"Could not truncate session: {exc}")
+            return True
+        for _attempt in range(8):
+            new_id = generate_session_id()
+            if not session_exists(new_id):
+                break
+        else:
+            await send(chat_id, "Could not allocate a truncation session.")
+            return True
+        old_marker = state.get("session_transition")
+        preparing_marker = {
+            "kind": "history_truncate",
+            "phase": "preparing",
+            "source_session_id": current_id,
+            "destination_session_id": str(new_id),
+            "turns": turns_to_remove,
+            "copied_items": 0,
+        }
+        state["session_transition"] = preparing_marker
+        try:
+            save_state()
+        except (OSError, RuntimeError, ValueError) as exc:
+            state["session_transition"] = old_marker
+            await send(chat_id, f"Could not truncate session: {exc}")
+            return True
+        try:
+            candidate_created = False
+            _new_id, copied_items = materialize_session_truncation(
+                truncation_plan,
+                new_id,
+            )
+            candidate_created = True
+            append_meta(
+                str(new_id),
+                "history_truncated",
+                {"source_session_id": current_id, "turns": turns_to_remove},
+            )
+            marker = {
+                **preparing_marker,
+                "phase": "committed",
+                "copied_items": copied_items,
+            }
+            state["current_session_id"] = str(new_id)
+            state["session_transition"] = marker
+            save_state()
+        except TruncationCleanupError as exc:
+            state["current_session_id"] = current_id
+            state["session_transition"] = preparing_marker
+            log_exception("commands", "truncate_cleanup_error", exc)
+            await send(
+                chat_id,
+                "Could not truncate session; restart recovery is pending.",
+            )
+            return True
+        except (OSError, RuntimeError, ValueError) as exc:
+            state["current_session_id"] = current_id
+            state["session_transition"] = preparing_marker
+            candidate = session_summary(str(new_id))
+            owned_candidate = bool(
+                candidate
+                and candidate.get("kind") == "main"
+                and candidate.get("chat_key") == session.current_runtime().key
+                and candidate.get("parent_session_id") == current_id
+            )
+            cleanup_complete = True
+            try:
+                if (
+                    (candidate_created or owned_candidate)
+                    and session_exists(str(new_id))
+                ):
+                    end_session(str(new_id), reason="history_truncate_failed")
+            except (OSError, RuntimeError, ValueError) as cleanup_exc:
+                cleanup_complete = False
+                log_exception("commands", "truncate_cleanup_error", cleanup_exc)
+            if cleanup_complete:
+                try:
+                    state["session_transition"] = old_marker
+                    save_state()
+                except (OSError, RuntimeError, ValueError) as cleanup_exc:
+                    state["session_transition"] = preparing_marker
+                    log_exception(
+                        "commands",
+                        "truncate_marker_cleanup_error",
+                        cleanup_exc,
+                    )
+            else:
+                state["session_transition"] = preparing_marker
+            await send(chat_id, f"Could not truncate session: {exc}")
+            return True
+        try:
+            end_session(
+                current_id,
+                reason="history_truncated",
+                todos=list(state.get("todos") or []),
+            )
+        except (OSError, RuntimeError, ValueError) as exc:
+            log_exception("commands", "truncate_archive_error", exc)
+            await send(
+                chat_id,
+                (
+                    f"Truncated the last {turns_to_remove} user turn(s), but "
+                    "could not archive the old transcript. Files and tool "
+                    "side effects were not reverted; the old transcript "
+                    "remains available as audit history."
+                ),
+            )
+            return True
+        try:
+            append_meta(
+                str(new_id),
+                "history_truncated_complete",
+                {"source_session_id": current_id},
+            )
+            old_records = copy.deepcopy(state.get("subagents") or {})
+            for record in (state.get("subagents") or {}).values():
+                if (
+                    isinstance(record, dict)
+                    and str(record.get("parent_session_id") or "")
+                    == current_id
+                ):
+                    record.setdefault("origin_parent_session_id", current_id)
+                    record["parent_session_id"] = str(new_id)
+            state["session_transition"] = None
+            save_state()
+        except (OSError, RuntimeError, ValueError) as exc:
+            log_exception("commands", "truncate_completion_error", exc)
+            state["session_transition"] = marker
+            if "old_records" in locals():
+                state["subagents"] = old_records
+            await send(
+                chat_id,
+                "Truncation completed, but recovery metadata remains pending. "
+                "Files and tool side effects were not reverted.",
+            )
+            return True
+        await send(
+            chat_id,
+            (
+                f"Truncated the last {turns_to_remove} user turn(s).\n"
+                "Files and tool side effects were not reverted; the old "
+                "transcript remains available as audit history."
             ),
         )
         return True

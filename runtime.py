@@ -20,7 +20,6 @@ from storage import (
     ensure_private_directory,
     read_bytes_bounded,
 )
-
 # ---------------------------------------------------------------------------
 # Runtime / daemon metadata
 # ---------------------------------------------------------------------------
@@ -146,6 +145,12 @@ def parse_args() -> argparse.Namespace:
         description="Raptor provider-neutral Responses API agent"
     )
     mode = parser.add_mutually_exclusive_group()
+    mode.add_argument(
+        "-V",
+        "--version",
+        action="store_true",
+        help="show the Raptor version and exit",
+    )
     mode.add_argument(
         "-d",
         "--daemon",

@@ -20,6 +20,7 @@ if str(_ROOT) not in sys.path:
 
 import chat_store
 import commands
+import controller
 import session
 from session import pending_approvals
 from turn_runtime import turns
@@ -136,6 +137,142 @@ class SessionRotationTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotEqual(current, ended)
         self.assertTrue(chat_store.session_exists(current))
         self.assertEqual(result["created_sessions"], 1)
+
+    def test_bootstrap_recovers_committed_history_truncation(self) -> None:
+        source = str(session.state["current_session_id"])
+        destination = chat_store.create_session(
+            kind="main",
+            chat_key=session.current_runtime().key,
+            parent_session_id=source,
+            model_target=self.target.to_dict(),
+        )
+        session.state["current_session_id"] = destination
+        session.state["subagents"] = {
+            "child": {"parent_session_id": source},
+        }
+        session.state["session_transition"] = {
+            "kind": "history_truncate",
+            "phase": "committed",
+            "source_session_id": source,
+            "destination_session_id": destination,
+            "turns": 1,
+            "copied_items": 1,
+        }
+
+        session.bootstrap_runtime_storage()
+
+        self.assertIsNone(session.state["session_transition"])
+        self.assertEqual(session.state["current_session_id"], destination)
+        self.assertEqual(
+            session.state["subagents"]["child"]["parent_session_id"],
+            destination,
+        )
+        self.assertEqual(
+            session.state["subagents"]["child"]["origin_parent_session_id"],
+            source,
+        )
+        self.assertTrue(chat_store.session_is_ended(source))
+        self.assertEqual(
+            chat_store.read_events(destination)[-1]["name"],
+            "history_truncated_complete",
+        )
+
+    def test_bootstrap_aborts_partially_created_history_candidate(self) -> None:
+        source = str(session.state["current_session_id"])
+        destination = chat_store.create_session(
+            kind="main",
+            chat_key=session.current_runtime().key,
+            parent_session_id=source,
+            model_target=self.target.to_dict(),
+        )
+        chat_store.append_item(
+            destination,
+            {"role": "user", "content": "partial copy"},
+            source="user",
+        )
+        session.state["session_transition"] = {
+            "kind": "history_truncate",
+            "phase": "preparing",
+            "source_session_id": source,
+            "destination_session_id": destination,
+            "turns": 1,
+            "copied_items": 0,
+        }
+
+        session.bootstrap_runtime_storage()
+
+        self.assertIsNone(session.state["session_transition"])
+        self.assertEqual(session.state["current_session_id"], source)
+        self.assertFalse(chat_store.session_is_ended(source))
+        self.assertTrue(chat_store.session_is_ended(destination))
+
+    def test_bootstrap_restores_source_when_destination_is_missing(self) -> None:
+        source = str(session.state["current_session_id"])
+        destination = chat_store.new_session_id()
+        session.state["current_session_id"] = destination
+        session.state["session_transition"] = {
+            "kind": "history_truncate",
+            "phase": "committed",
+            "source_session_id": source,
+            "destination_session_id": destination,
+            "turns": 1,
+            "copied_items": 0,
+        }
+
+        session.bootstrap_runtime_storage()
+
+        self.assertIsNone(session.state["session_transition"])
+        self.assertEqual(session.state["current_session_id"], source)
+        self.assertFalse(chat_store.session_is_ended(source))
+
+    def test_bootstrap_aborts_inconsistent_history_truncation(self) -> None:
+        source = str(session.state["current_session_id"])
+        destination = chat_store.create_session(
+            kind="main",
+            chat_key=session.current_runtime().key,
+            parent_session_id=source,
+            model_target=self.target.to_dict(),
+        )
+        other = chat_store.create_session(
+            kind="main",
+            chat_key=session.current_runtime().key,
+            model_target=self.target.to_dict(),
+        )
+        session.state["current_session_id"] = source
+        session.state["subagents"] = {
+            "child": {"parent_session_id": source},
+        }
+        session.state["session_transition"] = {
+            "kind": "history_truncate",
+            "phase": "committed",
+            "source_session_id": source,
+            "destination_session_id": destination,
+            "turns": 1,
+            "copied_items": 0,
+        }
+
+        session.bootstrap_runtime_storage()
+
+        self.assertIsNone(session.state["session_transition"])
+        self.assertEqual(session.state["current_session_id"], source)
+        self.assertEqual(
+            session.state["subagents"]["child"],
+            {"parent_session_id": source},
+        )
+        self.assertTrue(chat_store.session_is_ended(destination))
+        self.assertFalse(chat_store.session_is_ended(source))
+        self.assertTrue(chat_store.session_exists(other))
+
+    def test_session_transition_marker_blocks_changes(self) -> None:
+        session.state["session_transition"] = {
+            "kind": "history_truncate",
+            "phase": "committed",
+            "source_session_id": session.state["current_session_id"],
+            "destination_session_id": session.state["current_session_id"],
+            "turns": 1,
+            "copied_items": 0,
+        }
+        self.assertTrue(controller.session_transition_busy())
 
     async def test_new_preserves_goal_owned_checklist(self) -> None:
         goal = replace_goal("Long-running goal")

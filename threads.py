@@ -143,6 +143,7 @@ async def finish_thread(
                     "origin": {
                         "session_id": origin[0],
                         "seq": origin[1],
+                        "source": event.get("source"),
                     },
                     "item": copy.deepcopy(item),
                 },

@@ -370,9 +370,14 @@ async def ensure_target(target: ModelTarget) -> ModelTarget:
 def instructions(
     extra: str = "",
 ) -> str:
+    from workspace_identity import workspace_identity_instructions
+
     parts = [
         BASE_INSTRUCTIONS
     ]
+    workspace_identity = workspace_identity_instructions()
+    if workspace_identity:
+        parts.append(workspace_identity)
     if extra:
         parts.append(
             extra

@@ -44,6 +44,7 @@ from subagents import (
 )
 from thread_state import thread_active
 from thread_status import ensure_thread_status
+from workspace_identity import initialize_workspace_identity
 
 
 async def dispatch_event(provider: ChatProvider, event: ChatEvent) -> None:
@@ -107,6 +108,7 @@ async def main(on_ready: Callable[[], None] | None = None) -> None:
     cursor: object | None = None
 
     try:
+        initialize_workspace_identity()
         default_target = await ensure_target(MODEL_CONFIGURATION.default_target)
         session.set_default_model_target(default_target)
         # Metadata discovery overlaps provider/model startup. Full skill

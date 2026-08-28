@@ -1,4 +1,5 @@
 """Append-only JSONL chat transcript store."""
+import copy
 import heapq
 import json
 import os
@@ -15,6 +16,7 @@ from config import CHAT_DIR, COMPACTION_MAX_RECORD_CHARS, RAPTOR_HOME
 from storage import (
     ensure_private_directory,
     fsync_directory,
+    write_bytes_exclusive_atomic,
 )
 
 _SEQ_CACHE: dict[str, int] = {}
@@ -32,6 +34,25 @@ class ActiveProjection:
     items: list[dict[str, Any]]
     checkpoint: dict[str, Any] | None
     archive_events: int
+    reset_through: int = 0
+
+
+@dataclass(frozen=True)
+class TruncationPlan:
+    """Validated bounded input for a session truncation materialization."""
+
+    source_session_id: str
+    chat_key: str
+    model_target: dict[str, str]
+    turns: int
+    cutoff_seq: int
+    items: tuple[dict[str, Any], ...]
+    checkpoint: dict[str, Any] | None
+    reset_through: int
+
+
+class TruncationCleanupError(RuntimeError):
+    """A failed fork still requires preparing-marker recovery."""
 
 
 def _decode_event_line(
@@ -223,6 +244,7 @@ def create_session(
     agent_id: str | None = None,
     parent_session_id: str | None = None,
     model_target: dict[str, str],
+    session_id: str | None = None,
 ) -> str:
     owner = str(chat_key).strip()
     if not owner:
@@ -232,11 +254,14 @@ def create_session(
     if not provider_id or not model:
         raise ValueError("model_target requires provider_id and model")
     ensure_chat_dirs()
-    session_id = new_session_id()
+    session_id = (
+        new_session_id() if session_id is None else validate_session_id(session_id)
+    )
+    if session_exists(session_id):
+        raise ValueError(f"session already exists: {session_id}")
     parent = None
     if parent_session_id:
         parent = validate_session_id(parent_session_id)
-    _SEQ_CACHE[session_id] = 0
     event: dict[str, Any] = {
         "type": "session_start",
         "kind": kind,
@@ -245,10 +270,24 @@ def create_session(
         "parent_session_id": parent,
     }
     event["model_target"] = {"provider_id": provider_id, "model": model}
-    append_event(
-        session_id,
-        event,
+    event.update(
+        {
+            "v": 1,
+            "seq": 1,
+            "ts": time.time(),
+            "session_id": session_id,
+        }
     )
+    encoded = (json.dumps(event, ensure_ascii=False) + "\n").encode("utf-8")
+    try:
+        write_bytes_exclusive_atomic(
+            chat_path(session_id),
+            encoded,
+            mode=0o600,
+        )
+    except FileExistsError as exc:
+        raise ValueError(f"session already exists: {session_id}") from exc
+    _SEQ_CACHE[session_id] = 1
     return session_id
 
 
@@ -394,6 +433,7 @@ def active_projection(session_id: str) -> ActiveProjection:
     """Build active items and checkpoint in one streaming archive pass."""
     items: list[dict[str, Any]] = []
     checkpoint: dict[str, Any] | None = None
+    reset_through = 0
     archive_events = 0
     for event in iter_events(session_id):
         archive_events += 1
@@ -408,6 +448,7 @@ def active_projection(session_id: str) -> ActiveProjection:
                 for item in items
                 if int(item.get("seq") or 0) > through
             ]
+            reset_through = 0
         elif (
             event_type == "meta"
             and event.get("name") == "model_context_reset"
@@ -424,7 +465,8 @@ def active_projection(session_id: str) -> ActiveProjection:
                 if int(item.get("seq") or 0) > through
             ]
             checkpoint = None
-    return ActiveProjection(items, checkpoint, archive_events)
+            reset_through = max(reset_through, through)
+    return ActiveProjection(items, checkpoint, archive_events, reset_through)
 
 
 def active_item_events(session_id: str) -> list[dict[str, Any]]:
@@ -573,6 +615,159 @@ def session_chat_key(session_id: str) -> str | None:
             value = event.get("chat_key")
             return str(value) if value is not None else None
     return None
+
+
+def _is_user_turn_start(event: dict[str, Any]) -> bool:
+    item = event.get("item")
+    return event.get("source") == "user" or (
+        event.get("source") == "thread_merge"
+        and isinstance(item, dict)
+        and item.get("role") == "user"
+        and isinstance(event.get("origin"), dict)
+        and event["origin"].get("source") == "user"
+    )
+
+
+def plan_session_truncation(
+    source_session_id: str,
+    *,
+    turns: int,
+    chat_key: str,
+    model_target: dict[str, str],
+) -> TruncationPlan:
+    """Plan truncation from the current active projection only."""
+    source_id = validate_session_id(source_session_id)
+    if isinstance(turns, bool) or not isinstance(turns, int) or turns <= 0:
+        raise ValueError("turns must be a positive integer")
+    owner = str(chat_key).strip()
+    if not owner or not isinstance(model_target, dict):
+        raise ValueError("invalid truncation owner or model target")
+    start = _session_start(chat_path(source_id))
+    if not isinstance(start, dict) or start.get("type") != "session_start":
+        raise ValueError("source session does not exist")
+    if str(start.get("kind") or "main") != "main":
+        raise ValueError("source session is not a main session")
+    if session_is_ended(source_id) or str(start.get("chat_key")) != owner:
+        raise ValueError("source session is not an active owned session")
+    target = start.get("model_target")
+    expected = {
+        "provider_id": str(target.get("provider_id") or "").strip()
+        if isinstance(target, dict)
+        else "",
+        "model": str(target.get("model") or "").strip()
+        if isinstance(target, dict)
+        else "",
+    }
+    requested = {
+        "provider_id": str(model_target.get("provider_id") or "").strip(),
+        "model": str(model_target.get("model") or "").strip(),
+    }
+    if requested != expected or not all(expected.values()):
+        raise ValueError("model target does not match source session")
+    projection = active_projection(source_id)
+    starts = [
+        event
+        for event in projection.items
+        if _is_user_turn_start(event)
+    ]
+    if turns > len(starts):
+        raise ValueError(
+            "turns exceeds available active user turns "
+            f"({len(starts)} active user turn(s))"
+        )
+    cutoff = int(starts[-turns].get("seq") or 0)
+    prefix = tuple(
+        copy.deepcopy(event)
+        for event in projection.items
+        if int(event.get("seq") or 0) < cutoff
+    )
+    return TruncationPlan(
+        source_id,
+        owner,
+        copy.deepcopy(expected),
+        turns,
+        cutoff,
+        prefix,
+        copy.deepcopy(projection.checkpoint),
+        projection.reset_through,
+    )
+
+
+def materialize_session_truncation(
+    plan: TruncationPlan,
+    destination_session_id: str,
+) -> tuple[str, int]:
+    """Materialize a previously validated truncation plan."""
+    if not isinstance(plan, TruncationPlan):
+        raise TypeError("plan must be a TruncationPlan")
+    destination = create_session(
+        kind="main",
+        chat_key=plan.chat_key,
+        parent_session_id=plan.source_session_id,
+        model_target=plan.model_target,
+        session_id=destination_session_id,
+    )
+    copied = 0
+    try:
+        if plan.checkpoint is not None:
+            checkpoint = plan.checkpoint
+            anchors = checkpoint.get("anchors")
+            safe_anchors = [
+                {"item": copy.deepcopy(anchor["item"])}
+                for anchor in anchors or ()
+                if isinstance(anchor, dict)
+                and isinstance(anchor.get("item"), dict)
+            ]
+            append_checkpoint(
+                destination,
+                summary=str(checkpoint.get("summary") or ""),
+                through_seq=1,
+                reason=(
+                    str(checkpoint["reason"])
+                    if checkpoint.get("reason") is not None
+                    else None
+                ),
+                anchors=safe_anchors or None,
+            )
+        elif plan.reset_through:
+            append_meta(destination, "model_context_reset", {"through_seq": 1})
+        for event in plan.items:
+            copied_event = {
+                "type": "item",
+                "source": event.get("source"),
+                "item": copy.deepcopy(event["item"]),
+            }
+            for key in ("data", "origin"):
+                if key in event:
+                    copied_event[key] = copy.deepcopy(event[key])
+            append_event(destination, copied_event)
+            copied += 1
+    except Exception:
+        try:
+            end_session(destination, reason="fork_failed")
+        except Exception as cleanup_exc:
+            raise TruncationCleanupError(
+                "fork failed and destination could not be archived"
+            ) from cleanup_exc
+        raise
+    return destination, copied
+
+
+def fork_session_before_last_user_turns(
+    source_session_id: str,
+    *,
+    turns: int,
+    chat_key: str,
+    model_target: dict[str, str],
+) -> tuple[str, int]:
+    """Plan and materialize a truncation using a generated destination ID."""
+    plan = plan_session_truncation(
+        source_session_id,
+        turns=turns,
+        chat_key=chat_key,
+        model_target=model_target,
+    )
+    return materialize_session_truncation(plan, new_session_id())
 
 
 def session_contains_text(session_id: str, query: str) -> bool:

@@ -30,6 +30,7 @@ COMMANDS: tuple[tuple[str, str], ...] = (
     ("status", "Show status"),
     ("stop", "Abort current run"),
     ("compact", "Compact context"),
+    ("truncate", "Remove recent user turns"),
     ("model", "List/switch model"),
     ("models", "List models from provider"),
     ("approval", "Toggle tool approval"),

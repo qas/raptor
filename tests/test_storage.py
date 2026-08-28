@@ -4,7 +4,13 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from storage import FileTooLargeError, read_bytes_bounded, write_text_atomic
+import storage
+from storage import (
+    FileTooLargeError,
+    read_bytes_bounded,
+    write_bytes_exclusive_atomic,
+    write_text_atomic,
+)
 
 
 class BoundedReadTests(unittest.TestCase):
@@ -25,6 +31,28 @@ class BoundedReadTests(unittest.TestCase):
 
 
 class AtomicWriteTests(unittest.TestCase):
+    def test_exclusive_write_does_not_replace_existing_file(self) -> None:
+        root = Path(tempfile.mkdtemp(prefix="raptor-storage-"))
+        path = root / "session.jsonl"
+        write_bytes_exclusive_atomic(path, b"first", mode=0o600)
+
+        with self.assertRaises(FileExistsError):
+            write_bytes_exclusive_atomic(path, b"second", mode=0o600)
+
+        self.assertEqual(path.read_bytes(), b"first")
+        self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+
+    def test_exclusive_write_failure_publishes_no_partial_target(self) -> None:
+        root = Path(tempfile.mkdtemp(prefix="raptor-storage-"))
+        path = root / "session.jsonl"
+
+        with patch.object(storage.os, "link", side_effect=OSError("disk")):
+            with self.assertRaisesRegex(OSError, "disk"):
+                write_bytes_exclusive_atomic(path, b"partial")
+
+        self.assertFalse(path.exists())
+        self.assertEqual(list(root.iterdir()), [])
+
     def test_replaces_content_and_applies_mode(self) -> None:
         root = Path(tempfile.mkdtemp(prefix="raptor-storage-"))
         path = root / "state.json"

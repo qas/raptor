@@ -5,7 +5,7 @@ a = Analysis(
     ["raptor.py"],
     pathex=[],
     binaries=[],
-    datas=collect_data_files("certifi"),
+    datas=collect_data_files("certifi") + [("pyproject.toml", ".")],
     hiddenimports=[
         "telegram",
         "responses_provider",

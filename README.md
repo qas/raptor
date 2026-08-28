@@ -56,6 +56,10 @@ curl -fsSL \
 ```
 
 `raptor` uses the current directory as `AGENT_WORKDIR` unless configured.
+On first startup, Raptor creates missing `AGENTS.md` and `MEMORY.md` templates
+in that workspace without replacing existing files. Their bounded UTF-8
+contents become persistent instructions and context for the main agent and
+subagents for the lifetime of the process; restart Raptor after editing them.
 
 Create `.raptor/config.toml` in the workspace:
 
@@ -101,11 +105,15 @@ assistant turn remains durable in the conversation transcript.
 Process commands:
 
 ```bash
+raptor --version
 raptor --status
 raptor --check-proxy
 raptor --stop-daemon
 raptor --daemon
 ```
+
+`raptor --version` prints the version from `pyproject.toml` and exits before
+acquiring the runtime lock or initializing the application.
 
 Raptor uses an atomic process-lifetime lock. A second instance cannot start
 against the same `RAPTOR_HOME`. Status and stop commands use that lock's owner
@@ -128,6 +136,7 @@ the daemon (the launch workspace's `.raptor` directory by default).
 | `/stop` | Interrupt the current root turn; background work continues |
 | `/stop all` | Interrupt and cancel background work in the current main chat |
 | `/compact` | Create a durable context checkpoint |
+| `/truncate <n>` | Fork history before the last `n` user turns |
 | `/models [provider]` | List models served by a configured provider |
 | `/model` | Show the current model target and configured providers |
 | `/model <provider> <model>` | Start a fresh chat session on that target |
@@ -147,6 +156,26 @@ the parent unchanged. Merging copies only post-fork user, assistant,
 function-call, and function-result items. Filesystem, network, and other tool
 side effects are not reversible.
 
+`/truncate <n>` creates a new main transcript from the active history before
+the last `n` user turns, archives the old transcript with reason
+`history_truncated`, and switches only the current session. Model target,
+goals, todos, approvals, subagent records, and interrupted state are retained.
+Turn starts are direct user messages and user messages merged from a thread;
+steering, runtime, goal, and internal inputs are not counted. Eligible
+checkpoint/reset state before the cutoff is preserved without expanding the
+retired raw prefix. Only user turns in the active native tail can be removed;
+Raptor rejects a request that would cross the effective checkpoint/reset
+boundary and reports how many active turns are available. The complete raw
+history remains in the old full archive.
+The operation is rejected during an active thread, a session transition, or
+while a response for the current session is awaiting delivery. Invalid,
+oversized, or failed storage operations leave the current session unchanged.
+Raptor durably records a preparing transition before creating the candidate
+transcript; restart recovery aborts partial candidates or finishes committed
+switches deterministically.
+Transcript truncation does not undo files or tool side effects; the old
+transcript remains available as audit history.
+
 ## Architecture
 
 | Path | Responsibility |
@@ -156,6 +185,7 @@ side effects are not reversible.
 | `install.sh` | Unix installer and uninstaller for published Linux and macOS binaries |
 | `raptor.py` | Ownership-first process entry point and CLI |
 | `application.py` | Long-running provider and agent application lifecycle |
+| `workspace_identity.py` | Workspace identity bootstrap and bounded loading |
 | `process_lock.py` | State-independent atomic process ownership |
 | `runtime.py` | Process metadata and daemon controls |
 | `runtime_paths.py` | Dependency-free runtime filesystem locations |
@@ -289,13 +319,14 @@ compaction or delay its result.
 
 The background-subagent limit is process-wide. Providers may project safe,
 bounded activity without receiving the child's transcript or tool payloads. In
-a Telegram forum, Raptor creates a persistent `Subagent: <id>` topic. The
-delegated task, public reasoning summary, streamed reply, and final assistant
-message appear as ordinary messages without exposing the child's transcript or
-tool payloads. Raptor removes user input from that topic because the parent owns
-steering. The topic remains open across completed runs and is reused when the
-same subagent is continued. Deleting a stopped subagent removes its topic and
-durable runtime record.
+a Telegram forum, Raptor creates a persistent `Subagent: <id>` topic for both
+foreground and background children; scheduling mode does not change their
+visible activity surface. The delegated task, public reasoning summary,
+streamed reply, and final assistant message appear as ordinary messages without
+exposing the child's transcript or tool payloads. Raptor removes user input
+from that topic because the parent owns steering. The topic remains open across
+completed runs and is reused when the same subagent is continued. Deleting a
+stopped subagent removes its topic and durable runtime record.
 
 ### Telegram chats and forums
 

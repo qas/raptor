@@ -518,6 +518,451 @@ class ChatStoreTests(unittest.TestCase):
             rendered,
         )
 
+    def test_fork_copies_items_before_last_turn_with_tool_items(self) -> None:
+        source = chat_store.create_session(
+            model_target=TEST_MODEL_TARGET,
+            kind="main",
+            chat_key="local",
+        )
+        for item, item_source in (
+            ({"role": "user", "content": "one"}, "user"),
+            ({"type": "function_call", "call_id": "c1"}, "assistant"),
+            ({"type": "function_call_output", "call_id": "c1"}, "tool"),
+            ({"role": "assistant", "content": "done"}, "assistant"),
+            ({"role": "user", "content": "two"}, "user"),
+        ):
+            chat_store.append_item(source, item, source=item_source)
+
+        forked, copied = chat_store.fork_session_before_last_user_turns(
+            source,
+            turns=1,
+            chat_key="local",
+            model_target=TEST_MODEL_TARGET,
+        )
+
+        self.assertEqual(copied, 4)
+        self.assertEqual(
+            [event["item"] for event in chat_store.item_events(forked)],
+            [event["item"] for event in chat_store.item_events(source)[:4]],
+        )
+        self.assertEqual(chat_store.session_chat_key(forked), "local")
+        self.assertEqual(
+            chat_store.session_summary(forked)["model_target"],
+            TEST_MODEL_TARGET,
+        )
+
+    def test_fork_remaps_checkpoint_before_active_cutoff(self) -> None:
+        source = chat_store.create_session(
+            model_target=TEST_MODEL_TARGET,
+            kind="main",
+            chat_key="local",
+        )
+        first = chat_store.append_item(
+            source,
+            {"role": "user", "content": "first"},
+            source="user",
+        )
+        chat_store.append_item(
+            source,
+            {"role": "assistant", "content": "answer"},
+            source="assistant",
+        )
+        chat_store.append_checkpoint(
+            source,
+            summary="stale summary",
+            through_seq=int(first["seq"]) + 1,
+        )
+        chat_store.append_item(
+            source,
+            {"role": "user", "content": "last"},
+            source="user",
+        )
+        forked, _ = chat_store.fork_session_before_last_user_turns(
+            source,
+            turns=1,
+            chat_key="local",
+            model_target=TEST_MODEL_TARGET,
+        )
+
+        self.assertEqual(
+            chat_store.latest_checkpoint(forked)["summary"],
+            "stale summary",
+        )
+        self.assertEqual(chat_store.latest_checkpoint(forked)["through_seq"], 1)
+        self.assertEqual(len(chat_store.item_events(forked)), 0)
+        self.assertEqual(chat_store.read_events(forked)[-1]["type"], "checkpoint")
+
+    def test_fork_keeps_late_checkpoint_that_precedes_active_cutoff(self) -> None:
+        source = chat_store.create_session(
+            model_target=TEST_MODEL_TARGET,
+            kind="main",
+            chat_key="local",
+        )
+        retired = chat_store.append_item(
+            source,
+            {"role": "user", "content": "retired"},
+            source="user",
+        )
+        chat_store.append_item(
+            source,
+            {"role": "user", "content": "retained active turn"},
+            source="user",
+        )
+        chat_store.append_checkpoint(
+            source,
+            summary="retired prefix only",
+            through_seq=int(retired["seq"]),
+        )
+        chat_store.append_item(
+            source,
+            {"role": "user", "content": "final turn"},
+            source="user",
+        )
+
+        forked, _ = chat_store.fork_session_before_last_user_turns(
+            source,
+            turns=2,
+            chat_key="local",
+            model_target=TEST_MODEL_TARGET,
+        )
+
+        self.assertEqual(chat_store.item_events(forked), [])
+        self.assertEqual(
+            chat_store.active_projection(forked).checkpoint["summary"],
+            "retired prefix only",
+        )
+
+    def test_fork_keeps_context_reset_boundary_effective(self) -> None:
+        source = chat_store.create_session(
+            model_target=TEST_MODEL_TARGET,
+            kind="main",
+            chat_key="local",
+        )
+        retired = chat_store.append_item(
+            source,
+            {"role": "user", "content": "retired"},
+            source="user",
+        )
+        chat_store.reset_model_context(
+            source,
+            through_seq=int(retired["seq"]),
+        )
+        chat_store.append_item(
+            source,
+            {"role": "user", "content": "current"},
+            source="user",
+        )
+        chat_store.append_item(
+            source,
+            {"role": "user", "content": "last"},
+            source="user",
+        )
+
+        forked, _ = chat_store.fork_session_before_last_user_turns(
+            source,
+            turns=1,
+            chat_key="local",
+            model_target=TEST_MODEL_TARGET,
+        )
+
+        self.assertEqual(
+            [
+                event["item"]["content"]
+                for event in chat_store.item_events(forked)
+            ],
+            ["current"],
+        )
+        self.assertEqual(
+            chat_store.active_item_events(forked)[0]["item"]["content"],
+            "current",
+        )
+
+    def test_repeated_fork_cannot_cross_checkpoint_boundary(self) -> None:
+        source = chat_store.create_session(
+            model_target=TEST_MODEL_TARGET,
+            kind="main",
+            chat_key="local",
+        )
+        retired = chat_store.append_item(
+            source,
+            {"role": "user", "content": "retired"},
+            source="user",
+        )
+        chat_store.append_checkpoint(
+            source,
+            summary="bounded summary",
+            through_seq=int(retired["seq"]),
+        )
+        for text, role in (
+            ("active one", "user"),
+            ("answer", "assistant"),
+            ("active two", "user"),
+        ):
+            chat_store.append_item(
+                source,
+                {"role": role, "content": text},
+                source=role,
+            )
+
+        first, _ = chat_store.fork_session_before_last_user_turns(
+            source,
+            turns=1,
+            chat_key="local",
+            model_target=TEST_MODEL_TARGET,
+        )
+        second, _ = chat_store.fork_session_before_last_user_turns(
+            first,
+            turns=1,
+            chat_key="local",
+            model_target=TEST_MODEL_TARGET,
+        )
+
+        self.assertEqual(chat_store.item_events(second), [])
+        self.assertEqual(
+            chat_store.active_projection(second).checkpoint["summary"],
+            "bounded summary",
+        )
+        sessions_before = {row["session_id"] for row in chat_store.list_sessions()}
+        with self.assertRaisesRegex(ValueError, "0 active user turn"):
+            chat_store.fork_session_before_last_user_turns(
+                second,
+                turns=1,
+                chat_key="local",
+                model_target=TEST_MODEL_TARGET,
+            )
+        self.assertEqual(
+            sessions_before,
+            {row["session_id"] for row in chat_store.list_sessions()},
+        )
+
+    def test_fork_rejects_too_many_turns_without_mutation_or_destination(
+        self,
+    ) -> None:
+        source = chat_store.create_session(
+            model_target=TEST_MODEL_TARGET,
+            kind="main",
+            chat_key="local",
+        )
+        chat_store.append_item(
+            source,
+            {"role": "user", "content": "only"},
+            source="user",
+        )
+        before = chat_store.chat_path(source).read_text(encoding="utf-8")
+        sessions_before = {row["session_id"] for row in chat_store.list_sessions()}
+
+        with self.assertRaises(ValueError):
+            chat_store.fork_session_before_last_user_turns(
+                source,
+                turns=2,
+                chat_key="local",
+                model_target=TEST_MODEL_TARGET,
+            )
+
+        self.assertEqual(
+            chat_store.chat_path(source).read_text(encoding="utf-8"),
+            before,
+        )
+        sessions_after = {row["session_id"] for row in chat_store.list_sessions()}
+        self.assertEqual(sessions_after, sessions_before)
+
+    def test_fork_counts_thread_merge_users_but_not_steer_or_runtime(self) -> None:
+        source = chat_store.create_session(
+            model_target=TEST_MODEL_TARGET,
+            kind="main",
+            chat_key="local",
+        )
+        chat_store.append_item(
+            source,
+            {"role": "user", "content": "base"},
+            source="user",
+        )
+        chat_store.append_item(
+            source,
+            {"role": "user", "content": "steering"},
+            source="steer",
+            data={"steer_id": "s1"},
+        )
+        chat_store.append_item(
+            source,
+            {"role": "user", "content": "runtime"},
+            source="runtime",
+        )
+        chat_store.append_event(
+            source,
+            {
+                "type": "item",
+                "source": "thread_merge",
+                "origin": {"source": "user"},
+                "item": {"role": "user", "content": "merged"},
+            },
+        )
+        chat_store.append_item(
+            source,
+            {"role": "assistant", "content": "answer"},
+            source="assistant",
+        )
+
+        forked, copied = chat_store.fork_session_before_last_user_turns(
+            source,
+            turns=1,
+            chat_key="local",
+            model_target=TEST_MODEL_TARGET,
+        )
+
+        self.assertEqual(copied, 3)
+        self.assertEqual(
+            [event["item"]["content"] for event in chat_store.item_events(forked)],
+            ["base", "steering", "runtime"],
+        )
+
+    def test_fork_preserves_and_copies_item_metadata(self) -> None:
+        source = chat_store.create_session(
+            model_target=TEST_MODEL_TARGET,
+            kind="main",
+            chat_key="local",
+        )
+        item = {"role": "assistant", "content": [{"text": "old"}]}
+        metadata = {"nested": ["value"]}
+        event = chat_store.append_event(
+            source,
+            {
+                "type": "item",
+                "source": "thread_merge",
+                "origin": {"session_id": "branch", "seq": 8},
+                "data": metadata,
+                "item": item,
+            },
+        )
+        chat_store.append_item(
+            source,
+            {"role": "user", "content": "last"},
+            source="user",
+        )
+
+        forked, _ = chat_store.fork_session_before_last_user_turns(
+            source,
+            turns=1,
+            chat_key="local",
+            model_target=TEST_MODEL_TARGET,
+        )
+
+        copied = chat_store.item_events(forked)[0]
+        self.assertEqual(copied["data"], event["data"])
+        self.assertEqual(copied["origin"], event["origin"])
+        self.assertIsNot(copied["data"], metadata)
+        self.assertIsNot(copied["item"], item)
+        metadata["nested"].append("mutated")
+        item["content"][0]["text"] = "mutated"
+        self.assertEqual(copied["data"], {"nested": ["value"]})
+        self.assertEqual(copied["item"]["content"][0]["text"], "old")
+
+    def test_fork_write_failure_archives_destination_and_keeps_source(self) -> None:
+        source = chat_store.create_session(
+            model_target=TEST_MODEL_TARGET,
+            kind="main",
+            chat_key="local",
+        )
+        chat_store.append_item(
+            source,
+            {"role": "user", "content": "first"},
+            source="user",
+        )
+        chat_store.append_item(
+            source,
+            {"role": "user", "content": "last"},
+            source="user",
+        )
+        before = chat_store.chat_path(source).read_text(encoding="utf-8")
+        original_append = chat_store.append_event
+        calls = {"count": 0}
+
+        def fail_copy(session_id, event, **kwargs):
+            calls["count"] += 1
+            if calls["count"] == 1:
+                raise OSError("simulated copy failure")
+            return original_append(session_id, event, **kwargs)
+
+        with patch.object(chat_store, "append_event", fail_copy):
+            with self.assertRaises(OSError):
+                chat_store.fork_session_before_last_user_turns(
+                    source,
+                    turns=1,
+                    chat_key="local",
+                    model_target=TEST_MODEL_TARGET,
+                )
+
+        self.assertEqual(
+            chat_store.chat_path(source).read_text(encoding="utf-8"),
+            before,
+        )
+        archived = [
+            row
+            for row in chat_store.list_sessions()
+            if row["session_id"] != source
+        ]
+        self.assertEqual(len(archived), 1)
+        self.assertTrue(chat_store.session_is_ended(archived[0]["session_id"]))
+
+    def test_fork_rejects_invalid_source_and_turn_values_before_creation(self) -> None:
+        source = chat_store.create_session(
+            model_target=TEST_MODEL_TARGET,
+            kind="main",
+            chat_key="local",
+        )
+        chat_store.append_item(
+            source,
+            {"role": "user", "content": "request"},
+            source="user",
+        )
+        cases = (
+            (True, "local", TEST_MODEL_TARGET),
+            ("1", "local", TEST_MODEL_TARGET),
+            (1, "other", TEST_MODEL_TARGET),
+            (1, "local", {"provider_id": "other", "model": "m"}),
+        )
+        for turns, owner, target in cases:
+            with self.subTest(turns=turns, owner=owner, target=target):
+                before = {row["session_id"] for row in chat_store.list_sessions()}
+                with self.assertRaises(ValueError):
+                    chat_store.fork_session_before_last_user_turns(
+                        source,
+                        turns=turns,
+                        chat_key=owner,
+                        model_target=target,
+                    )
+                self.assertEqual(
+                    before,
+                    {row["session_id"] for row in chat_store.list_sessions()},
+                )
+
+    def test_fork_rejects_ended_source_and_no_user_history(self) -> None:
+        ended = chat_store.create_session(
+            model_target=TEST_MODEL_TARGET,
+            kind="main",
+            chat_key="local",
+        )
+        chat_store.append_item(
+            ended,
+            {"role": "assistant", "content": "orphan"},
+            source="assistant",
+        )
+        chat_store.end_session(ended, reason="test")
+        empty = chat_store.create_session(
+            model_target=TEST_MODEL_TARGET,
+            kind="main",
+            chat_key="local",
+        )
+        for session_id in (ended, empty):
+            with self.subTest(session_id=session_id):
+                with self.assertRaises(ValueError):
+                    chat_store.fork_session_before_last_user_turns(
+                        session_id,
+                        turns=1,
+                        chat_key="local",
+                        model_target=TEST_MODEL_TARGET,
+                    )
+
 
 if __name__ == "__main__":
     unittest.main()

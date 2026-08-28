@@ -246,7 +246,11 @@ def _snapshot(
 
 async def open_subagent_activity(record: dict[str, Any]) -> None:
     """Open a best-effort activity surface for a subagent."""
-    provider = get_chat_provider()
+    try:
+        provider = get_chat_provider()
+    except Exception as exc:
+        log_exception("activity", "surface_provider_error", exc)
+        return
     if not isinstance(provider, ActivitySurfaceProvider):
         return
     snapshot = _snapshot(record, detail="Starting")

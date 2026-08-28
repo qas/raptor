@@ -1441,7 +1441,7 @@ async def subagent_tool(
             bool(item.get("activity_surface_id"))
             for item in session.subagent_records.values()
         )
-        if background and open_surfaces >= MAX_SUBAGENT_RECORDS:
+        if open_surfaces >= MAX_SUBAGENT_RECORDS:
             return {
                 "ok": False,
                 "status": "capacity_reached",
@@ -1490,13 +1490,11 @@ async def subagent_tool(
         ),
     )
     generation = max(1, int(record.get("run_generation") or 1))
-    if not background and record.get("activity_surface_id"):
-        await open_subagent_activity(record)
+    await open_subagent_activity(record)
     if background:
         global _background_reservations
         _background_reservations += 1
         try:
-            await open_subagent_activity(record)
             task_handle = asyncio.create_task(
                 run_background_subagent(
                     record

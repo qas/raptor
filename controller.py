@@ -44,7 +44,8 @@ def session_transition_busy() -> bool:
     from subagents import pending_subagent_completions
 
     return bool(
-        turns.is_running()
+        session.current_runtime().state.get("session_transition")
+        or turns.is_running()
         or session.subagent_tasks
         or running_shell_sessions()
         or session.pending_approvals

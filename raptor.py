@@ -23,6 +23,11 @@ def run() -> int:
     )
 
     args = parse_args()
+    if getattr(args, "version", False):
+        from version import VERSION
+
+        print(f"raptor {VERSION}")
+        return 0
     owns_runtime = not (args.status or args.stop_daemon or args.check_proxy)
     if owns_runtime and not acquire_runtime_lock():
         print("Raptor is already running", file=sys.stderr)
@@ -46,6 +51,9 @@ def run() -> int:
         if args.stop_daemon:
             return stop_daemon()
 
+        from workspace_identity import initialize_workspace_identity
+
+        initialize_workspace_identity()
         ready_fd: int | None = None
         if args.daemon:
             ready_fd = daemonize()

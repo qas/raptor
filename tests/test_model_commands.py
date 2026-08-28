@@ -5,6 +5,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 _HOME = Path(tempfile.mkdtemp(prefix="raptor-model-command-tests-"))
@@ -18,6 +19,7 @@ import commands
 import session
 from model_providers import ModelConfiguration, ModelProvider, ModelTarget
 from turn_runtime import turns
+from version import VERSION
 
 
 class ModelCommandTests(unittest.IsolatedAsyncioTestCase):
@@ -86,6 +88,26 @@ class ModelCommandTests(unittest.IsolatedAsyncioTestCase):
         session.state["current_session_id"] = self.session_id
         turns.finish()
         session.subagent_tasks.clear()
+
+    async def test_status_reports_runtime_version(self) -> None:
+        send = AsyncMock()
+        with (
+            patch.object(commands, "send", send),
+            patch.object(
+                commands,
+                "get_chat_provider",
+                return_value=SimpleNamespace(name="test"),
+            ),
+            patch.object(
+                commands,
+                "list_models",
+                AsyncMock(return_value=["alpha-model"]),
+            ),
+        ):
+            handled = await commands.command(1, "/status")
+
+        self.assertTrue(handled)
+        self.assertIn(f"version: {VERSION}\n", send.await_args.args[1])
 
     async def test_models_lists_the_requested_provider(self) -> None:
         send = AsyncMock()
