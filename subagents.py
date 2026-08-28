@@ -66,6 +66,7 @@ from session import (
 from skills import skill_catalog_instructions
 
 _background_reservations = 0
+_SUBAGENT_ROSTER_TEXT_CHARS = 160
 
 
 def _background_subagent_count() -> int:
@@ -932,6 +933,74 @@ def subagent_summaries() -> list[
     return rows
 
 
+def _roster_text(value: Any, limit: int = _SUBAGENT_ROSTER_TEXT_CHARS) -> str:
+    text = " ".join(str(value or "").split())
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 1)] + "…"
+
+
+def _compact_subagent_summary(record: dict[str, Any]) -> dict[str, Any]:
+    target = record.get("model_target")
+    compact_target = (
+        {
+            "provider_id": _roster_text(target.get("provider_id"), 80),
+            "model": _roster_text(target.get("model"), 120),
+        }
+        if isinstance(target, dict)
+        else None
+    )
+    return {
+        "id": _roster_text(record.get("id"), 80),
+        "status": _roster_text(record.get("status"), 32),
+        "task_preview": _roster_text(
+            record.get("last_task") or record.get("task")
+        ),
+        "depth": record.get("depth"),
+        "model_target": compact_target,
+        "background": bool(record.get("background")),
+        "completion_pending": bool(record.get("completion_pending")),
+    }
+
+
+def _subagent_roster_priority(record: dict[str, Any]) -> int:
+    if record.get("status") == "running":
+        return 0
+    if record.get("completion_pending"):
+        return 1
+    return 2
+
+
+def subagent_roster() -> dict[str, Any]:
+    """Return authoritative counts and a bounded, running-first roster."""
+    summaries = subagent_summaries()
+    ordered = sorted(summaries, key=_subagent_roster_priority)
+    compact = [_compact_subagent_summary(row) for row in ordered]
+    result: dict[str, Any] = {
+        "ok": True,
+        "total": len(summaries),
+        "running": sum(
+            row.get("status") == "running" for row in summaries
+        ),
+        "pending_results": sum(
+            bool(row.get("completion_pending")) for row in summaries
+        ),
+        "returned": 0,
+        "omitted": 0,
+        "truncated": False,
+        "subagents": compact,
+    }
+    while True:
+        result["returned"] = len(result["subagents"])
+        result["omitted"] = len(summaries) - result["returned"]
+        result["truncated"] = bool(result["omitted"])
+        if len(json.dumps(result, ensure_ascii=False)) <= MAX_TOOL_OUTPUT:
+            return result
+        if not result["subagents"]:
+            raise RuntimeError("subagent roster metadata exceeds MAX_TOOL_OUTPUT")
+        result["subagents"].pop()
+
+
 def subagent_status(record: dict[str, Any]) -> dict[str, Any]:
     """Project stable public state without exposing a child's private context."""
     return {
@@ -1233,11 +1302,7 @@ async def subagent_tool(
                 "ok": True,
                 "subagent": subagent_status(record),
             }
-        return {
-            "ok": True,
-            "subagents":
-                subagent_summaries(),
-        }
+        return subagent_roster()
     if requested_id and (requested_provider or requested_model):
         return {
             "ok": False,

@@ -1,4 +1,5 @@
 import asyncio
+import json
 import os
 import sys
 import tempfile
@@ -325,6 +326,83 @@ class BackgroundSubagentTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("pending_inputs", projected)
         self.assertNotIn("todos", projected)
         self.assertNotIn("recovery_context", projected)
+
+    async def test_list_returns_bounded_roster_with_authoritative_counts(
+        self,
+    ) -> None:
+        for index in range(40):
+            agent_id = f"completed-{index}"
+            session.subagent_records[agent_id] = {
+                "id": agent_id,
+                "status": "completed",
+                "task": "large task " + ("x" * 2000),
+                "background": True,
+                "model_target": self.target.to_dict(),
+                "completion_pending": index < 3,
+            }
+        session.subagent_records["running-last"] = {
+            "id": "running-last",
+            "status": "running",
+            "task": "inspect the live worker roster",
+            "background": True,
+            "model_target": self.target.to_dict(),
+            "completion_pending": False,
+        }
+
+        with patch.object(subagents, "MAX_TOOL_OUTPUT", 2000):
+            result = await subagents.subagent_tool(
+                {},
+                chat_id="telegram:123",
+                execution_context={"depth": 0},
+            )
+
+        self.assertLessEqual(len(json.dumps(result, ensure_ascii=False)), 2000)
+        self.assertEqual(result["total"], 41)
+        self.assertEqual(result["running"], 1)
+        self.assertEqual(result["pending_results"], 3)
+        self.assertTrue(result["truncated"])
+        self.assertEqual(result["omitted"], 41 - result["returned"])
+        self.assertEqual(result["subagents"][0]["id"], "running-last")
+        self.assertLessEqual(
+            len(result["subagents"][0]["task_preview"]),
+            subagents._SUBAGENT_ROSTER_TEXT_CHARS,
+        )
+
+    async def test_list_compacts_large_tasks_without_generic_truncation(
+        self,
+    ) -> None:
+        for index, status in enumerate(("running", "completed")):
+            agent_id = f"worker-{index}"
+            session.subagent_records[agent_id] = {
+                "id": agent_id,
+                "status": status,
+                "task": "x" * subagents.MAX_TOOL_OUTPUT,
+                "background": True,
+                "model_target": self.target.to_dict(),
+                "completion_pending": False,
+            }
+
+        legacy_result = {
+            "ok": True,
+            "subagents": subagents.subagent_summaries(),
+        }
+        self.assertGreater(
+            len(json.dumps(legacy_result, ensure_ascii=False)),
+            subagents.MAX_TOOL_OUTPUT,
+        )
+
+        result = await subagents.subagent_tool(
+            {},
+            chat_id="telegram:123",
+            execution_context={"depth": 0},
+        )
+
+        encoded = json.dumps(result, ensure_ascii=False)
+        self.assertLessEqual(len(encoded), subagents.MAX_TOOL_OUTPUT)
+        self.assertEqual(result["total"], 2)
+        self.assertEqual(result["returned"], 2)
+        self.assertFalse(result["truncated"])
+        self.assertTrue(result["subagents"][0]["task_preview"].endswith("…"))
 
     async def test_targeted_cancel_stops_one_background_subagent(self) -> None:
         started = asyncio.Event()

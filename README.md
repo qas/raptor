@@ -329,6 +329,13 @@ never projected into the parent. A subagent compacts lazily when its next
 model request needs room, so finishing a child does not trigger speculative
 compaction or delay its result.
 
+Calling the agent's `subagent` tool without arguments returns a bounded,
+running-first roster with authoritative total, running, and pending-result
+counts. Large task text is reduced to a preview; query a specific agent ID for
+its detailed public status and final result. If retained history cannot fit in one
+tool result, the response reports how many records were returned and omitted
+instead of falling through to generic head/tail output truncation.
+
 The background-subagent limit is process-wide. Providers may project safe,
 bounded activity without receiving the child's transcript or tool payloads. In
 a Telegram forum, Raptor creates a persistent `Subagent: <id>` topic for both
