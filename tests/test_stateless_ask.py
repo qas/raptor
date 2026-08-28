@@ -71,11 +71,17 @@ class StatelessAskTests(unittest.IsolatedAsyncioTestCase):
 
     def test_payload_has_one_user_message_and_tools(self) -> None:
         tools = [{"type": "function", "name": "read_file"}]
-        payload = responses.build_stateless_response_payload(
-            [{"role": "user", "content": "side question"}],
-            "model-a",
-            tools=tools,
-        )
+        with patch.object(
+            responses,
+            "instructions",
+            return_value="canonical identity\n\nskill catalog",
+        ) as build_instructions:
+            payload = responses.build_stateless_response_payload(
+                [{"role": "user", "content": "side question"}],
+                "model-a",
+                tools=tools,
+                extra_instructions="skill catalog",
+            )
         self.assertEqual(
             payload,
             {
@@ -83,12 +89,13 @@ class StatelessAskTests(unittest.IsolatedAsyncioTestCase):
                 "input": [
                     {"role": "user", "content": "side question"}
                 ],
+                "instructions": "canonical identity\n\nskill catalog",
                 "stream": False,
                 "tools": tools,
                 "parallel_tool_calls": False,
             },
         )
-        self.assertNotIn("instructions", payload)
+        build_instructions.assert_called_once_with("skill catalog")
 
     async def test_request_does_not_mutate_session_state(self) -> None:
         client = _Client()
@@ -105,6 +112,7 @@ class StatelessAskTests(unittest.IsolatedAsyncioTestCase):
             client.payload["input"],
             [{"role": "user", "content": "side question"}],
         )
+        self.assertIn("instructions", client.payload)
 
     async def test_command_returns_answer_without_transcript_writes(
         self,
@@ -128,6 +136,11 @@ class StatelessAskTests(unittest.IsolatedAsyncioTestCase):
                 AsyncMock(return_value=reply),
             ) as create,
             patch.object(commands, "send", send),
+            patch.object(
+                commands,
+                "skill_catalog_instructions",
+                AsyncMock(return_value="skill catalog"),
+            ),
             patch.object(commands, "capture_delivery_context", return_value=None),
             patch.object(
                 commands,
@@ -143,7 +156,8 @@ class StatelessAskTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(handled)
         create.assert_awaited_once_with(
             ModelTarget("local", "model-a"),
-            [{"role": "user", "content": "side question"}]
+            [{"role": "user", "content": "side question"}],
+            extra_instructions="skill catalog",
         )
         send.assert_awaited_once_with(1, "isolated answer")
         self.assertEqual(chat_store.read_events(session_id), before_events)
@@ -174,6 +188,11 @@ class StatelessAskTests(unittest.IsolatedAsyncioTestCase):
             patch.object(commands, "stateless_response", create),
             patch.object(commands, "execute_tool_with_approval", execute),
             patch.object(commands, "send", send),
+            patch.object(
+                commands,
+                "skill_catalog_instructions",
+                AsyncMock(return_value="skill catalog"),
+            ),
             patch.object(commands, "capture_delivery_context", return_value=None),
             patch.object(
                 commands,
@@ -192,6 +211,10 @@ class StatelessAskTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(second_work[0]["content"], "inspect the readme")
         self.assertEqual(second_work[1], call)
         self.assertEqual(second_work[2]["type"], "function_call_output")
+        self.assertEqual(
+            [call.kwargs["extra_instructions"] for call in create.await_args_list],
+            ["skill catalog", "skill catalog"],
+        )
         send.assert_awaited_once_with(1, "tool-backed answer")
         self.assertEqual(chat_store.read_events(session_id), before_events)
 
@@ -199,7 +222,8 @@ class StatelessAskTests(unittest.IsolatedAsyncioTestCase):
         started = asyncio.Event()
         release = asyncio.Event()
 
-        async def respond(_target, _work):
+        async def respond(_target, _work, *, extra_instructions=""):
+            self.assertEqual(extra_instructions, "skill catalog")
             started.set()
             await release.wait()
             return {
@@ -212,6 +236,11 @@ class StatelessAskTests(unittest.IsolatedAsyncioTestCase):
         with (
             patch.object(commands, "stateless_response", respond),
             patch.object(commands, "send", AsyncMock()),
+            patch.object(
+                commands,
+                "skill_catalog_instructions",
+                AsyncMock(return_value="skill catalog"),
+            ),
             patch.object(commands, "capture_delivery_context", return_value=None),
             patch.object(
                 commands,

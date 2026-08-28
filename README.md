@@ -151,11 +151,12 @@ the daemon (the launch workspace's `.raptor` directory by default).
 | `/goal` | Inspect or manage the persistent goal |
 | `/help` | Show available commands |
 
-`/ask` has no prior conversation, goal, or base instructions. It may use normal
-tools for multiple in-memory rounds, but neither its model exchange nor answer
-is added to the canonical transcript. Tool side effects remain real. The query
-runs as the chat's owned turn, so provider polling stays responsive and `/stop`
-can cancel it.
+`/ask` has no prior conversation or active-goal context, but it uses the same
+base instructions, workspace `AGENTS.md`/`MEMORY.md`, and discovered skill
+catalog as a normal agent turn. It may use normal tools for multiple in-memory
+rounds, but neither its model exchange nor answer is added to the canonical
+transcript. Tool side effects remain real. The query runs as the chat's owned
+turn, so provider polling stays responsive and `/stop` can cancel it.
 
 `/thread` creates a separate crash-safe transcript. Clearing a thread restores
 the parent unchanged. Merging copies only post-fork user, assistant,

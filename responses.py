@@ -527,13 +527,15 @@ def build_stateless_response_payload(
     model: str,
     *,
     tools: list[dict[str, Any]] | None = TOOLS,
+    extra_instructions: str = "",
     reasoning_effort: str | None = None,
 ) -> dict[str, Any]:
-    """Build an instruction-free request for the in-memory ``/ask`` loop."""
+    """Build an identity-aware request for the in-memory ``/ask`` loop."""
     validate_chronological_input(input_items)
     payload: dict[str, Any] = {
         "model": model,
         "input": input_items,
+        "instructions": instructions(extra_instructions),
         "stream": False,
     }
     if tools:
@@ -549,8 +551,9 @@ def build_stateless_response_payload(
 async def _stateless_response_once(
     target: ModelTarget,
     input_items: list[dict[str, Any]],
+    extra_instructions: str = "",
 ) -> dict[str, Any]:
-    """Call the selected model without instructions or durable history."""
+    """Call the selected model without durable conversation history."""
     target = await ensure_target(target)
     provider = model_provider(target)
     settings = provider.settings_for(target.model)
@@ -560,6 +563,7 @@ async def _stateless_response_once(
         json=build_stateless_response_payload(
             input_items,
             target.model,
+            extra_instructions=extra_instructions,
             reasoning_effort=settings.reasoning_effort,
         ),
         timeout=None,
@@ -575,10 +579,16 @@ async def _stateless_response_once(
 async def stateless_response(
     target: ModelTarget,
     input_items: list[dict[str, Any]],
+    *,
+    extra_instructions: str = "",
 ) -> dict[str, Any]:
     provider = model_provider(target)
     return await retry_transient_response(
-        lambda: _stateless_response_once(target, input_items),
+        lambda: _stateless_response_once(
+            target,
+            input_items,
+            extra_instructions,
+        ),
         operation="Stateless Responses request",
         max_retries=provider.request_max_retries,
         retry_base_seconds=provider.retry_base_seconds,

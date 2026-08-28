@@ -93,6 +93,7 @@ from shell_sessions import (
     pending_shell_completions,
     running_shell_sessions,
 )
+from skills import skill_catalog_instructions
 from steering import cancel_pending_steers
 from threads import (
     finish_thread,
@@ -119,10 +120,15 @@ async def _run_stateless_ask(
         with bound_delivery_context(chat_id, delivery_context):
             try:
                 target = session.current_model_target()
+                ask_instructions = await skill_catalog_instructions()
                 work: list[dict] = [{"role": "user", "content": prompt}]
                 tool_rounds = 0
                 while True:
-                    response = await stateless_response(target, work)
+                    response = await stateless_response(
+                        target,
+                        work,
+                        extra_instructions=ask_instructions,
+                    )
                     output = response_output(response)
                     calls = response_calls(response)
                     if not calls:
