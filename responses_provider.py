@@ -415,11 +415,11 @@ class ResponsesApiProvider:
             "incomplete_details": None,
         }
 
-    async def send_text(self, conversation_id, text: str) -> None:
+    async def send_text(self, conversation_id, text: str) -> tuple[str, ...]:
         pending = self._conversation_pending(conversation_id)
         if pending is None:
             self._store_inbox_message(conversation_id, str(text))
-            return
+            return ()
         response = self._response(pending, str(text))
         if pending.completed is not None and not pending.completed.done():
             pending.completed.set_result(response)
@@ -452,6 +452,7 @@ class ResponsesApiProvider:
                 "type": "response.completed",
                 "response": response,
             }, terminal=True)
+        return ()
 
     async def send_draft(
         self,

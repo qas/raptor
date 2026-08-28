@@ -126,7 +126,48 @@ async def finish_thread(
             and isinstance((origin := event.get("origin")), dict)
             and str(origin.get("session_id") or "") == branch_id
         }
-        for event in active_item_events(branch_id):
+        existing_parent_user_seqs = {
+            int(origin.get("seq") or 0): int(event.get("seq") or 0)
+            for event in iter_events(parent_id)
+            if event.get("source") == "thread_merge"
+            and isinstance((origin := event.get("origin")), dict)
+            and str(origin.get("session_id") or "") == branch_id
+            and origin.get("source") == "user"
+            and isinstance(event.get("item"), dict)
+            and event["item"].get("role") == "user"
+        }
+        active_events = active_item_events(branch_id)
+        active_by_seq = {
+            int(event.get("seq") or 0): event for event in active_events
+        }
+        first_active_seq = min(active_by_seq, default=0)
+        branch_to_parent_user_seq = existing_parent_user_seqs
+        for event in iter_events(branch_id):
+            event_seq = int(event.get("seq") or 0)
+            if (
+                first_active_seq
+                and event_seq >= first_active_seq
+                and event.get("type") == "meta"
+                and event.get("name") == "chat_delivery"
+                and isinstance(event.get("data"), dict)
+            ):
+                delivery = copy.deepcopy(event["data"])
+                branch_turn_seq = int(delivery.get("user_turn_seq") or 0)
+                parent_turn_seq = branch_to_parent_user_seq.get(
+                    branch_turn_seq
+                )
+                if parent_turn_seq is None:
+                    continue
+                delivery["user_turn_seq"] = parent_turn_seq
+                append_meta(
+                    parent_id,
+                    "chat_delivery",
+                    delivery,
+                )
+                continue
+            if event_seq not in active_by_seq:
+                continue
+            event = active_by_seq[event_seq]
             if event.get("source") == "thread_seed":
                 continue
             item = event.get("item")
@@ -135,19 +176,21 @@ async def finish_thread(
             origin = (branch_id, int(event.get("seq") or 0))
             if origin in existing_origins:
                 continue
-            append_event(
-                parent_id,
-                {
-                    "type": "item",
-                    "source": "thread_merge",
-                    "origin": {
-                        "session_id": origin[0],
-                        "seq": origin[1],
-                        "source": event.get("source"),
-                    },
-                    "item": copy.deepcopy(item),
+            merged_event = {
+                "type": "item",
+                "source": "thread_merge",
+                "origin": {
+                    "session_id": origin[0],
+                    "seq": origin[1],
+                    "source": event.get("source"),
                 },
-            )
+                "item": copy.deepcopy(item),
+            }
+            if isinstance(event.get("data"), dict):
+                merged_event["data"] = copy.deepcopy(event["data"])
+            written = append_event(parent_id, merged_event)
+            if event.get("source") == "user" and item.get("role") == "user":
+                branch_to_parent_user_seq[event_seq] = int(written["seq"])
             existing_origins.add(origin)
             merged += 1
     end_session(

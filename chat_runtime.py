@@ -111,8 +111,44 @@ def detached_delivery_context(
 async def send(
     conversation_id: ConversationId,
     text: str,
-) -> None:
-    await get_chat_provider().send_text(conversation_id, text)
+) -> tuple[int | str, ...]:
+    provider = get_chat_provider()
+    message_ids = await provider.send_text(conversation_id, text)
+    if message_ids is None:
+        # Compatibility with lightweight third-party providers while the
+        # tracked-delivery contract rolls out.
+        return ()
+    tracked = tuple(message_ids)
+    if tracked:
+        try:
+            import session
+            from chat_store import (
+                append_meta,
+                latest_active_user_turn_seq,
+                session_exists,
+            )
+
+            session_id = str(session.state.get("current_session_id") or "")
+            if session_id and session_exists(session_id):
+                user_turn_seq = latest_active_user_turn_seq(session_id)
+                if user_turn_seq is None:
+                    return tracked
+                append_meta(
+                    session_id,
+                    "chat_delivery",
+                    {
+                        "conversation_id": provider.encode_conversation_id(
+                            conversation_id
+                        ),
+                        "message_ids": list(tracked),
+                        "user_turn_seq": user_turn_seq,
+                    },
+                )
+        except Exception:
+            # Delivery already succeeded. A bookkeeping failure must not make
+            # the caller retry and duplicate the visible message.
+            pass
+    return tracked
 
 
 async def send_draft(

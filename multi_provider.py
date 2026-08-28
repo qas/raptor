@@ -269,9 +269,10 @@ class MultiProvider:
         self,
         conversation_id: ConversationId,
         text: str,
-    ) -> None:
+    ) -> tuple[MessageId, ...]:
         provider, raw_id = self._route_conversation(conversation_id)
-        await provider.send_text(raw_id, text)
+        message_ids = await provider.send_text(raw_id, text)
+        return tuple(message_ids or ())
 
     async def send_draft(
         self,

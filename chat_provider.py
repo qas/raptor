@@ -88,7 +88,9 @@ class ChatProvider(Protocol):
         self,
         conversation_id: ConversationId,
         text: str,
-    ) -> None: ...
+    ) -> tuple[MessageId, ...]:
+        """Send text and return every persistent message ID created."""
+        ...
 
     async def send_draft(
         self,

@@ -167,10 +167,16 @@ class ThreadTests(unittest.IsolatedAsyncioTestCase):
     async def test_merge_adds_only_branch_native_items(self) -> None:
         result = await start_thread("!room:example.org")
         branch = str(result["thread"]["session_id"])
-        chat_store.append_item(
+        branch_user = chat_store.append_item(
             branch,
             {"role": "user", "content": "branch question"},
             source="user",
+            data={
+                "chat_message": {
+                    "conversation_id": "fake:room",
+                    "message_id": "$user",
+                }
+            },
         )
         chat_store.append_item(
             branch,
@@ -181,6 +187,15 @@ class ThreadTests(unittest.IsolatedAsyncioTestCase):
                 ],
             },
             source="assistant",
+        )
+        chat_store.append_meta(
+            branch,
+            "chat_delivery",
+            {
+                "conversation_id": "fake:room",
+                "message_ids": ["$agent"],
+                "user_turn_seq": branch_user["seq"],
+            },
         )
 
         merged = await finish_thread(
@@ -199,6 +214,24 @@ class ThreadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             sum(item.get("content") == "before fork" for item in work),
             1,
+        )
+        merged_events = chat_store.read_events(self.parent)
+        merged_user = next(
+            event
+            for event in merged_events
+            if event.get("source") == "thread_merge"
+            and event.get("item", {}).get("role") == "user"
+        )
+        self.assertEqual(
+            merged_user["data"]["chat_message"]["message_id"],
+            "$user",
+        )
+        self.assertTrue(
+            any(
+                event.get("name") == "chat_delivery"
+                and event.get("data", {}).get("message_ids") == ["$agent"]
+                for event in merged_events
+            )
         )
 
     async def test_merge_is_idempotent_after_partial_append(self) -> None:
@@ -399,6 +432,7 @@ class ThreadTests(unittest.IsolatedAsyncioTestCase):
             "!room:example.org",
             "investigate this",
             delivery_context=None,
+            source_message_id="$thread-message",
         )
         self.assertTrue(thread_active())
 

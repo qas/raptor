@@ -250,6 +250,7 @@ async def run_root_session(
     internal: bool = False,
     input_recorded: bool = False,
     delivery_context: Any | None = None,
+    source_message_id: int | str | None = None,
 ) -> None:
     next_input = initial_input
     next_source: WorkSource | None = (
@@ -307,6 +308,8 @@ async def run_root_session(
                     }
                     if input_recorded:
                         turn_options["input_recorded"] = True
+                    if next_source == "user" and source_message_id is not None:
+                        turn_options["source_message_id"] = source_message_id
                     delivered = await agent_turn(
                         chat_id,
                         next_input,
@@ -328,6 +331,7 @@ async def run_root_session(
             )
             work_entry = None
             delivery_context = None
+            source_message_id = None
             input_recorded = False
             if session.state.get("pending_delivery") is not None:
                 if isinstance(delivered, RetryableTurnFailure):
@@ -409,6 +413,7 @@ def start_root_session(
     internal: bool = False,
     input_recorded: bool = False,
     delivery_context: Any | None = None,
+    source_message_id: int | str | None = None,
 ) -> asyncio.Task[None]:
     def persist_turn(snapshot: TurnSnapshot) -> None:
         session.set_active_root_turn(
@@ -425,6 +430,7 @@ def start_root_session(
             internal=internal,
             input_recorded=input_recorded,
             delivery_context=delivery_context,
+            source_message_id=source_message_id,
         ),
         kind=TurnKind.REGULAR,
         before_start=persist_turn,
@@ -438,6 +444,7 @@ def ensure_root_session(
     internal: bool = False,
     input_recorded: bool = False,
     delivery_context: Any | None = None,
+    source_message_id: int | str | None = None,
 ) -> asyncio.Task | None:
     if turns.is_running():
         return turns.task
@@ -447,6 +454,7 @@ def ensure_root_session(
         internal=internal,
         input_recorded=input_recorded,
         delivery_context=delivery_context,
+        source_message_id=source_message_id,
     )
 
 

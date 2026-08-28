@@ -5,22 +5,16 @@ from __future__ import annotations
 import os
 import re
 import math
-import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
-from runtime_paths import RAPTOR_HOME
+from config_document import CONFIG_PATH, load_config_document
 
 
 _PROVIDER_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 _ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-CONFIG_PATH = Path(
-    os.getenv("RAPTOR_CONFIG", str(RAPTOR_HOME / "config.toml"))
-).expanduser().resolve()
-
-
 @dataclass(frozen=True)
 class ModelTarget:
     provider_id: str
@@ -278,23 +272,13 @@ def _provider_from_table(provider_id: str, value: Any) -> ModelProvider:
 
 
 def load_model_configuration(path: Path = CONFIG_PATH) -> ModelConfiguration:
-    data: dict[str, Any] = {}
+    data: dict[str, Any] = load_config_document(path)
     config_exists = path.exists()
-    if config_exists:
-        try:
-            with path.open("rb") as handle:
-                loaded = tomllib.load(handle)
-        except (OSError, tomllib.TOMLDecodeError) as exc:
-            raise ValueError(f"Could not load Raptor config: {path}: {exc}") from exc
-        if not isinstance(loaded, dict):
-            raise ValueError(f"Raptor config root must be a table: {path}")
-        data = loaded
-        unknown = sorted(set(data) - {"model_provider", "model", "model_providers"})
-        if unknown:
-            raise ValueError(f"Unknown Raptor config fields: {', '.join(unknown)}")
     providers_raw = data.get("model_providers")
     if providers_raw is None:
-        if config_exists:
+        if config_exists and any(
+            field in data for field in ("model_provider", "model")
+        ):
             raise ValueError(
                 f"Raptor config must define [model_providers.<id>]: {path}"
             )

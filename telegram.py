@@ -18,6 +18,7 @@ from chat_provider import (
 )
 from config import (
     TELEGRAM_MARKDOWN,
+    TELEGRAM_SUBAGENT_TOPICS_SILENT,
     TG_API,
     TG_BOT_TOKEN,
     TG_CHAT_IDS,
@@ -760,7 +761,11 @@ async def _upsert_topic_message(
         return message_id
     result = await send_rich(
         "sendMessage",
-        {"chat_id": chat_id, "message_thread_id": topic_id},
+        {
+            "chat_id": chat_id,
+            "message_thread_id": topic_id,
+            "disable_notification": TELEGRAM_SUBAGENT_TOPICS_SILENT,
+        },
         preview,
     )
     created_id = result.get("message_id") if isinstance(result, dict) else None
@@ -769,10 +774,12 @@ async def _upsert_topic_message(
     return created_id
 
 
-async def _send_messages(
+async def _send_messages_tracked(
     conversation_id: ConversationId,
     text: str,
-) -> int:
+    *,
+    silent: bool = False,
+) -> tuple[int, ...]:
     chat_id, _thread_id = _telegram_destination(conversation_id)
     log_event(
         "telegram",
@@ -782,11 +789,14 @@ async def _send_messages(
             "text_chars": len(text),
         },
     )
-    first_message_id: int | None = None
+    message_ids: list[int] = []
     for part in split_message(text):
+        payload = _telegram_payload(conversation_id)
+        if silent:
+            payload["disable_notification"] = True
         result = await send_rich(
             "sendMessage",
-            _telegram_payload(conversation_id),
+            payload,
             part,
         )
         message_id = (
@@ -794,18 +804,39 @@ async def _send_messages(
         )
         if not isinstance(message_id, int):
             raise RuntimeError("Telegram returned no message_id")
-        if first_message_id is None:
-            first_message_id = message_id
-    if first_message_id is None:
+        message_ids.append(message_id)
+    if not message_ids:
         raise RuntimeError("Telegram message must not be empty")
-    return first_message_id
+    return tuple(message_ids)
+
+
+async def _send_messages(
+    conversation_id: ConversationId,
+    text: str,
+    *,
+    silent: bool = False,
+) -> int:
+    """Send text and return its first ID for single-message surfaces."""
+    return (
+        await _send_messages_tracked(
+            conversation_id,
+            text,
+            silent=silent,
+        )
+    )[0]
 
 
 async def send(
     conversation_id: ConversationId,
     text: str,
-) -> None:
-    await _send_messages(conversation_id, text)
+    *,
+    silent: bool = False,
+) -> tuple[int, ...]:
+    return await _send_messages_tracked(
+        conversation_id,
+        text,
+        silent=silent,
+    )
 
 
 async def send_draft(
@@ -1099,8 +1130,15 @@ class TelegramProvider:
             )
         return True
 
-    async def send_text(self, conversation_id, text: str) -> None:
-        await send(conversation_id, text)
+    async def send_text(self, conversation_id, text: str) -> tuple[int, ...]:
+        chat_id, topic_id = _telegram_destination(conversation_id)
+        chat = self._chats.get(chat_id)
+        silent = bool(
+            TELEGRAM_SUBAGENT_TOPICS_SILENT
+            and chat is not None
+            and topic_id in chat.activity_topics
+        )
+        return await send(conversation_id, text, silent=silent)
 
     async def send_draft(
         self,
@@ -1243,6 +1281,7 @@ class TelegramProvider:
                 await send(
                     _telegram_conversation_id(chat_id, topic_id),
                     snapshot.title,
+                    silent=TELEGRAM_SUBAGENT_TOPICS_SILENT,
                 )
                 return existing_surface_id
             chat.activity_topics.pop(topic_id, None)
@@ -1262,6 +1301,7 @@ class TelegramProvider:
             task_message_id = await _send_messages(
                 topic_conversation,
                 snapshot.title,
+                silent=TELEGRAM_SUBAGENT_TOPICS_SILENT,
             )
             return _activity_surface_id(topic_id, task_message_id)
         except asyncio.CancelledError:
@@ -1323,7 +1363,11 @@ class TelegramProvider:
         chat = self._chats.get(chat_id)
         if chat is None or topic_id not in chat.activity_topics:
             raise ValueError("activity surface belongs to another Telegram chat")
-        await send(_telegram_conversation_id(chat_id, topic_id), text)
+        await send(
+            _telegram_conversation_id(chat_id, topic_id),
+            text,
+            silent=TELEGRAM_SUBAGENT_TOPICS_SILENT,
+        )
 
     async def _update_activity_topic_output(
         self,
@@ -1395,6 +1439,7 @@ class TelegramProvider:
             await send(
                 _telegram_conversation_id(chat_id, topic_id),
                 snapshot.result,
+                silent=TELEGRAM_SUBAGENT_TOPICS_SILENT,
             )
             result_delivered = True
         return ActivityFinishResult(True, result_delivered)

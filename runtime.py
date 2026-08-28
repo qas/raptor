@@ -8,6 +8,7 @@ import sys
 import time
 from typing import Any
 
+from config_document import config_section, load_config_document
 from process_lock import (
     detach_runtime_lock,
     refresh_runtime_lock_owner,
@@ -27,9 +28,17 @@ from storage import (
 
 def _runtime_state_load_limit() -> int:
     """Honor the state bound without importing application configuration."""
+    configured = config_section(
+        load_config_document(),
+        "state",
+        {"max_load_bytes"},
+    ).get("max_load_bytes", 16_777_216)
+    raw: object = os.environ.get("MAX_STATE_LOAD_BYTES", configured)
     try:
-        return max(1024, int(os.getenv("MAX_STATE_LOAD_BYTES", "16777216")))
-    except ValueError:
+        if isinstance(raw, bool):
+            raise ValueError
+        return max(1024, int(raw))
+    except (TypeError, ValueError):
         return 16_777_216
 
 

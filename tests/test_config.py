@@ -10,6 +10,7 @@ os.environ.setdefault("TG_USER_ID", "1")
 os.environ.setdefault("TG_CHAT_IDS", "1")
 
 import config
+import config_document
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -62,6 +63,157 @@ class ResponsesServerConfigurationTests(unittest.TestCase):
 
         self.assertEqual(values["RESPONSES_SERVER_HOST"], "127.0.0.1")
         self.assertEqual(values["RESPONSES_SERVER_API_KEY"], "")
+
+
+class TomlConfigurationTests(unittest.TestCase):
+    def _load(self, document, environment=None):
+        with (
+            patch.object(
+                config_document,
+                "load_config_document",
+                return_value=document,
+            ),
+            patch.dict(os.environ, environment or {}, clear=True),
+        ):
+            return runpy.run_path(str(ROOT / "config.py"))
+
+    def test_non_secret_toml_settings_are_loaded(self) -> None:
+        values = self._load(
+            {
+                "network": {
+                    "proxy": "http://proxy.example:8080",
+                    "no_proxy": ["models.example"],
+                },
+                "chat": {
+                    "providers": ["telegram"],
+                    "streaming": False,
+                    "stream_interval": 0.2,
+                    "max_pending_steers": 6,
+                    "max_runtimes": 12,
+                },
+                "telegram": {
+                    "user_id": 7,
+                    "chat_ids": [7, -1001],
+                    "max_retries": 4,
+                    "markdown": False,
+                    "subagent_topics_silent": False,
+                },
+                "responses_server": {
+                    "host": "localhost",
+                    "port": 9000,
+                    "max_body": 2048,
+                    "max_connections": 9,
+                    "max_pending": 8,
+                    "max_status_messages": 7,
+                    "max_stream_events": 6,
+                    "read_timeout": 1.5,
+                },
+                "subagents": {
+                    "max_depth": 5,
+                    "max_records": 20,
+                    "max_tool_events": 21,
+                    "max_pending_inputs": 22,
+                    "max_background": 23,
+                },
+                "tools": {"max_rounds": 2, "max_output": 4096},
+                "shell": {"timeout": 90},
+                "state": {"max_load_bytes": 8192},
+                "compaction": {
+                    "output_tokens": 512,
+                    "generation_tokens": 1024,
+                    "reasoning_effort": "medium",
+                    "keep_recent_tokens": 100,
+                    "user_anchor_tokens": 101,
+                    "max_record_chars": 2048,
+                    "context_ratio": 0.75,
+                    "context_safety_tokens": 102,
+                },
+            }
+        )
+
+        expected = {
+            "RAPTOR_PROXY": "http://proxy.example:8080",
+            "RAPTOR_NO_PROXY": ("models.example",),
+            "CHAT_PROVIDERS": ("telegram",),
+            "CHAT_STREAMING": False,
+            "CHAT_STREAM_INTERVAL": 0.2,
+            "MAX_PENDING_STEERS": 6,
+            "MAX_CHAT_RUNTIMES": 12,
+            "TG_USER_ID": 7,
+            "TG_CHAT_IDS": (7, -1001),
+            "TG_MAX_RETRIES": 4,
+            "TELEGRAM_MARKDOWN": False,
+            "TELEGRAM_SUBAGENT_TOPICS_SILENT": False,
+            "RESPONSES_SERVER_HOST": "localhost",
+            "RESPONSES_SERVER_PORT": 9000,
+            "RESPONSES_SERVER_MAX_BODY": 2048,
+            "RESPONSES_SERVER_MAX_CONNECTIONS": 9,
+            "RESPONSES_SERVER_MAX_PENDING": 8,
+            "RESPONSES_SERVER_MAX_STATUS_MESSAGES": 7,
+            "RESPONSES_SERVER_MAX_STREAM_EVENTS": 6,
+            "RESPONSES_SERVER_READ_TIMEOUT": 1.5,
+            "MAX_SUBAGENT_DEPTH": 5,
+            "MAX_SUBAGENT_RECORDS": 20,
+            "MAX_SUBAGENT_TOOL_EVENTS": 21,
+            "MAX_SUBAGENT_PENDING_INPUTS": 22,
+            "MAX_BACKGROUND_SUBAGENTS": 23,
+            "MAX_TOOL_ROUNDS": 2,
+            "MAX_TOOL_OUTPUT": 4096,
+            "SHELL_TIMEOUT": 90,
+            "MAX_STATE_LOAD_BYTES": 8192,
+            "COMPACTION_OUTPUT_TOKENS": 512,
+            "COMPACTION_GENERATION_TOKENS": 1024,
+            "COMPACTION_REASONING_EFFORT": "medium",
+            "COMPACT_KEEP_RECENT_TOKENS": 100,
+            "COMPACTION_USER_ANCHOR_TOKENS": 101,
+            "COMPACTION_MAX_RECORD_CHARS": 2048,
+            "CONTEXT_COMPACT_RATIO": 0.75,
+            "CONTEXT_SAFETY_TOKENS": 102,
+        }
+        for name, expected_value in expected.items():
+            with self.subTest(name=name):
+                self.assertEqual(values[name], expected_value)
+
+    def test_environment_overrides_toml(self) -> None:
+        values = self._load(
+            {
+                "chat": {"streaming": False},
+                "telegram": {
+                    "chat_ids": [8],
+                    "subagent_topics_silent": True,
+                },
+            },
+            {
+                "CHAT_STREAMING": "true",
+                "TG_CHAT_IDS": "9,-1002",
+                "TELEGRAM_SUBAGENT_TOPICS_SILENT": "false",
+            },
+        )
+
+        self.assertTrue(values["CHAT_STREAMING"])
+        self.assertEqual(values["TG_CHAT_IDS"], (9, -1002))
+        self.assertFalse(values["TELEGRAM_SUBAGENT_TOPICS_SILENT"])
+
+    def test_unknown_or_secret_toml_fields_are_rejected(self) -> None:
+        for document in (
+            {"telegram": {"bot_token": "secret"}},
+            {"chat": {"streamng": True}},
+        ):
+            with self.subTest(document=document), self.assertRaisesRegex(
+                ValueError,
+                "Unknown",
+            ):
+                self._load(document)
+
+    def test_proxy_credentials_remain_environment_only(self) -> None:
+        with self.assertRaisesRegex(ValueError, "use RAPTOR_PROXY"):
+            self._load(
+                {"network": {"proxy": "https://user:pass@proxy.example"}}
+            )
+
+    def test_toml_types_are_not_coerced(self) -> None:
+        with self.assertRaisesRegex(ValueError, "MAX_SUBAGENT_DEPTH"):
+            self._load({"subagents": {"max_depth": 3.5}})
 
 
 class ProxyConfigurationTests(unittest.TestCase):

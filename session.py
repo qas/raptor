@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from typing import Any, Generic, TypeVar
 
 from chat_provider import ConversationId
+from chat_runtime import get_chat_provider
 from chat_store import (
     append_meta,
     append_item,
@@ -931,7 +932,21 @@ def persist_steer_handoff(entry: dict[str, Any]) -> None:
             session_id,
             {"role": "user", "content": text},
             source="steer",
-            data={"steer_id": steer_id},
+            data={
+                "steer_id": steer_id,
+                **(
+                    {
+                        "chat_message": {
+                            "conversation_id": get_chat_provider().encode_conversation_id(
+                                entry["chat_id"]
+                            ),
+                            "message_id": entry["source_message_id"],
+                        }
+                    }
+                    if entry.get("source_message_id") is not None
+                    else {}
+                ),
+            },
         )
     consume_pending_steer(entry)
 

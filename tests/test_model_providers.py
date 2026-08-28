@@ -133,6 +133,14 @@ class ModelProviderTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(ValueError, "must define"):
             load_model_configuration(self.path)
 
+    def test_non_model_sections_can_use_default_local_provider(self) -> None:
+        self.path.write_text(
+            "[telegram]\nsubagent_topics_silent = true\n",
+            encoding="utf-8",
+        )
+        configuration = load_model_configuration(self.path)
+        self.assertEqual(configuration.default_target.provider_id, "local")
+
     async def test_requests_route_through_each_selected_provider(self) -> None:
         client = AsyncMock()
         client.post.side_effect = [

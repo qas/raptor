@@ -5,6 +5,7 @@ import os
 import re
 from urllib.parse import urlsplit
 
+from config_document import config_section, load_config_document
 from runtime_paths import AGENT_WORKDIR, CHAT_DIR, LOG_PATH, RAPTOR_HOME, STATE_PATH
 
 from todos import (
@@ -18,13 +19,25 @@ def _env_int(
     name: str,
     default: int,
     *,
+    configured: object = None,
     minimum: int | None = None,
     maximum: int | None = None,
 ) -> int:
-    try:
-        value = int(os.getenv(name, str(default)))
-    except ValueError as exc:
-        raise ValueError(f"{name} must be an integer") from exc
+    from_environment = name in os.environ
+    raw: object = os.environ[name] if from_environment else configured
+    if raw is None:
+        raw = default
+    if isinstance(raw, bool):
+        raise ValueError(f"{name} must be an integer")
+    if from_environment:
+        try:
+            value = int(raw)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{name} must be an integer") from exc
+    elif isinstance(raw, int):
+        value = raw
+    else:
+        raise ValueError(f"{name} must be an integer")
     if minimum is not None and value < minimum:
         raise ValueError(f"{name} must be at least {minimum}")
     if maximum is not None and value > maximum:
@@ -36,13 +49,25 @@ def _env_float(
     name: str,
     default: float,
     *,
+    configured: object = None,
     minimum: float | None = None,
     maximum: float | None = None,
 ) -> float:
-    try:
-        value = float(os.getenv(name, str(default)))
-    except ValueError as exc:
-        raise ValueError(f"{name} must be a number") from exc
+    from_environment = name in os.environ
+    raw: object = os.environ[name] if from_environment else configured
+    if raw is None:
+        raw = default
+    if isinstance(raw, bool):
+        raise ValueError(f"{name} must be a number")
+    if from_environment:
+        try:
+            value = float(raw)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{name} must be a number") from exc
+    elif isinstance(raw, (int, float)):
+        value = float(raw)
+    else:
+        raise ValueError(f"{name} must be a number")
     if not math.isfinite(value):
         raise ValueError(f"{name} must be finite")
     if minimum is not None and value < minimum:
@@ -52,8 +77,23 @@ def _env_float(
     return value
 
 
-def _env_bool(name: str, default: bool) -> bool:
-    raw = os.getenv(name, "true" if default else "false").strip().lower()
+def _env_bool(
+    name: str,
+    default: bool,
+    *,
+    configured: object = None,
+) -> bool:
+    from_environment = name in os.environ
+    raw: object = os.environ[name] if from_environment else configured
+    if raw is None:
+        raw = default
+    if isinstance(raw, bool):
+        return raw
+    if not from_environment:
+        raise ValueError(f"{name} must be a boolean")
+    if not isinstance(raw, str):
+        raise ValueError(f"{name} must be a boolean")
+    raw = raw.strip().lower()
     if raw in {"1", "true", "yes", "on"}:
         return True
     if raw in {"0", "false", "no", "off"}:
@@ -61,19 +101,32 @@ def _env_bool(name: str, default: bool) -> bool:
     raise ValueError(f"{name} must be a boolean")
 
 
-def _env_int_tuple(name: str, default: tuple[int, ...]) -> tuple[int, ...]:
-    raw = os.getenv(name)
+def _env_int_tuple(
+    name: str,
+    default: tuple[int, ...],
+    *,
+    configured: object = None,
+) -> tuple[int, ...]:
+    from_environment = name in os.environ
+    raw: object = os.environ[name] if from_environment else configured
     if raw is None:
         return default
-    parts = raw.split(",")
-    if not parts or any(not part.strip() for part in parts):
-        raise ValueError(f"{name} must contain comma-separated integers")
-    try:
-        values = tuple(int(part.strip()) for part in parts)
-    except ValueError as exc:
-        raise ValueError(
-            f"{name} must contain comma-separated integers"
-        ) from exc
+    if from_environment and isinstance(raw, str):
+        parts = raw.split(",")
+        if not parts or any(not part.strip() for part in parts):
+            raise ValueError(f"{name} must contain comma-separated integers")
+        try:
+            values = tuple(int(part.strip()) for part in parts)
+        except ValueError as exc:
+            raise ValueError(
+                f"{name} must contain comma-separated integers"
+            ) from exc
+    elif not from_environment and isinstance(raw, list) and all(
+        isinstance(value, int) and not isinstance(value, bool) for value in raw
+    ):
+        values = tuple(raw)
+    else:
+        raise ValueError(f"{name} must contain integers")
     if any(value == 0 for value in values):
         raise ValueError(f"{name} entries must not be zero")
     if len(set(values)) != len(values):
@@ -81,8 +134,13 @@ def _env_int_tuple(name: str, default: tuple[int, ...]) -> tuple[int, ...]:
     return values
 
 
-def _env_proxy(name: str) -> str | None:
-    raw = os.getenv(name, "").strip()
+def _env_proxy(name: str, *, configured: object = None) -> str | None:
+    raw_value: object = os.environ[name] if name in os.environ else configured
+    if raw_value is None:
+        return None
+    if not isinstance(raw_value, str):
+        raise ValueError(f"{name} must be a string")
+    raw = raw_value.strip()
     if not raw:
         return None
     parsed = urlsplit(raw)
@@ -124,11 +182,25 @@ def _proxy_bypass_host(name: str, raw: str, *, wildcard: bool) -> str:
     return address.compressed
 
 
-def _env_proxy_bypass(name: str) -> tuple[str, ...]:
-    raw = os.getenv(name, "").strip()
-    if not raw:
+def _env_proxy_bypass(
+    name: str,
+    *,
+    configured: object = None,
+) -> tuple[str, ...]:
+    from_environment = name in os.environ
+    raw_value: object = os.environ[name] if from_environment else configured
+    if raw_value is None:
         return ()
-    parts = raw.split(",")
+    if from_environment and isinstance(raw_value, str):
+        if not raw_value.strip():
+            return ()
+        parts = raw_value.split(",")
+    elif not from_environment and isinstance(raw_value, list) and all(
+        isinstance(part, str) for part in raw_value
+    ):
+        parts = raw_value
+    else:
+        raise ValueError(f"{name} must contain hosts")
     if any(not part.strip() for part in parts):
         raise ValueError(f"{name} must contain comma-separated hosts")
     entries = []
@@ -147,37 +219,158 @@ def _env_proxy_bypass(name: str) -> tuple[str, ...]:
         raise ValueError(f"{name} entries must be unique")
     return tuple(entries)
 
+
+def _env_string(
+    name: str,
+    default: str,
+    *,
+    configured: object = None,
+    allow_empty: bool = False,
+) -> str:
+    raw: object = os.environ[name] if name in os.environ else configured
+    if raw is None:
+        raw = default
+    if not isinstance(raw, str):
+        raise ValueError(f"{name} must be a string")
+    value = raw.strip()
+    if not value and not allow_empty:
+        raise ValueError(f"{name} must not be empty")
+    return value
+
+
+def _env_string_tuple(
+    name: str,
+    default: tuple[str, ...],
+    *,
+    configured: object = None,
+) -> tuple[str, ...]:
+    from_environment = name in os.environ
+    raw: object = os.environ[name] if from_environment else configured
+    if raw is None:
+        values = default
+    elif from_environment and isinstance(raw, str):
+        values = tuple(part.strip() for part in raw.split(","))
+    elif not from_environment and isinstance(raw, list) and all(
+        isinstance(part, str) for part in raw
+    ):
+        values = tuple(part.strip() for part in raw)
+    else:
+        raise ValueError(f"{name} must contain strings")
+    if not values or any(not value for value in values):
+        raise ValueError(f"{name} must contain non-empty entries")
+    if len(set(values)) != len(values):
+        raise ValueError(f"{name} entries must be unique")
+    return values
+
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
 
-RAPTOR_PROXY = _env_proxy("RAPTOR_PROXY")
-RAPTOR_NO_PROXY = _env_proxy_bypass("RAPTOR_NO_PROXY")
+_CONFIG = load_config_document()
+_NETWORK = config_section(_CONFIG, "network", {"proxy", "no_proxy"})
+_CHAT = config_section(
+    _CONFIG,
+    "chat",
+    {
+        "providers",
+        "streaming",
+        "stream_interval",
+        "max_pending_steers",
+        "max_runtimes",
+    },
+)
+_TELEGRAM = config_section(
+    _CONFIG,
+    "telegram",
+    {
+        "user_id",
+        "chat_ids",
+        "max_retries",
+        "markdown",
+        "subagent_topics_silent",
+    },
+)
+_RESPONSES_SERVER = config_section(
+    _CONFIG,
+    "responses_server",
+    {
+        "host",
+        "port",
+        "max_body",
+        "max_connections",
+        "max_pending",
+        "max_status_messages",
+        "max_stream_events",
+        "read_timeout",
+    },
+)
+_SUBAGENTS = config_section(
+    _CONFIG,
+    "subagents",
+    {
+        "max_depth",
+        "max_records",
+        "max_tool_events",
+        "max_pending_inputs",
+        "max_background",
+    },
+)
+_TOOLS_CONFIG = config_section(
+    _CONFIG,
+    "tools",
+    {"max_rounds", "max_output"},
+)
+_SHELL = config_section(_CONFIG, "shell", {"timeout"})
+_STATE = config_section(_CONFIG, "state", {"max_load_bytes"})
+_COMPACTION = config_section(
+    _CONFIG,
+    "compaction",
+    {
+        "output_tokens",
+        "generation_tokens",
+        "reasoning_effort",
+        "keep_recent_tokens",
+        "user_anchor_tokens",
+        "max_record_chars",
+        "context_ratio",
+        "context_safety_tokens",
+    },
+)
+
+RAPTOR_PROXY = _env_proxy("RAPTOR_PROXY", configured=_NETWORK.get("proxy"))
+if "RAPTOR_PROXY" not in os.environ and RAPTOR_PROXY is not None:
+    configured_proxy = urlsplit(RAPTOR_PROXY)
+    if (
+        configured_proxy.username is not None
+        or configured_proxy.password is not None
+    ):
+        raise ValueError(
+            "network.proxy must not contain credentials; use RAPTOR_PROXY"
+        )
+RAPTOR_NO_PROXY = _env_proxy_bypass(
+    "RAPTOR_NO_PROXY",
+    configured=_NETWORK.get("no_proxy"),
+)
 if RAPTOR_NO_PROXY and RAPTOR_PROXY is None:
     raise ValueError("RAPTOR_NO_PROXY requires RAPTOR_PROXY")
 
-CHAT_PROVIDERS = tuple(
-    name.strip()
-    for name in os.getenv(
-        "CHAT_PROVIDERS",
-        "telegram,responses_api",
-    ).split(",")
-    if name.strip()
+CHAT_PROVIDERS = _env_string_tuple(
+    "CHAT_PROVIDERS",
+    ("telegram", "responses_api"),
+    configured=_CHAT.get("providers"),
 )
-if not CHAT_PROVIDERS:
-    raise ValueError("CHAT_PROVIDERS must contain at least one provider")
-if len(set(CHAT_PROVIDERS)) != len(CHAT_PROVIDERS):
-    raise ValueError("CHAT_PROVIDERS entries must be unique")
 
 # Inbound, OpenAI Responses-compatible chat provider. This is independent from
 # outbound model providers configured in ``.raptor/config.toml``.
-RESPONSES_SERVER_HOST = os.getenv(
+RESPONSES_SERVER_HOST = _env_string(
     "RESPONSES_SERVER_HOST",
     "127.0.0.1",
-).strip()
+    configured=_RESPONSES_SERVER.get("host"),
+)
 RESPONSES_SERVER_PORT = _env_int(
     "RESPONSES_SERVER_PORT",
     8787,
+    configured=_RESPONSES_SERVER.get("port"),
     minimum=1,
     maximum=65535,
 )
@@ -188,111 +381,136 @@ RESPONSES_SERVER_API_KEY = os.getenv(
 RESPONSES_SERVER_MAX_BODY = _env_int(
     "RESPONSES_SERVER_MAX_BODY",
     1_048_576,
+    configured=_RESPONSES_SERVER.get("max_body"),
     minimum=1024,
 )
 RESPONSES_SERVER_MAX_CONNECTIONS = _env_int(
     "RESPONSES_SERVER_MAX_CONNECTIONS",
     128,
+    configured=_RESPONSES_SERVER.get("max_connections"),
     minimum=1,
 )
 RESPONSES_SERVER_MAX_PENDING = _env_int(
     "RESPONSES_SERVER_MAX_PENDING",
     64,
+    configured=_RESPONSES_SERVER.get("max_pending"),
     minimum=1,
 )
 RESPONSES_SERVER_MAX_STATUS_MESSAGES = _env_int(
     "RESPONSES_SERVER_MAX_STATUS_MESSAGES",
     256,
+    configured=_RESPONSES_SERVER.get("max_status_messages"),
     minimum=1,
 )
 RESPONSES_SERVER_MAX_STREAM_EVENTS = _env_int(
     "RESPONSES_SERVER_MAX_STREAM_EVENTS",
     256,
+    configured=_RESPONSES_SERVER.get("max_stream_events"),
     minimum=4,
 )
 RESPONSES_SERVER_READ_TIMEOUT = _env_float(
     "RESPONSES_SERVER_READ_TIMEOUT",
     10.0,
+    configured=_RESPONSES_SERVER.get("read_timeout"),
     minimum=0.1,
 )
 
 # Telegram adapter configuration. These are optional at framework import
 # time and validated only when the Telegram provider is initialized.
 TG_BOT_TOKEN = os.getenv("TG_BOT_TOKEN", "")
-TG_USER_ID = _env_int("TG_USER_ID", 0, minimum=0)
+TG_USER_ID = _env_int(
+    "TG_USER_ID",
+    0,
+    configured=_TELEGRAM.get("user_id"),
+    minimum=0,
+)
 TG_CHAT_IDS = _env_int_tuple(
     "TG_CHAT_IDS",
     (TG_USER_ID,) if TG_USER_ID else (),
+    configured=_TELEGRAM.get("chat_ids"),
 )
 TG_MAX_RETRIES = _env_int(
     "TG_MAX_RETRIES",
     3,
+    configured=_TELEGRAM.get("max_retries"),
     minimum=0,
 )
 
 MAX_SUBAGENT_DEPTH = _env_int(
     "MAX_SUBAGENT_DEPTH",
     3,
+    configured=_SUBAGENTS.get("max_depth"),
     minimum=1,
 )
 
 MAX_SUBAGENT_RECORDS = _env_int(
     "MAX_SUBAGENT_RECORDS",
     100,
+    configured=_SUBAGENTS.get("max_records"),
     minimum=1,
 )
 MAX_SUBAGENT_TOOL_EVENTS = _env_int(
     "MAX_SUBAGENT_TOOL_EVENTS",
     500,
+    configured=_SUBAGENTS.get("max_tool_events"),
     minimum=1,
 )
 MAX_SUBAGENT_PENDING_INPUTS = _env_int(
     "MAX_SUBAGENT_PENDING_INPUTS",
     64,
+    configured=_SUBAGENTS.get("max_pending_inputs"),
     minimum=1,
 )
 MAX_BACKGROUND_SUBAGENTS = _env_int(
     "MAX_BACKGROUND_SUBAGENTS",
     16,
+    configured=_SUBAGENTS.get("max_background"),
     minimum=1,
 )
 
 MAX_TOOL_ROUNDS = _env_int(
     "MAX_TOOL_ROUNDS",
     0,
+    configured=_TOOLS_CONFIG.get("max_rounds"),
     minimum=0,
 )
 MAX_PENDING_STEERS = _env_int(
     "MAX_PENDING_STEERS",
     64,
+    configured=_CHAT.get("max_pending_steers"),
     minimum=1,
 )
 MAX_CHAT_RUNTIMES = _env_int(
     "MAX_CHAT_RUNTIMES",
     1024,
+    configured=_CHAT.get("max_runtimes"),
     minimum=1,
 )
 MAX_STATE_LOAD_BYTES = _env_int(
     "MAX_STATE_LOAD_BYTES",
     16 * 1024 * 1024,
+    configured=_STATE.get("max_load_bytes"),
     minimum=1024,
 )
 
 SHELL_TIMEOUT = _env_int(
     "SHELL_TIMEOUT",
     0,
+    configured=_SHELL.get("timeout"),
     minimum=0,
 )
 
 MAX_TOOL_OUTPUT = _env_int(
     "MAX_TOOL_OUTPUT",
     30_000,
+    configured=_TOOLS_CONFIG.get("max_output"),
     minimum=1024,
 )
 
 COMPACTION_OUTPUT_TOKENS = _env_int(
     "COMPACTION_OUTPUT_TOKENS",
     4_000,
+    configured=_COMPACTION.get("output_tokens"),
     minimum=256,
 )
 
@@ -303,16 +521,21 @@ COMPACTION_OUTPUT_TOKENS = _env_int(
 COMPACTION_GENERATION_TOKENS = _env_int(
     "COMPACTION_GENERATION_TOKENS",
     COMPACTION_OUTPUT_TOKENS + 4096,
+    configured=_COMPACTION.get("generation_tokens"),
     minimum=COMPACTION_OUTPUT_TOKENS,
 )
 
-COMPACTION_REASONING_EFFORT = (
-    os.getenv("COMPACTION_REASONING_EFFORT", "low").strip() or None
-)
+COMPACTION_REASONING_EFFORT = _env_string(
+    "COMPACTION_REASONING_EFFORT",
+    "low",
+    configured=_COMPACTION.get("reasoning_effort"),
+    allow_empty=True,
+) or None
 
 COMPACT_KEEP_RECENT_TOKENS = _env_int(
     "COMPACT_KEEP_RECENT_TOKENS",
     20_000,
+    configured=_COMPACTION.get("keep_recent_tokens"),
     minimum=0,
 )
 
@@ -321,6 +544,7 @@ COMPACT_KEEP_RECENT_TOKENS = _env_int(
 COMPACTION_USER_ANCHOR_TOKENS = _env_int(
     "COMPACTION_USER_ANCHOR_TOKENS",
     20_000,
+    configured=_COMPACTION.get("user_anchor_tokens"),
     minimum=0,
 )
 
@@ -329,12 +553,14 @@ COMPACTION_USER_ANCHOR_TOKENS = _env_int(
 COMPACTION_MAX_RECORD_CHARS = _env_int(
     "COMPACTION_MAX_RECORD_CHARS",
     12_000,
+    configured=_COMPACTION.get("max_record_chars"),
     minimum=1024,
 )
 
 CONTEXT_COMPACT_RATIO = _env_float(
     "CONTEXT_COMPACT_RATIO",
     0.82,
+    configured=_COMPACTION.get("context_ratio"),
     minimum=0.50,
     maximum=0.95,
 )
@@ -342,6 +568,7 @@ CONTEXT_COMPACT_RATIO = _env_float(
 CONTEXT_SAFETY_TOKENS = _env_int(
     "CONTEXT_SAFETY_TOKENS",
     4096,
+    configured=_COMPACTION.get("context_safety_tokens"),
     minimum=0,
 )
 
@@ -387,13 +614,28 @@ def model_compaction_generation_budget(
     return _compaction_generation_budget(model_context_tokens or 0)
 
 
-CHAT_STREAMING = _env_bool("CHAT_STREAMING", True)
+CHAT_STREAMING = _env_bool(
+    "CHAT_STREAMING",
+    True,
+    configured=_CHAT.get("streaming"),
+)
 
-TELEGRAM_MARKDOWN = _env_bool("TELEGRAM_MARKDOWN", True)
+TELEGRAM_MARKDOWN = _env_bool(
+    "TELEGRAM_MARKDOWN",
+    True,
+    configured=_TELEGRAM.get("markdown"),
+)
+
+TELEGRAM_SUBAGENT_TOPICS_SILENT = _env_bool(
+    "TELEGRAM_SUBAGENT_TOPICS_SILENT",
+    True,
+    configured=_TELEGRAM.get("subagent_topics_silent"),
+)
 
 CHAT_STREAM_INTERVAL = _env_float(
     "CHAT_STREAM_INTERVAL",
     0.35,
+    configured=_CHAT.get("stream_interval"),
     minimum=0.01,
 )
 

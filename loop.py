@@ -153,4 +153,5 @@ async def handle_event(event: ChatEvent) -> None:
         conversation_id,
         text,
         delivery_context=capture_delivery_context(conversation_id),
+        source_message_id=event.message_id,
     )

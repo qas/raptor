@@ -981,10 +981,51 @@ async def command(
                 "Files and tool side effects were not reverted.",
             )
             return True
+        deleted_messages = 0
+        failed_deletions = 0
+        if truncation_plan.chat_messages:
+            provider = get_chat_provider()
+            expected_conversation = provider.encode_conversation_id(chat_id)
+            for encoded_conversation, message_id in truncation_plan.chat_messages:
+                if encoded_conversation != expected_conversation:
+                    failed_deletions += 1
+                    log_exception(
+                        "commands",
+                        "truncate_message_owner_error",
+                        ValueError("message reference crosses conversations"),
+                    )
+                    continue
+                try:
+                    await provider.delete_message(chat_id, message_id)
+                except Exception as exc:
+                    failed_deletions += 1
+                    log_exception(
+                        "commands",
+                        "truncate_message_delete_error",
+                        exc,
+                        {"message_id": message_id},
+                    )
+                else:
+                    deleted_messages += 1
+        if failed_deletions:
+            deletion_status = (
+                f"Deleted {deleted_messages} linked chat message(s); "
+                f"{failed_deletions} could not be deleted."
+            )
+        elif deleted_messages:
+            deletion_status = (
+                f"Deleted {deleted_messages} linked chat message(s)."
+            )
+        else:
+            deletion_status = (
+                "No linked chat messages were available to delete; older "
+                "turns may predate message tracking."
+            )
         await send(
             chat_id,
             (
                 f"Truncated the last {turns_to_remove} user turn(s).\n"
+                f"{deletion_status}\n"
                 "Files and tool side effects were not reverted; the old "
                 "transcript remains available as audit history."
             ),

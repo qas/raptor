@@ -71,15 +71,20 @@ model = "your-model"
 base_url = "http://127.0.0.1:8000/v1"
 default_model = "your-model"
 context_window = 131072
+
+[chat]
+providers = ["telegram", "responses_api"]
+
+[telegram]
+user_id = 123456789
+chat_ids = [123456789]
+subagent_topics_silent = true
 ```
 
-Then configure chat transports and start Raptor:
+Then provide the Telegram secret and start Raptor:
 
 ```bash
-export CHAT_PROVIDERS=telegram,responses_api
 export TG_BOT_TOKEN=your-telegram-token
-export TG_USER_ID=123456789
-export TG_CHAT_IDS=123456789
 
 raptor
 ```
@@ -167,6 +172,12 @@ retired raw prefix. Only user turns in the active native tail can be removed;
 Raptor rejects a request that would cross the effective checkpoint/reset
 boundary and reports how many active turns are available. The complete raw
 history remains in the old full archive.
+For provider messages that expose persistent IDs, Raptor also deletes the
+user and agent chat messages linked to the removed turns. Telegram records
+every split response message and deletes each one individually. Messages from
+transcripts created before message-reference tracking cannot be deleted
+safely, and provider permission/API failures are reported without guessing
+message ranges.
 The operation is rejected during an active thread, a session transition, or
 while a response for the current session is awaiting delivery. Invalid,
 oversized, or failed storage operations leave the current session unchanged.
@@ -410,7 +421,8 @@ class MatrixProvider:
     async def initialize(self, commands): ...
     async def close(self): ...
     async def poll(self, cursor, *, timeout) -> PollResult: ...
-    async def send_text(self, conversation_id, text): ...
+    async def send_text(self, conversation_id, text):
+        return ("persistent-message-id",)
     async def send_draft(self, conversation_id, draft_id, text): ...
     async def send_reasoning_summary(self, conversation_id, delta): ...
     async def create_message(self, conversation_id, text, controls=()): ...
@@ -437,7 +449,9 @@ def create_provider():
 
 Adapters normalize inbound payloads, own authentication and transport
 lifecycle, and declare capability degradation explicitly. Application policy
-stays in the provider-neutral core.
+stays in the provider-neutral core. `send_text` returns every persistent
+message ID it created (for example, every part of a split response), or an
+empty tuple when the provider has no deletable chat artifact.
 
 ## Configuration
 
@@ -447,13 +461,75 @@ child keeps it for every continuation. Invalid fields, numbers, booleans,
 duplicate providers, and values outside the documented ranges stop startup
 with a configuration error.
 
+Non-secret settings live in `$RAPTOR_HOME/config.toml`. Existing environment
+variables remain supported and override the corresponding TOML value. Bot
+tokens, API keys, and credential-bearing proxy URLs remain environment-only.
+Unspecified values use the defaults shown below.
+
+```toml
+[network]
+proxy = "http://proxy.example:8080"
+no_proxy = ["models.internal", "*.example.net"]
+
+[chat]
+providers = ["telegram", "responses_api"]
+streaming = true
+stream_interval = 0.35
+max_pending_steers = 64
+max_runtimes = 1024
+
+[telegram]
+user_id = 123456
+chat_ids = [123456, -1001234567890]
+max_retries = 3
+markdown = true
+subagent_topics_silent = true
+
+[responses_server]
+host = "127.0.0.1"
+port = 8787
+max_body = 1048576
+max_connections = 128
+max_pending = 64
+max_status_messages = 256
+max_stream_events = 256
+read_timeout = 10.0
+
+[subagents]
+max_depth = 3
+max_records = 100
+max_tool_events = 500
+max_pending_inputs = 64
+max_background = 16
+
+[tools]
+max_rounds = 0
+max_output = 30000
+
+[shell]
+timeout = 0
+
+[state]
+max_load_bytes = 16777216
+
+[compaction]
+output_tokens = 4000
+generation_tokens = 8096
+reasoning_effort = "low"
+keep_recent_tokens = 20000
+user_anchor_tokens = 20000
+max_record_chars = 12000
+context_ratio = 0.82
+context_safety_tokens = 4096
+```
+
 ### Runtime and providers
 
 | Variable | Default | Purpose |
 |---|---:|---|
 | `AGENT_WORKDIR` | launch directory | Workspace, shell working directory, and `.skills` parent |
 | `RAPTOR_HOME` | `$AGENT_WORKDIR/.raptor` | Durable state and transcript directory |
-| `RAPTOR_CONFIG` | `$RAPTOR_HOME/config.toml` | Model-provider TOML configuration file |
+| `RAPTOR_CONFIG` | `$RAPTOR_HOME/config.toml` | Raptor TOML configuration file |
 | `RAPTOR_LOG` | `$RAPTOR_HOME/raptor.log` | Daemon stdout/stderr event log |
 | `RAPTOR_PROXY` | empty | Outbound `http`, `https`, or remote-DNS `socks5h` proxy |
 | `RAPTOR_NO_PROXY` | empty | Comma-separated exact hosts or `*.` subdomain patterns routed directly |
@@ -466,6 +542,10 @@ with a configuration error.
 | `MAX_PENDING_STEERS` | `64` | Maximum queued root steering inputs |
 | `MAX_CHAT_RUNTIMES` | `1024` | Maximum provider conversations admitted per process |
 | `MAX_STATE_LOAD_BYTES` | `16777216` | Maximum state file bytes accepted at startup |
+
+`AGENT_WORKDIR`, `RAPTOR_HOME`, `RAPTOR_CONFIG`, and `RAPTOR_LOG` are bootstrap
+paths and remain environment-only because they determine where configuration
+and runtime files are found.
 
 When `RAPTOR_PROXY` is set, Raptor routes built-in outbound HTTP traffic
 through that proxy and fails non-bypassed requests if it is unavailable.
@@ -496,6 +576,7 @@ RAPTOR_PROXY=socks5h://proxy.example:1080 \
 | `TG_CHAT_IDS` | `TG_USER_ID` | Ordered, comma-separated chats served by the bot |
 | `TG_MAX_RETRIES` | `3` | Retries after a Telegram flood-control response |
 | `TELEGRAM_MARKDOWN` | `1` | Enable Telegram Markdown rendering |
+| `TELEGRAM_SUBAGENT_TOPICS_SILENT` | `1` | Send subagent-topic messages without notifications |
 
 ### Inbound Responses API
 

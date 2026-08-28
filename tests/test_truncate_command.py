@@ -5,7 +5,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 _HOME = Path(tempfile.mkdtemp(prefix="raptor-truncate-home-"))
 os.environ["RAPTOR_HOME"] = str(_HOME)
@@ -14,6 +14,7 @@ os.environ.setdefault("TG_BOT_TOKEN", "test-token")
 os.environ.setdefault("TG_USER_ID", "1")
 
 import chat_store
+import chat_runtime
 import commands
 import session
 import storage
@@ -103,6 +104,107 @@ class TruncateCommandTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(
             "Files and tool side effects were not reverted",
             send.await_args.args[1],
+        )
+
+    async def test_deletes_only_chat_messages_from_removed_turns(self) -> None:
+        kept_turn = chat_store.append_item(
+            self.source,
+            {"role": "user", "content": "keep"},
+            source="user",
+            data={
+                "chat_message": {
+                    "conversation_id": "telegram:1",
+                    "message_id": 10,
+                }
+            },
+        )
+        chat_store.append_meta(
+            self.source,
+            "chat_delivery",
+            {
+                "conversation_id": "telegram:1",
+                "message_ids": [11],
+                "user_turn_seq": kept_turn["seq"],
+            },
+        )
+        removed_turn = chat_store.append_item(
+            self.source,
+            {"role": "user", "content": "remove"},
+            source="user",
+            data={
+                "chat_message": {
+                    "conversation_id": "telegram:1",
+                    "message_id": 20,
+                }
+            },
+        )
+        chat_store.append_meta(
+            self.source,
+            "chat_delivery",
+            {
+                "conversation_id": "telegram:1",
+                "message_ids": [21, 22],
+                "user_turn_seq": removed_turn["seq"],
+            },
+        )
+        provider = Mock()
+        provider.encode_conversation_id.return_value = "telegram:1"
+        provider.delete_message = AsyncMock()
+
+        with (
+            patch.object(commands, "send", AsyncMock()) as send,
+            patch.object(commands, "get_chat_provider", return_value=provider),
+        ):
+            await commands.command(1, "/truncate 1")
+
+        self.assertEqual(
+            [call.args for call in provider.delete_message.await_args_list],
+            [(1, 20), (1, 21), (1, 22)],
+        )
+        self.assertIn("Deleted 3 linked chat message(s)", send.await_args.args[1])
+        retained_session = str(session.state["current_session_id"])
+        retained_delivery = next(
+            event
+            for event in chat_store.read_events(retained_session)
+            if event.get("name") == "chat_delivery"
+        )
+        self.assertEqual(retained_delivery["data"]["message_ids"], [11])
+
+        provider.delete_message.reset_mock()
+        with (
+            patch.object(commands, "send", AsyncMock()),
+            patch.object(commands, "get_chat_provider", return_value=provider),
+        ):
+            await commands.command(1, "/truncate 1")
+        self.assertEqual(
+            [call.args for call in provider.delete_message.await_args_list],
+            [(1, 10), (1, 11)],
+        )
+
+    async def test_send_archives_all_provider_message_ids(self) -> None:
+        chat_store.append_item(
+            self.source,
+            {"role": "user", "content": "split this"},
+            source="user",
+        )
+        provider = Mock()
+        provider.send_text = AsyncMock(return_value=(31, 32))
+        provider.encode_conversation_id.return_value = "telegram:1"
+        previous = chat_runtime.set_chat_provider(provider)
+        self.addCleanup(chat_runtime.set_chat_provider, previous)
+
+        result = await chat_runtime.send(1, "split response")
+
+        self.assertEqual(result, (31, 32))
+        delivery = chat_store.read_events(self.source)[-1]
+        self.assertEqual(delivery["name"], "chat_delivery")
+        self.assertEqual(
+            delivery["data"],
+            {
+                "conversation_id": "telegram:1",
+                "message_ids": [31, 32],
+                "user_turn_seq": 2,
+            },
         )
 
     async def test_invalid_and_too_large_values_are_no_ops(self) -> None:

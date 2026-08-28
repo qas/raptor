@@ -49,6 +49,8 @@ class TruncationPlan:
     items: tuple[dict[str, Any], ...]
     checkpoint: dict[str, Any] | None
     reset_through: int
+    chat_messages: tuple[tuple[str, int | str], ...]
+    retained_chat_deliveries: tuple[dict[str, Any], ...]
 
 
 class TruncationCleanupError(RuntimeError):
@@ -628,6 +630,15 @@ def _is_user_turn_start(event: dict[str, Any]) -> bool:
     )
 
 
+def latest_active_user_turn_seq(session_id: str) -> int | None:
+    """Return the latest active user turn that can own chat deliveries."""
+    for event in reversed(active_projection(session_id).items):
+        if _is_user_turn_start(event):
+            seq = int(event.get("seq") or 0)
+            return seq if seq > 0 else None
+    return None
+
+
 def plan_session_truncation(
     source_session_id: str,
     *,
@@ -681,6 +692,58 @@ def plan_session_truncation(
         for event in projection.items
         if int(event.get("seq") or 0) < cutoff
     )
+    chat_messages: list[tuple[str, int | str]] = []
+    seen_messages: set[tuple[str, int | str]] = set()
+    retained_chat_deliveries: list[dict[str, Any]] = []
+    active_user_seqs = {
+        int(event.get("seq") or 0) for event in starts
+    }
+
+    def include_message(conversation_id: object, message_id: object) -> None:
+        encoded = str(conversation_id or "").strip()
+        if not encoded or isinstance(message_id, bool):
+            return
+        if isinstance(message_id, int):
+            if message_id <= 0:
+                return
+            normalized: int | str = message_id
+        elif isinstance(message_id, str) and message_id:
+            normalized = message_id
+        else:
+            return
+        reference = (encoded, normalized)
+        if reference not in seen_messages:
+            seen_messages.add(reference)
+            chat_messages.append(reference)
+
+    for event in projection.items:
+        if int(event.get("seq") or 0) < cutoff:
+            continue
+        data = event.get("data")
+        message = data.get("chat_message") if isinstance(data, dict) else None
+        if isinstance(message, dict):
+            include_message(
+                message.get("conversation_id"),
+                message.get("message_id"),
+            )
+    for event in iter_events(source_id):
+        if event.get("type") != "meta" or event.get("name") != "chat_delivery":
+            continue
+        data = event.get("data")
+        if not isinstance(data, dict):
+            continue
+        user_turn_seq = data.get("user_turn_seq")
+        if (
+            isinstance(user_turn_seq, bool)
+            or not isinstance(user_turn_seq, int)
+            or user_turn_seq not in active_user_seqs
+        ):
+            continue
+        if user_turn_seq < cutoff:
+            retained_chat_deliveries.append(copy.deepcopy(data))
+            continue
+        for message_id in data.get("message_ids") or ():
+            include_message(data.get("conversation_id"), message_id)
     return TruncationPlan(
         source_id,
         owner,
@@ -690,6 +753,8 @@ def plan_session_truncation(
         prefix,
         copy.deepcopy(projection.checkpoint),
         projection.reset_through,
+        tuple(chat_messages),
+        tuple(retained_chat_deliveries),
     )
 
 
@@ -731,6 +796,7 @@ def materialize_session_truncation(
             )
         elif plan.reset_through:
             append_meta(destination, "model_context_reset", {"through_seq": 1})
+        source_to_destination_seq: dict[int, int] = {}
         for event in plan.items:
             copied_event = {
                 "type": "item",
@@ -740,8 +806,21 @@ def materialize_session_truncation(
             for key in ("data", "origin"):
                 if key in event:
                     copied_event[key] = copy.deepcopy(event[key])
-            append_event(destination, copied_event)
+            written = append_event(destination, copied_event)
+            source_to_destination_seq[int(event.get("seq") or 0)] = int(
+                written["seq"]
+            )
             copied += 1
+        for delivery in plan.retained_chat_deliveries:
+            source_turn_seq = int(delivery.get("user_turn_seq") or 0)
+            destination_turn_seq = source_to_destination_seq.get(
+                source_turn_seq
+            )
+            if destination_turn_seq is None:
+                continue
+            copied_delivery = copy.deepcopy(delivery)
+            copied_delivery["user_turn_seq"] = destination_turn_seq
+            append_meta(destination, "chat_delivery", copied_delivery)
     except Exception:
         try:
             end_session(destination, reason="fork_failed")

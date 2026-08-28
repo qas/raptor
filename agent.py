@@ -47,6 +47,7 @@ from chat_runtime import (
     activate_delivery_context,
     capture_delivery_context,
     detached_delivery_context,
+    get_chat_provider,
     restore_delivery_context,
     send,
 )
@@ -394,6 +395,7 @@ async def agent_turn(
     source: str | None = None,
     allow_goal_creation: bool = False,
     input_recorded: bool = False,
+    source_message_id: int | str | None = None,
 ) -> bool | RetryableTurnFailure:
     typing_task = asyncio.create_task(typing_loop(chat_id))
     target = session.current_model_target()
@@ -422,6 +424,18 @@ async def agent_turn(
             session_id,
             user_item,
             source=turn_source,
+            data=(
+                {
+                    "chat_message": {
+                        "conversation_id": get_chat_provider().encode_conversation_id(
+                            chat_id
+                        ),
+                        "message_id": source_message_id,
+                    }
+                }
+                if turn_source == "user" and source_message_id is not None
+                else None
+            ),
         )
     work = build_active_context(session_id)
 

@@ -554,6 +554,7 @@ class ChatProviderContractTests(unittest.IsolatedAsyncioTestCase):
             "!room:example.org",
             "continue",
             delivery_context=None,
+            source_message_id="$message",
         )
 
     async def test_request_provider_can_reject_busy_input_before_steering(
@@ -956,7 +957,7 @@ class TelegramMultiChatTests(unittest.IsolatedAsyncioTestCase):
                 snapshot,
             )
 
-        delivery.assert_awaited_once_with("-1001/42", "done")
+        delivery.assert_awaited_once_with("-1001/42", "done", silent=True)
         self.assertIn(42, provider._chats[-1001].activity_topics)
         self.assertIn(42, provider._chats[-1002].activity_topics)
 
@@ -1088,7 +1089,7 @@ class TelegramTransportTests(unittest.IsolatedAsyncioTestCase):
             task_delivery.await_args.args,
             ("1/42", "Inspect target"),
         )
-        delivery.assert_awaited_once_with("1/42", "done")
+        delivery.assert_awaited_once_with("1/42", "done", silent=True)
         self.assertIn(42, provider._chats[1].activity_topics)
 
     async def test_activity_stream_uses_plain_reasoning_and_reply_messages(
@@ -1153,6 +1154,7 @@ class TelegramTransportTests(unittest.IsolatedAsyncioTestCase):
         delivery.assert_awaited_once_with(
             "1/42",
             "I found the complete issue",
+            silent=True,
         )
         self.assertIn(42, provider._chats[1].activity_topics)
 
@@ -1234,7 +1236,11 @@ class TelegramTransportTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(
             provider._chats[1].activity_topics[42].reply_message_id
         )
-        delivery.assert_awaited_once_with("1/42", "complete reply")
+        delivery.assert_awaited_once_with(
+            "1/42",
+            "complete reply",
+            silent=True,
+        )
 
     async def test_existing_subagent_topic_is_reused(self) -> None:
         import telegram
@@ -1260,7 +1266,11 @@ class TelegramTransportTests(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertEqual(surface_id, "42/77")
-        delivery.assert_awaited_once_with("1/42", "Continue the review")
+        delivery.assert_awaited_once_with(
+            "1/42",
+            "Continue the review",
+            silent=True,
+        )
         call.assert_awaited_once_with(
             "reopenForumTopic",
             {"chat_id": 1, "message_thread_id": 42},
@@ -1331,7 +1341,7 @@ class TelegramTransportTests(unittest.IsolatedAsyncioTestCase):
                 ),
             )
         self.assertTrue(result.result_delivered)
-        delivery.assert_awaited_once_with("1/42", "done")
+        delivery.assert_awaited_once_with("1/42", "done", silent=True)
         self.assertIn(42, provider._chats[1].activity_topics)
 
     async def test_activity_input_is_appended_as_plain_message(self) -> None:
@@ -1350,7 +1360,11 @@ class TelegramTransportTests(unittest.IsolatedAsyncioTestCase):
                 "check the logs",
             )
 
-        delivery.assert_awaited_once_with("1/42", "check the logs")
+        delivery.assert_awaited_once_with(
+            "1/42",
+            "check the logs",
+            silent=True,
+        )
 
     async def test_deleting_activity_removes_topic_mapping(self) -> None:
         import telegram
@@ -1600,4 +1614,21 @@ class TelegramTransportTests(unittest.IsolatedAsyncioTestCase):
                 "text": "updated",
                 "parse_mode": "HTML",
             },
+        )
+
+    async def test_subagent_topic_messages_can_be_sent_silently(self) -> None:
+        import telegram
+
+        rich = AsyncMock(return_value={"message_id": 77})
+        conversation = telegram._telegram_conversation_id(1, 42)
+        with patch.object(telegram, "send_rich", rich):
+            message_ids = await telegram._send_messages_tracked(
+                conversation,
+                "worker update",
+                silent=True,
+            )
+
+        self.assertEqual(message_ids, (77,))
+        self.assertTrue(
+            rich.await_args.args[1]["disable_notification"]
         )
