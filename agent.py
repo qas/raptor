@@ -326,7 +326,7 @@ async def compact_context(
                 create_compaction_response=lambda items, instructions: (
                     create_compaction_response(target, items, instructions)
                 ),
-                force=False,
+                force=True,
                 reason=reason,
                 input_budget=_input_budget(target),
                 generation_budget=_generation_budget(target),

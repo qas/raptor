@@ -69,9 +69,24 @@ _background_reservations = 0
 _SUBAGENT_ROSTER_TEXT_CHARS = 160
 
 
+def running_background_subagents() -> int:
+    runtime = session.current_runtime()
+    return sum(
+        bool(runtime.subagent_records.get(agent_id, {}).get("background"))
+        and not task.done()
+        for agent_id, task in runtime.subagent_tasks.items()
+    )
+
+
 def _background_subagent_count() -> int:
     return _background_reservations + sum(
-        len(runtime.subagent_tasks)
+        sum(
+            bool(
+                runtime.subagent_records.get(agent_id, {}).get("background")
+            )
+            and not task.done()
+            for agent_id, task in runtime.subagent_tasks.items()
+        )
         for runtime in session.all_chat_runtimes()
     )
 
@@ -1187,6 +1202,7 @@ async def run_background_subagent(
                 record["completed_at"] = int(time.time())
                 should_notify = bool(record.get("notify_completion", True))
                 record["completion_pending"] = should_notify
+                record["completion_decided_generation"] = generation
                 save_state()
                 log_event("subagent", "completed", lifecycle_record(record))
                 if should_notify:
@@ -1198,6 +1214,31 @@ async def run_background_subagent(
         finally:
             if session.subagent_tasks.get(agent_id) is owner_task:
                 session.subagent_tasks.pop(agent_id, None)
+
+
+def detach_foreground_subagent(
+    record: dict[str, Any],
+    *,
+    generation: int,
+) -> None:
+    """Preserve an interrupted parent's child as background-owned work."""
+    if int(record.get("run_generation") or 1) != generation:
+        return
+    record["background"] = True
+    record["notify_completion"] = True
+    already_decided = (
+        int(record.get("completion_decided_generation") or 0) >= generation
+    )
+    if already_decided and record.get("status") != "running":
+        record["completion_pending"] = True
+    save_state()
+    if already_decided and record.get("completion_pending"):
+        _queue_subagent_completion(record)
+    log_event(
+        "subagent",
+        "foreground_detached",
+        lifecycle_record(record),
+    )
 
 
 async def delete_subagent_record(agent_id: str) -> dict[str, Any]:
@@ -1592,25 +1633,28 @@ async def subagent_tool(
                 else {}
             ),
         }
+    record["notify_completion"] = False
+    task_handle = asyncio.create_task(run_background_subagent(record))
+    session.subagent_tasks[agent_id] = task_handle
     try:
-        result = await run_subagent(
-            agent_id=agent_id,
-            chat_id=chat_id,
-            depth=depth,
-            allow_subagents=bool(
-                record[
-                    "allow_subagents"
-                ]
-            ),
-        )
-        record["result"] = _bounded_record_text(result)
-        record["status"] = "completed"
-        save_state()
+        await asyncio.shield(task_handle)
+        if record.get("status") == "completed":
+            return {
+                "ok": True,
+                "agent_id": agent_id,
+                "status": "completed",
+                "result": str(record.get("result") or ""),
+                **(
+                    {"previous_completion": previous_completion}
+                    if previous_completion is not None
+                    else {}
+                ),
+            }
         return {
-            "ok": True,
+            "ok": False,
             "agent_id": agent_id,
-            "status": "completed",
-            "result": record["result"],
+            "status": str(record.get("status") or "failed"),
+            "error": str(record.get("error") or "Subagent failed"),
             **(
                 {"previous_completion": previous_completion}
                 if previous_completion is not None
@@ -1618,51 +1662,11 @@ async def subagent_tool(
             ),
         }
     except asyncio.CancelledError:
-        record["status"] = "cancelled"
-        record["error"] = (
-            "Subagent was cancelled"
-        )
-        record["completed_at"] = int(
-            time.time()
-        )
-        save_interrupted_subagent(
-            record
+        detach_foreground_subagent(
+            record,
+            generation=generation,
         )
         raise
-    except Exception as exc:
-        record["status"] = "failed"
-        record["error"] = _bounded_record_text(
-            f"{type(exc).__name__}: {exc}"
-        )
-        save_state()
-        return {
-            "ok": False,
-            "agent_id": agent_id,
-            "status": "failed",
-            "error": record["error"],
-            **(
-                {"previous_completion": previous_completion}
-                if previous_completion is not None
-                else {}
-            ),
-        }
-    finally:
-        record["completed_at"] = int(
-            time.time()
-        )
-        await finish_subagent_activity(
-            record,
-            expected_generation=generation,
-        )
-        prune_subagent_records()
-        save_state()
-        log_event(
-            "subagent",
-            "completed",
-            lifecycle_record(
-                record
-            ),
-        )
 
 
 def completion_prompt(
@@ -1837,10 +1841,11 @@ async def cancel_background_subagents(*, discard_pending: bool = False) -> int:
         record = session.subagent_records.get(
             agent_id
         )
-        if record:
-            record[
-                "notify_completion"
-            ] = False
+        if not record or not record.get("background"):
+            continue
+        record[
+            "notify_completion"
+        ] = False
         tasks.append(
             task
         )
@@ -1874,7 +1879,12 @@ async def cancel_background_subagent(agent_id: str) -> dict[str, Any]:
             "error": f"unknown subagent: {agent_id}",
         }
     task = session.subagent_tasks.get(agent_id)
-    if task is None or task.done() or record.get("status") != "running":
+    if (
+        task is None
+        or task.done()
+        or record.get("status") != "running"
+        or not record.get("background")
+    ):
         return {
             "ok": False,
             "kind": "subagent",

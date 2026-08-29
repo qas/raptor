@@ -6,7 +6,7 @@ import os
 import sys
 import tempfile
 import unittest
-from contextlib import nullcontext
+from contextlib import asynccontextmanager, nullcontext
 from pathlib import Path
 from unittest.mock import patch
 
@@ -91,6 +91,30 @@ class TranscriptDurabilityTests(unittest.IsolatedAsyncioTestCase):
             agent_mod._checkpoint_saved_message(session_id),
             f"Checkpoint saved · #{checkpoint['seq']}.",
         )
+
+    async def test_manual_compaction_forces_available_history(self) -> None:
+        captured: dict[str, object] = {}
+
+        async def compact(*args, **kwargs):
+            del args
+            captured.update(kwargs)
+            return False
+
+        @asynccontextmanager
+        async def indicator(*args, **kwargs):
+            del args, kwargs
+            yield
+
+        with (
+            patch.object(agent_mod, "compact_session", compact),
+            patch.object(agent_mod, "compacting_indicator", indicator),
+            patch.object(agent_mod, "typing_loop", _noop),
+            patch.object(agent_mod, "send", _noop),
+        ):
+            await agent_mod.compact_context("durability:chat")
+
+        self.assertIs(captured["force"], True)
+        self.assertEqual(captured["reason"], "manual")
 
     async def test_items_written_during_turn(self) -> None:
         sid = session.state["current_session_id"]

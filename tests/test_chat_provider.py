@@ -1366,6 +1366,47 @@ class TelegramTransportTests(unittest.IsolatedAsyncioTestCase):
             silent=True,
         )
 
+    async def test_activity_input_starts_a_fresh_reply_segment(self) -> None:
+        import telegram
+        from activity import ActivitySnapshot
+
+        provider = telegram.TelegramProvider()
+        provider._chats[1].is_forum = True
+        topic = telegram._TelegramActivityTopic(
+            reply_message_id=91,
+            reply_text="old streamed reply",
+        )
+        provider._chats[1].activity_topics[42] = topic
+        delivery = AsyncMock()
+        upsert = AsyncMock(return_value=92)
+        with (
+            patch.object(telegram, "send", delivery),
+            patch.object(telegram, "_upsert_topic_message", upsert),
+        ):
+            await provider.append_activity_message(
+                "1/10",
+                "42/77",
+                "steer the child",
+            )
+            await provider.update_activity_surface(
+                "1/10",
+                "42/77",
+                ActivitySnapshot(
+                    activity_id="worker",
+                    title="Task",
+                    status="running",
+                    reply="new streamed reply",
+                ),
+            )
+
+        upsert.assert_awaited_once_with(
+            1,
+            42,
+            None,
+            "new streamed reply",
+        )
+        self.assertEqual(topic.reply_message_id, 92)
+
     async def test_deleting_activity_removes_topic_mapping(self) -> None:
         import telegram
 

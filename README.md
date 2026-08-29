@@ -140,7 +140,7 @@ the daemon (the launch workspace's `.raptor` directory by default).
 | `/status` | Show runtime, context, goal, subagent, and shell status |
 | `/stop` | Interrupt the current root turn; background work continues |
 | `/stop all` | Interrupt and cancel background work in the current main chat |
-| `/compact` | Create a durable context checkpoint |
+| `/compact` | Force a durable checkpoint of available native history |
 | `/truncate <n>` | Fork history before the last `n` user turns |
 | `/models [provider]` | List models served by a configured provider |
 | `/model` | Show the current model target and configured providers |
@@ -242,6 +242,11 @@ User input, steering, background shell completion, subagent completion, and
 goal continuation enter the owning chat's controller instead of starting
 competing runs. Completion events carry their chat owner and cannot be consumed
 by another chat.
+
+Applying a queued steer immediately interrupts only the root turn. A foreground
+subagent that was being awaited detaches into background ownership, continues
+its durable run, and reports its result asynchronously; an ordinary queued
+steer applied at the next safe point does not interrupt either task.
 
 The root agent can cancel one background subagent or managed shell owned by its
 chat using the returned identifier. Targeted cancellation suppresses completion
@@ -347,6 +352,8 @@ exposing the child's transcript or tool payloads. Raptor removes user input
 from that topic because the parent owns steering. The topic remains open across
 completed runs and is reused when the same subagent is continued. Deleting a
 stopped subagent removes its topic and durable runtime record.
+Each parent-authored steer starts a new reply segment in the topic, so later
+streaming appears below that steer instead of editing an earlier reply above it.
 
 ### Telegram chats and forums
 

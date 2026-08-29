@@ -418,6 +418,7 @@ class BackgroundSubagentTests(unittest.IsolatedAsyncioTestCase):
             "chat_key": "telegram:123",
             "depth": 1,
             "allow_subagents": False,
+            "background": True,
             "notify_completion": True,
             "completion_pending": False,
             "completion_attempts": 0,
@@ -444,6 +445,108 @@ class BackgroundSubagentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(record["status"], "cancelled")
         self.assertFalse(record["completion_pending"])
         self.assertNotIn("worker-1", session.subagent_tasks)
+
+    async def test_interrupted_foreground_subagent_detaches_and_completes(
+        self,
+    ) -> None:
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def run(**kwargs):
+            del kwargs
+            started.set()
+            await release.wait()
+            return "finished after parent interruption"
+
+        queued = Mock(return_value=True)
+        with (
+            patch.object(subagents, "run_subagent", run),
+            patch.object(subagents, "open_subagent_activity", AsyncMock()),
+            patch.object(
+                subagents,
+                "finish_subagent_activity",
+                AsyncMock(return_value=True),
+            ),
+            patch.object(subagents, "save_state"),
+            patch.object(subagents, "_queue_subagent_completion", queued),
+        ):
+            parent = asyncio.create_task(
+                subagents.subagent_tool(
+                    {"task": "keep working"},
+                    chat_id="telegram:123",
+                    execution_context={"depth": 0},
+                )
+            )
+            await started.wait()
+            agent_id = next(iter(session.subagent_records))
+            record = session.subagent_records[agent_id]
+            child = session.subagent_tasks[agent_id]
+            self.assertEqual(subagents.running_background_subagents(), 0)
+
+            parent.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await parent
+
+            self.assertTrue(record["background"])
+            self.assertEqual(record["status"], "running")
+            self.assertFalse(child.cancelled())
+            self.assertEqual(subagents.running_background_subagents(), 1)
+
+            release.set()
+            await child
+
+        self.assertEqual(record["status"], "completed")
+        self.assertEqual(record["result"], "finished after parent interruption")
+        self.assertTrue(record["completion_pending"])
+        queued.assert_called_once_with(record)
+
+    async def test_foreground_detach_during_finalization_queues_completion(
+        self,
+    ) -> None:
+        finalizing = asyncio.Event()
+        release = asyncio.Event()
+
+        async def finish(*args, **kwargs):
+            del args, kwargs
+            finalizing.set()
+            await release.wait()
+            return True
+
+        queued = Mock(return_value=True)
+        with (
+            patch.object(
+                subagents,
+                "run_subagent",
+                AsyncMock(return_value="completed before interruption"),
+            ),
+            patch.object(subagents, "open_subagent_activity", AsyncMock()),
+            patch.object(subagents, "finish_subagent_activity", finish),
+            patch.object(subagents, "save_state"),
+            patch.object(subagents, "_queue_subagent_completion", queued),
+        ):
+            parent = asyncio.create_task(
+                subagents.subagent_tool(
+                    {"task": "finish reliably"},
+                    chat_id="telegram:123",
+                    execution_context={"depth": 0},
+                )
+            )
+            await finalizing.wait()
+            agent_id = next(iter(session.subagent_records))
+            record = session.subagent_records[agent_id]
+            child = session.subagent_tasks[agent_id]
+
+            parent.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await parent
+
+            self.assertEqual(record["status"], "completed")
+            self.assertTrue(record["completion_pending"])
+            self.assertFalse(child.done())
+            queued.assert_called_once_with(record)
+
+            release.set()
+            await child
 
     async def test_provider_prefixed_conversation_id_is_preserved(self) -> None:
         record = {
@@ -1300,7 +1403,13 @@ class BackgroundSubagentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(retained, [{"id": "a", "interrupted_at": 3}])
 
     async def test_background_subagent_capacity_is_bounded(self) -> None:
-        session.subagent_tasks["existing"] = AsyncMock()
+        session.subagent_records["existing"] = {
+            "id": "existing",
+            "background": True,
+            "status": "running",
+        }
+        session.subagent_tasks["existing"] = Mock()
+        session.subagent_tasks["existing"].done.return_value = False
         record_count = len(session.subagent_records)
         try:
             with patch.object(subagents, "MAX_BACKGROUND_SUBAGENTS", 1):
@@ -1330,7 +1439,13 @@ class BackgroundSubagentTests(unittest.IsolatedAsyncioTestCase):
             "run_generation": 1,
         }
         session.subagent_records["worker-1"] = record
-        session.subagent_tasks["existing"] = AsyncMock()
+        session.subagent_records["existing"] = {
+            "id": "existing",
+            "background": True,
+            "status": "running",
+        }
+        session.subagent_tasks["existing"] = Mock()
+        session.subagent_tasks["existing"].done.return_value = False
         try:
             with (
                 patch.object(subagents, "MAX_BACKGROUND_SUBAGENTS", 1),

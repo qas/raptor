@@ -86,6 +86,7 @@ from responses import (
 from subagents import (
     cancel_background_subagents,
     pending_subagent_completions,
+    running_background_subagents,
     subagent_summaries,
 )
 from shell_sessions import (
@@ -580,7 +581,7 @@ async def command(
                 f"thread: {'active' if thread_active() else 'none'}\n"
                 f"approval: {state.get('approval_mode', 'off')}\n"
                 f"pending approvals: {len(pending_approvals)}\n"
-                f"background subagents: {len(session.subagent_tasks)}\n"
+                f"background subagents: {running_background_subagents()}\n"
                 f"background shells: {running_shell_sessions()}\n"
                 f"pending background results: "
                 f"{pending_subagent_completions() + pending_shell_completions()}\n"

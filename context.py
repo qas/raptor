@@ -543,15 +543,11 @@ async def compact_session(
     recompact_checkpoint = bool(
         previous
         and not candidates
-        and (force or reason == "overflow")
+        and reason == "overflow"
     )
     if not candidates and not recompact_checkpoint:
         return False
-    keep_recent = (
-        0 if reason == "overflow" else COMPACT_KEEP_RECENT_TOKENS
-    )
-    if force and reason == "overflow":
-        keep_recent = 0
+    keep_recent = 0 if force else COMPACT_KEEP_RECENT_TOKENS
     retain_idx = _choose_retain_start_index(
         candidates,
         keep_recent,

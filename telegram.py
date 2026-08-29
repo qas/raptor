@@ -1368,6 +1368,12 @@ class TelegramProvider:
             text,
             silent=TELEGRAM_SUBAGENT_TOPICS_SILENT,
         )
+        # A parent steer is a new conversational segment. Preserve the prior
+        # streamed reply in place and make the child's next stream appear
+        # after this input instead of editing an older message above it.
+        topic = chat.activity_topics[topic_id]
+        topic.reply_message_id = None
+        topic.reply_text = ""
 
     async def _update_activity_topic_output(
         self,

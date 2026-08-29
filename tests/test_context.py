@@ -199,6 +199,53 @@ class ContextTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(captured[0]), 1)
         self.assertEqual(captured[0][0]["role"], "user")
 
+    async def test_forced_compaction_retires_recent_native_tail(self) -> None:
+        latest = self._add_user("only recent turn")
+        calls = 0
+
+        async def create(items, instructions):
+            nonlocal calls
+            calls += 1
+            return {
+                "output": [
+                    {
+                        "type": "message",
+                        "content": [
+                            {"type": "output_text", "text": "summary"},
+                        ],
+                    }
+                ]
+            }
+
+        with patch.object(context, "COMPACT_KEEP_RECENT_TOKENS", 20_000):
+            normal = await context.compact_session(
+                self.session_id,
+                estimate_compaction_request=lambda *_: 10,
+                create_compaction_response=create,
+                reason="threshold",
+            )
+            forced = await context.compact_session(
+                self.session_id,
+                estimate_compaction_request=lambda *_: 10,
+                create_compaction_response=create,
+                force=True,
+                reason="manual",
+            )
+            repeated = await context.compact_session(
+                self.session_id,
+                estimate_compaction_request=lambda *_: 10,
+                create_compaction_response=create,
+                force=True,
+                reason="manual",
+            )
+
+        self.assertFalse(normal)
+        self.assertTrue(forced)
+        self.assertFalse(repeated)
+        self.assertEqual(calls, 1)
+        checkpoint = chat_store.latest_checkpoint(self.session_id)
+        self.assertEqual(checkpoint["through_seq"], latest["seq"])
+
     async def test_new_checkpoint_merges_previous(
         self,
     ) -> None:
