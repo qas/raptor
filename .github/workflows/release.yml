@@ -82,7 +82,8 @@ jobs:
           mkdir -p "$AGENT_WORKDIR"
           ./dist/raptor/raptor --help
           version="$(./dist/raptor/raptor --version)"
-          test "$version" = "raptor ${{ needs.validate.outputs.version }}"
+          release_tag="${{ needs.validate.outputs.version }}"
+          test "$version" = "raptor ${release_tag#v}"
           set +e
           ./dist/raptor/raptor --status
           status=$?
