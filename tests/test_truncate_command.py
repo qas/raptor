@@ -419,9 +419,10 @@ class TruncateCommandTests(unittest.IsolatedAsyncioTestCase):
             row["session_id"] for row in chat_store.list_sessions()
         }
         real_fsync_directory = storage.fsync_directory
+        chat_directory = self.directory.resolve()
 
         def fail_chat_fsync(directory: Path) -> None:
-            if directory == self.directory:
+            if directory.resolve() == chat_directory:
                 raise OSError("directory fsync failed")
             real_fsync_directory(directory)
 
