@@ -856,6 +856,7 @@ def new_record(
         "completion_notified_at": None,
         "completion_attempts": 0,
         "run_generation": 1,
+        "cancel_requested_generation": None,
         "activity_finished_generation": 0,
         "activity_result_delivered": False,
         "activity_surface_id": None,
@@ -1117,6 +1118,7 @@ def continue_record(
         1,
         int(record.get("run_generation") or 1) + 1,
     )
+    record["cancel_requested_generation"] = None
     record["activity_result_delivered"] = False
     save_state()
 
@@ -1223,6 +1225,8 @@ def detach_foreground_subagent(
 ) -> None:
     """Preserve an interrupted parent's child as background-owned work."""
     if int(record.get("run_generation") or 1) != generation:
+        return
+    if int(record.get("cancel_requested_generation") or 0) == generation:
         return
     record["background"] = True
     record["notify_completion"] = True
@@ -1833,6 +1837,7 @@ def restore_pending_subagent_completions() -> int:
 
 async def cancel_background_subagents(*, discard_pending: bool = False) -> int:
     tasks: list[asyncio.Task] = []
+    changed = False
     for agent_id, task in list(
         session.subagent_tasks.items()
     ):
@@ -1841,14 +1846,23 @@ async def cancel_background_subagents(*, discard_pending: bool = False) -> int:
         record = session.subagent_records.get(
             agent_id
         )
-        if not record or not record.get("background"):
+        if not record:
             continue
-        record[
-            "notify_completion"
-        ] = False
-        tasks.append(
-            task
+        record["notify_completion"] = False
+        record["cancel_requested_generation"] = max(
+            1,
+            int(record.get("run_generation") or 1),
         )
+        tasks.append(task)
+        changed = True
+    if discard_pending:
+        for record in session.subagent_records.values():
+            if record.get("completion_pending"):
+                record["completion_pending"] = False
+                record["completion_attempts"] = 0
+                changed = True
+    if changed:
+        save_state()
     for task in tasks:
         task.cancel()
     if tasks:
@@ -1856,16 +1870,31 @@ async def cancel_background_subagents(*, discard_pending: bool = False) -> int:
             *tasks,
             return_exceptions=True,
         )
-    if discard_pending:
-        changed = False
-        for record in session.subagent_records.values():
-            if record.get("completion_pending"):
-                record["completion_pending"] = False
-                record["completion_attempts"] = 0
-                changed = True
-        if changed:
-            save_state()
     return len(tasks)
+
+
+def _subagent_tree_ids(root_agent_id: str) -> set[str]:
+    """Return the durable ownership tree rooted at one subagent."""
+    children_by_parent: dict[str, list[str]] = {}
+    for agent_id, record in session.subagent_records.items():
+        parent_session_id = str(record.get("parent_session_id") or "")
+        if parent_session_id:
+            children_by_parent.setdefault(parent_session_id, []).append(agent_id)
+
+    tree = {root_agent_id}
+    pending = [root_agent_id]
+    while pending:
+        agent_id = pending.pop()
+        record = session.subagent_records.get(agent_id)
+        if record is None:
+            continue
+        session_id = str(record.get("session_id") or "")
+        for child_id in children_by_parent.get(session_id, []):
+            if child_id in tree:
+                continue
+            tree.add(child_id)
+            pending.append(child_id)
+    return tree
 
 
 async def cancel_background_subagent(agent_id: str) -> dict[str, Any]:
@@ -1896,9 +1925,27 @@ async def cancel_background_subagent(agent_id: str) -> dict[str, Any]:
     record["notify_completion"] = False
     record["completion_pending"] = False
     record["completion_attempts"] = 0
+    tree_ids = _subagent_tree_ids(agent_id)
+    tasks: list[asyncio.Task] = []
+    for owned_id in tree_ids:
+        owned_task = session.subagent_tasks.get(owned_id)
+        if owned_task is None or owned_task.done():
+            continue
+        owned_record = session.subagent_records.get(owned_id)
+        if owned_record is None:
+            continue
+        owned_record["notify_completion"] = False
+        owned_record["completion_pending"] = False
+        owned_record["completion_attempts"] = 0
+        owned_record["cancel_requested_generation"] = max(
+            1,
+            int(owned_record.get("run_generation") or 1),
+        )
+        tasks.append(owned_task)
     save_state()
-    task.cancel()
-    await asyncio.gather(task, return_exceptions=True)
+    for owned_task in tasks:
+        owned_task.cancel()
+    await asyncio.gather(*tasks, return_exceptions=True)
     cancelled = record.get("status") == "cancelled"
     return {
         "ok": cancelled,

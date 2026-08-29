@@ -6,6 +6,7 @@ import tempfile
 import types
 import unittest
 from collections.abc import Callable
+from functools import partial
 from pathlib import Path
 from unittest.mock import AsyncMock, Mock, patch
 
@@ -70,6 +71,54 @@ class BackgroundSubagentTests(unittest.IsolatedAsyncioTestCase):
         )
         session.subagent_records.clear()
         session.set_current_model_target(self.target)
+
+    async def _run_nested_tree(
+        self,
+        nested_started: asyncio.Event,
+        **kwargs,
+    ) -> str:
+        agent_id = str(kwargs["agent_id"])
+        record = session.subagent_records[agent_id]
+        if int(kwargs["depth"]) == 1:
+            result = await subagents.subagent_tool(
+                {"task": "nested child"},
+                chat_id=kwargs["chat_id"],
+                execution_context={
+                    "depth": 1,
+                    "subagents_allowed": True,
+                    "session_id": record["session_id"],
+                    "root_session_id": record["root_session_id"],
+                },
+            )
+            return str(result)
+        nested_started.set()
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+    async def _start_nested_tree(
+        self,
+        nested_started: asyncio.Event,
+    ) -> tuple[str, str]:
+        result = await subagents.subagent_tool(
+            {
+                "task": "background parent",
+                "background": True,
+                "allow_subagents": True,
+            },
+            chat_id="telegram:123",
+            execution_context={
+                "depth": 0,
+                "session_id": session.state["current_session_id"],
+            },
+        )
+        parent_id = str(result["agent_id"])
+        await nested_started.wait()
+        child_id = next(
+            agent_id
+            for agent_id in session.subagent_records
+            if agent_id != parent_id
+        )
+        return parent_id, child_id
 
     def test_subagent_payload_rejects_instruction_roles_in_history(self) -> None:
         with self.assertRaisesRegex(ValueError, "instructions field"):
@@ -445,6 +494,92 @@ class BackgroundSubagentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(record["status"], "cancelled")
         self.assertFalse(record["completion_pending"])
         self.assertNotIn("worker-1", session.subagent_tasks)
+
+    async def test_targeted_cancel_stops_nested_foreground_descendant(
+        self,
+    ) -> None:
+        nested_started = asyncio.Event()
+        run_nested_tree = partial(self._run_nested_tree, nested_started)
+
+        with (
+            patch.object(subagents, "run_subagent", run_nested_tree),
+            patch.object(subagents, "open_subagent_activity", AsyncMock()),
+            patch.object(
+                subagents,
+                "finish_subagent_activity",
+                AsyncMock(return_value=True),
+            ),
+            patch.object(subagents, "save_state"),
+            patch.object(subagents, "save_interrupted_subagent"),
+            patch.object(subagents, "prune_subagent_records"),
+        ):
+            parent_id, child_id = await self._start_nested_tree(
+                nested_started
+            )
+
+            try:
+                cancelled = await subagents.cancel_background_subagent(
+                    parent_id
+                )
+
+                self.assertTrue(cancelled["ok"])
+                self.assertEqual(
+                    session.subagent_records[child_id]["status"],
+                    "cancelled",
+                )
+                self.assertFalse(
+                    session.subagent_records[child_id]["background"]
+                )
+                self.assertNotIn(child_id, session.subagent_tasks)
+            finally:
+                remaining = list(session.subagent_tasks.values())
+                for task in remaining:
+                    task.cancel()
+                await asyncio.gather(*remaining, return_exceptions=True)
+
+    async def test_stop_all_stops_nested_foreground_descendant(self) -> None:
+        nested_started = asyncio.Event()
+        run_nested_tree = partial(self._run_nested_tree, nested_started)
+
+        with (
+            patch.object(subagents, "run_subagent", run_nested_tree),
+            patch.object(subagents, "open_subagent_activity", AsyncMock()),
+            patch.object(
+                subagents,
+                "finish_subagent_activity",
+                AsyncMock(return_value=True),
+            ),
+            patch.object(subagents, "save_state"),
+            patch.object(subagents, "save_interrupted_subagent"),
+            patch.object(subagents, "prune_subagent_records"),
+        ):
+            parent_id, child_id = await self._start_nested_tree(
+                nested_started
+            )
+
+            try:
+                cancelled = await subagents.cancel_background_subagents(
+                    discard_pending=True,
+                )
+
+                self.assertEqual(cancelled, 2)
+                self.assertEqual(
+                    session.subagent_records[parent_id]["status"],
+                    "cancelled",
+                )
+                self.assertEqual(
+                    session.subagent_records[child_id]["status"],
+                    "cancelled",
+                )
+                self.assertFalse(
+                    session.subagent_records[child_id]["background"]
+                )
+                self.assertEqual(session.subagent_tasks, {})
+            finally:
+                remaining = list(session.subagent_tasks.values())
+                for task in remaining:
+                    task.cancel()
+                await asyncio.gather(*remaining, return_exceptions=True)
 
     async def test_interrupted_foreground_subagent_detaches_and_completes(
         self,
