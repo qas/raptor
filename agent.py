@@ -84,7 +84,7 @@ def _checkpoint_saved_message(session_id: str) -> str:
     seq = checkpoint.get("seq") if checkpoint else None
     if not isinstance(seq, int) or seq <= 0:
         raise RuntimeError("compaction completed without an active checkpoint")
-    return f"Checkpoint saved · #{seq}."
+    return "Checkpoint saved"
 
 
 MALFORMED_TOOL_CALL_MESSAGE = (
