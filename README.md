@@ -368,6 +368,9 @@ forum so it can manage subagent topics and remove input from them. Only
 Create and name normal topics with Telegram's standard UI. Raptor discovers a
 topic on its first message and persists its runtime. Activity topics are
 presentation-only and cannot steer their subagent; steer from the parent topic.
+`subagent_topics_silent` maps to Telegram's silent-message flag: it suppresses
+notification sound, but clients may still show notifications and unread badges.
+Bots cannot mute a topic in a user's Telegram settings.
 
 ## Storage
 
@@ -592,7 +595,7 @@ RAPTOR_PROXY=socks5h://proxy.example:1080 \
 | `TG_CHAT_IDS` | `TG_USER_ID` | Ordered, comma-separated chats served by the bot |
 | `TG_MAX_RETRIES` | `3` | Retries after a Telegram flood-control response |
 | `TELEGRAM_MARKDOWN` | `1` | Enable Telegram Markdown rendering |
-| `TELEGRAM_SUBAGENT_TOPICS_SILENT` | `1` | Send subagent-topic messages without notifications |
+| `TELEGRAM_SUBAGENT_TOPICS_SILENT` | `1` | Send subagent-topic messages without notification sound |
 
 ### Inbound Responses API
 

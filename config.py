@@ -626,6 +626,8 @@ TELEGRAM_MARKDOWN = _env_bool(
     configured=_TELEGRAM.get("markdown"),
 )
 
+# Telegram's disable_notification flag suppresses sound; it does not hide the
+# notification or mute a topic in the user's client.
 TELEGRAM_SUBAGENT_TOPICS_SILENT = _env_bool(
     "TELEGRAM_SUBAGENT_TOPICS_SILENT",
     True,
