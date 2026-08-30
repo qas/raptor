@@ -1,9 +1,13 @@
-"""Project version loaded from the adjacent canonical pyproject file."""
+"""Raptor build identity."""
 
 from pathlib import Path
-import tomllib
+
+from build_info import load_build_info
 
 
-_PROJECT = Path(__file__).with_name("pyproject.toml")
-with _PROJECT.open("rb") as _handle:
-    VERSION = str(tomllib.load(_handle)["project"]["version"])
+BUILD_INFO = load_build_info(Path(__file__).parent)
+
+
+def display_version() -> str:
+    """Return the human-readable version and immutable build revision."""
+    return BUILD_INFO.display()

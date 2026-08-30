@@ -12,7 +12,7 @@ os.environ["RAPTOR_HOME"] = tempfile.mkdtemp(prefix="raptor-version-home-")
 os.environ["AGENT_WORKDIR"] = os.environ["RAPTOR_HOME"]
 
 import raptor
-from version import VERSION
+from version import display_version
 
 
 class VersionCliTests(unittest.TestCase):
@@ -26,7 +26,10 @@ class VersionCliTests(unittest.TestCase):
         ):
             result = raptor.run()
         self.assertEqual(result, 0)
-        self.assertEqual(output.getvalue().strip(), f"raptor {VERSION}")
+        self.assertEqual(
+            output.getvalue().strip(),
+            f"raptor {display_version()}",
+        )
         acquire.assert_not_called()
 
     def test_short_version_alias(self) -> None:
@@ -37,7 +40,7 @@ class VersionCliTests(unittest.TestCase):
         ):
             result = raptor.run()
         self.assertEqual(result, 0)
-        self.assertIn(VERSION, output.getvalue())
+        self.assertIn(display_version(), output.getvalue())
 
     def test_version_rejects_another_process_action(self) -> None:
         with (

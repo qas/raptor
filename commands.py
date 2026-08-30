@@ -105,7 +105,7 @@ from threads import (
 from thread_state import current_thread, thread_active
 from turn_runtime import TurnKind, turns
 from todos import validate_plan
-from version import VERSION
+from version import display_version
 from tool_activity import ToolActivitySurface
 
 # ---------------------------------------------------------------------------
@@ -591,7 +591,7 @@ async def command(
         await send(
             chat_id,
             (
-                f"version: {VERSION}\n"
+                f"version: {display_version()}\n"
                 f"chat provider: {get_chat_provider().name}\n"
                 f"model provider: {target.provider_id}\n"
                 f"Responses: {responses_status}\n"

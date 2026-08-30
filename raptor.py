@@ -24,9 +24,9 @@ def run() -> int:
 
     args = parse_args()
     if getattr(args, "version", False):
-        from version import VERSION
+        from version import display_version
 
-        print(f"raptor {VERSION}")
+        print(f"raptor {display_version()}")
         return 0
     owns_runtime = not (args.status or args.stop_daemon or args.check_proxy)
     if owns_runtime and not acquire_runtime_lock():

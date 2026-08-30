@@ -13,8 +13,8 @@ _INSTALL = _ROOT / "install.sh"
 def _helper_source(name: str) -> str:
     source = _INSTALL.read_text(encoding="utf-8")
     start = source.index(f"{name}()")
-    end = source.index("\n", source.index("}", start))
-    return source[start:end + 1]
+    end = source.index("\n}\n", start)
+    return source[start:end + 2]
 
 
 def _run_helper(
@@ -67,6 +67,41 @@ class InstallScriptTests(unittest.TestCase):
     def test_release_version_accepts_semver_tags(self) -> None:
         completed = _run_helper("is_release_version", "v0.1.0", cwd=_ROOT)
         self.assertEqual(completed.returncode, 0, completed.stderr)
+
+    def test_release_version_accepts_prerelease_tags(self) -> None:
+        for version in (
+            "v2.5.0-alpha.1",
+            "v2.5.0-beta.2",
+            "v2.5.0-rc.3",
+        ):
+            with self.subTest(version=version):
+                completed = _run_helper(
+                    "is_release_version",
+                    version,
+                    cwd=_ROOT,
+                )
+                self.assertEqual(completed.returncode, 0, completed.stderr)
+
+    def test_release_version_accepts_nightly_channel(self) -> None:
+        completed = _run_helper("is_release_version", "nightly", cwd=_ROOT)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+
+    def test_release_version_rejects_unsupported_identifiers(self) -> None:
+        for version in (
+            "latest",
+            "v1.2",
+            "v1.2.3-preview.1",
+            "v1.2.3-rc",
+            "v01.2.3",
+            "v1.2.3-rc.01",
+        ):
+            with self.subTest(version=version):
+                completed = _run_helper(
+                    "is_release_version",
+                    version,
+                    cwd=_ROOT,
+                )
+                self.assertNotEqual(completed.returncode, 0)
 
     def test_release_version_rejects_path_escape(self) -> None:
         completed = _run_helper(

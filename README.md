@@ -43,8 +43,19 @@ curl -fsSL \
 ```
 
 The installer places `raptor` in `~/.local/bin`. Add that directory to `PATH`
-if the command is not found. Pin a release with `RAPTOR_VERSION=v0.1.0`, or
-override the install locations with `RAPTOR_INSTALL_ROOT` and
+if the command is not found. The default command installs the latest stable
+release. Pin a stable or prerelease tag with
+`RAPTOR_VERSION` after it has been published, or install the latest successful
+build of `main` with:
+
+```bash
+curl -fsSL \
+  https://github.com/qas/raptor/releases/download/nightly/install.sh |
+  RAPTOR_VERSION=nightly sh
+```
+
+Nightly builds are identified by their commit SHA and are intended for early
+testing. Override install locations with `RAPTOR_INSTALL_ROOT` and
 `RAPTOR_BIN_DIR`.
 
 Remove the installed binary without touching workspace data:
@@ -117,8 +128,10 @@ raptor --stop-daemon
 raptor --daemon
 ```
 
-`raptor --version` prints the version from `pyproject.toml` and exits before
-acquiring the runtime lock or initializing the application.
+`raptor --version` prints a tagged build's human-selected version and commit,
+or a nightly build's commit and build date, then exits before acquiring the
+runtime lock or initializing the application. Source checkouts use the
+development version in `pyproject.toml`.
 
 Raptor uses an atomic process-lifetime lock. A second instance cannot start
 against the same `RAPTOR_HOME`. Status and stop commands use that lock's owner
@@ -711,9 +724,13 @@ append-only owner-tagged conversation history, provider-affine delivery,
 bounded retained state, atomic process ownership, and explicit recovery after
 transient failure.
 
-To publish Linux and macOS binaries, set `project.version` in
-`pyproject.toml`, then push a matching `v*` tag. GitHub Actions tests, freezes
-`raptor`, and uploads the release assets.
+Every push to `main` tests and publishes a rolling `nightly` build identified
+by its commit SHA. Human-selected tags publish releases independently of the
+development version in `pyproject.toml`. Supported tags are stable
+`vMAJOR.MINOR.PATCH` versions and numbered `alpha`, `beta`, or `rc`
+prereleases. GitHub Actions uses the same test and freeze workflow for nightly
+and tagged builds. Prerelease tags remain GitHub prereleases; stable tags
+become normal releases used by the default installer.
 
 ## Contributing
 

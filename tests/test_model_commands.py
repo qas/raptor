@@ -19,7 +19,7 @@ import commands
 import session
 from model_providers import ModelConfiguration, ModelProvider, ModelTarget
 from turn_runtime import turns
-from version import VERSION
+from version import display_version
 
 
 class ModelCommandTests(unittest.IsolatedAsyncioTestCase):
@@ -107,7 +107,10 @@ class ModelCommandTests(unittest.IsolatedAsyncioTestCase):
             handled = await commands.command(1, "/status")
 
         self.assertTrue(handled)
-        self.assertIn(f"version: {VERSION}\n", send.await_args.args[1])
+        self.assertIn(
+            f"version: {display_version()}\n",
+            send.await_args.args[1],
+        )
 
     async def test_subagents_reports_current_session_records(self) -> None:
         session.subagent_records["worker-1"] = {

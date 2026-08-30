@@ -1,11 +1,18 @@
 # -*- mode: python ; coding: utf-8 -*-
+from pathlib import Path
+
 from PyInstaller.utils.hooks import collect_data_files
+
+
+build_data = [("pyproject.toml", ".")]
+if Path(".raptor-build.json").is_file():
+    build_data.append((".raptor-build.json", "."))
 
 a = Analysis(
     ["raptor.py"],
     pathex=[],
     binaries=[],
-    datas=collect_data_files("certifi") + [("pyproject.toml", ".")],
+    datas=collect_data_files("certifi") + build_data,
     hiddenimports=[
         "telegram",
         "responses_provider",

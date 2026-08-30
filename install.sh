@@ -12,15 +12,35 @@ die() {
 }
 
 is_release_version() {
-    case "$1" in
-        v[0-9]*.[0-9]*.[0-9]*)
-            case "$1" in
-                *[!v0-9.]*|*".."*|v.*|*. ) return 1 ;;
-            esac
-            return 0
-            ;;
-    esac
-    return 1
+    [ "$1" = "nightly" ] && return 0
+    version=${1#v}
+    [ "$version" != "$1" ] || return 1
+    core=${version%%-*}
+    prerelease=
+    if [ "$core" != "$version" ]; then
+        prerelease=${version#*-}
+        case "$prerelease" in
+            alpha.*|beta.*|rc.*) ;;
+            *) return 1 ;;
+        esac
+        stage=${prerelease%%.*}
+        number=${prerelease#*.}
+        [ "$stage.$number" = "$prerelease" ] || return 1
+        case "$number" in
+            ""|*[!0-9]*|0[0-9]*) return 1 ;;
+        esac
+    fi
+    old_ifs=$IFS
+    IFS=.
+    set -- $core
+    IFS=$old_ifs
+    [ "$#" -eq 3 ] || return 1
+    for number in "$@"; do
+        case "$number" in
+            ""|*[!0-9]*|0[0-9]*) return 1 ;;
+        esac
+    done
+    return 0
 }
 
 absolute_dir() {

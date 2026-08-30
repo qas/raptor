@@ -31,5 +31,6 @@ htmlcov/
 sandbox/
 
 # Release build output
+.raptor-build.json
 build/
 dist/

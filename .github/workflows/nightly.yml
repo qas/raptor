@@ -1,9 +1,13 @@
-name: release
+name: nightly
 
 on:
   push:
-    tags:
-      - "v*"
+    branches:
+      - main
+
+concurrency:
+  group: nightly
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -13,27 +17,20 @@ jobs:
     runs-on: ubuntu-24.04
     outputs:
       built_at: ${{ steps.metadata.outputs.built_at }}
-      prerelease: ${{ steps.metadata.outputs.prerelease }}
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Validate human-selected release
+      - name: Validate nightly identity
         id: metadata
         env:
-          RELEASE_TAG: ${{ github.ref_name }}
           REVISION: ${{ github.sha }}
         run: |
           built_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          python3 build_info.py release \
-            "$REVISION" "$built_at" /tmp/raptor-build.json \
-            --tag "$RELEASE_TAG"
+          python3 build_info.py nightly \
+            "$REVISION" "$built_at" /tmp/raptor-build.json
           echo "built_at=${built_at}" >> "$GITHUB_OUTPUT"
-          case "$RELEASE_TAG" in
-            *-*) echo "prerelease=true" >> "$GITHUB_OUTPUT" ;;
-            *) echo "prerelease=false" >> "$GITHUB_OUTPUT" ;;
-          esac
       - name: Check installer syntax
         run: sh -n install.sh
 
@@ -41,11 +38,10 @@ jobs:
     needs: prepare
     uses: ./.github/workflows/build.yml
     with:
-      channel: release
-      release_tag: ${{ github.ref_name }}
+      channel: nightly
       revision: ${{ github.sha }}
       built_at: ${{ needs.prepare.outputs.built_at }}
-      artifact_label: ${{ github.ref_name }}
+      artifact_label: nightly
 
   publish:
     needs:
@@ -64,25 +60,31 @@ jobs:
         with:
           path: release
           merge-multiple: true
-      - name: Checksum and publish
+      - name: Publish rolling nightly
         env:
           GH_TOKEN: ${{ github.token }}
-          PRERELEASE: ${{ needs.prepare.outputs.prerelease }}
-          TAG: ${{ github.ref_name }}
+          REPOSITORY: ${{ github.repository }}
+          REVISION: ${{ github.sha }}
         run: |
           cd release
           sha256sum raptor-*.tar.gz > SHA256SUMS
           cp ../install.sh .
-          release_kind=
-          if [ "$PRERELEASE" = "true" ]; then
-            release_kind=--prerelease
+          if gh release view nightly >/dev/null 2>&1; then
+            gh release upload nightly --clobber \
+              raptor-*.tar.gz SHA256SUMS install.sh
+            gh release edit nightly \
+              --title "Nightly" \
+              --prerelease \
+              --notes "Latest successful build of main at ${REVISION}."
+            gh api --method PATCH \
+              "repos/${REPOSITORY}/git/refs/tags/nightly" \
+              -f sha="$REVISION" \
+              -F force=true
+          else
+            gh release create nightly \
+              --target "$REVISION" \
+              --title "Nightly" \
+              --prerelease \
+              --notes "Latest successful build of main at ${REVISION}." \
+              raptor-*.tar.gz SHA256SUMS install.sh
           fi
-          gh release create "$TAG" \
-            --draft \
-            $release_kind \
-            --title "$TAG" \
-            --generate-notes \
-            raptor-*.tar.gz \
-            SHA256SUMS \
-            install.sh
-          gh release edit "$TAG" --draft=false
