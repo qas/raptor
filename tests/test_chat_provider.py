@@ -35,6 +35,7 @@ from chat_runtime import (
     load_chat_providers,
     set_chat_provider,
 )
+from model_providers import ModelTarget
 import session
 from turn_runtime import TurnKind, turns
 
@@ -169,6 +170,7 @@ class FakeProvider:
 
 class ChatProviderContractTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
+        session.set_default_model_target(ModelTarget("local", "test-model"))
         session.set_default_chat("room-1")
         self.provider = FakeProvider()
         self.previous_provider = set_chat_provider(self.provider)
@@ -240,6 +242,99 @@ class ChatProviderContractTests(unittest.IsolatedAsyncioTestCase):
         methods = [call[0] for call in provider.calls]
         self.assertEqual(methods, ["create", "delete"])
         self.assertEqual(provider.calls[0][-1], ())
+
+    async def test_tool_activity_reuses_status_and_restores_owner(self) -> None:
+        from tool_activity import ToolActivitySurface
+
+        surface = ToolActivitySurface("!room:example.org")
+        partial = {
+            "type": "function_call",
+            "name": "shell",
+            "call_id": "c1",
+            "arguments": '{"command":',
+        }
+        complete = {
+            **partial,
+            "arguments": '{"command":"pwd"}',
+        }
+
+        with patch("tool_activity.CHAT_STREAM_INTERVAL", 0):
+            await surface.stream(partial, False)
+            await asyncio.sleep(0)
+            await surface.stream(complete, False)
+            await surface.stream(complete, True)
+            await surface.running(complete)
+            await surface.finished(complete, {"ok": True})
+            await surface.clear()
+
+        methods = [call[0] for call in self.provider.calls]
+        self.assertEqual(
+            methods,
+            ["create", "pin", "edit", "edit", "edit", "unpin", "delete"],
+        )
+        texts = [
+            call[3]
+            for call in self.provider.calls
+            if call[0] in {"create", "edit"}
+        ]
+        self.assertTrue(texts[0].startswith("Preparing tool\n\nTool: shell"))
+        self.assertIn('"command": "pwd"', texts[1])
+        self.assertTrue(texts[2].startswith("Running\n\nTool: shell"))
+        self.assertTrue(texts[3].startswith("Completed\n\nTool: shell"))
+        self.assertIsNone(session.current_runtime().pinned_status_owner)
+
+    async def test_tool_activity_clear_preserves_newer_status_owner(self) -> None:
+        from presentation import show_pinned_status
+        from tool_activity import ToolActivitySurface
+
+        surface = ToolActivitySurface("!room:example.org")
+        call = {
+            "type": "function_call",
+            "name": "list_dir",
+            "call_id": "c1",
+            "arguments": "{}",
+        }
+        await surface.running(call)
+        await show_pinned_status(
+            "!room:example.org",
+            "approval:newer",
+            "Approval required",
+        )
+        await surface.clear()
+
+        self.assertEqual(
+            session.current_runtime().pinned_status_owner,
+            "approval:newer",
+        )
+        self.assertNotIn("delete", [call[0] for call in self.provider.calls])
+
+    async def test_tool_activity_stream_does_not_wait_for_transport(self) -> None:
+        from tool_activity import ToolActivitySurface
+
+        started = asyncio.Event()
+        cancelled = asyncio.Event()
+
+        async def blocked_status(*_args, **_kwargs):
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                cancelled.set()
+                raise
+
+        surface = ToolActivitySurface("!room:example.org")
+        call = {
+            "type": "function_call",
+            "name": "shell",
+            "call_id": "c1",
+            "arguments": "",
+        }
+        with patch("tool_activity.show_pinned_status", blocked_status):
+            await asyncio.wait_for(surface.stream(call, False), timeout=0.1)
+            await asyncio.wait_for(started.wait(), timeout=0.1)
+            await surface.clear()
+
+        self.assertTrue(cancelled.is_set())
 
     async def test_steering_message_is_never_pinned(self) -> None:
         from presentation import (

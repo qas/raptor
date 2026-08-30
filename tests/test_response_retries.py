@@ -76,6 +76,25 @@ class ResponseRetryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result, completed)
         self.assertEqual(request.await_count, 2)
 
+    async def test_stream_forwards_tool_activity_callback(self) -> None:
+        completed = {"status": "completed", "output": []}
+        request = AsyncMock(return_value=completed)
+        tool_call = AsyncMock()
+        with patch.object(
+            responses,
+            "_responses_create_stream_once",
+            request,
+        ):
+            result = await responses.responses_create_stream(
+                TARGET,
+                1,
+                [],
+                on_tool_call=tool_call,
+            )
+
+        self.assertEqual(result, completed)
+        self.assertIs(request.await_args.kwargs["on_tool_call"], tool_call)
+
     async def test_exhausted_incomplete_stream_is_transient(self) -> None:
         request = AsyncMock(
             side_effect=responses.IncompleteResponsesStreamError("early close")
@@ -457,6 +476,76 @@ class ResponseRetryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             [call.args[0] for call in text.await_args_list],
             ["Found", "Found it"],
+        )
+
+    async def test_stream_exposes_cumulative_tool_call_arguments(self) -> None:
+        class FakeResponse:
+            is_error = False
+
+            def raise_for_status(self):
+                return None
+
+            async def aiter_lines(self):
+                yield (
+                    'data: {"type":"response.output_item.added",'
+                    '"output_index":0,"item":{"type":"function_call",'
+                    '"id":"fc1","call_id":"c1","name":"shell",'
+                    '"arguments":""}}'
+                )
+                yield (
+                    'data: {"type":"response.function_call_arguments.delta",'
+                    '"output_index":0,"item_id":"fc1",'
+                    '"delta":"{\\"command\\":"}'
+                )
+                yield (
+                    'data: {"type":"response.function_call_arguments.delta",'
+                    '"output_index":0,"item_id":"fc1",'
+                    '"delta":"\\"pwd\\"}"}'
+                )
+                yield (
+                    'data: {"type":"response.function_call_arguments.done",'
+                    '"output_index":0,"item_id":"fc1",'
+                    '"arguments":"{\\"command\\":\\"pwd\\"}"}'
+                )
+                yield (
+                    'data: {"type":"response.completed","response":'
+                    '{"status":"completed","output":[]}}'
+                )
+
+        class FakeStream:
+            async def __aenter__(self):
+                return FakeResponse()
+
+            async def __aexit__(self, *_args):
+                return False
+
+        class FakeClient:
+            def stream(self, *_args, **_kwargs):
+                return FakeStream()
+
+        tool_call = AsyncMock()
+        with patch.object(
+            responses.session,
+            "responses",
+            FakeClient(),
+            create=True,
+        ):
+            result = await responses.stream_response_payload(
+                url="http://backend/v1/responses",
+                headers={},
+                payload={"stream": True},
+                on_tool_call=tool_call,
+            )
+
+        self.assertEqual(result["status"], "completed")
+        updates = [call.args for call in tool_call.await_args_list]
+        self.assertEqual(
+            [update[0]["arguments"] for update in updates],
+            ["", '{"command":', '{"command":"pwd"}', '{"command":"pwd"}'],
+        )
+        self.assertEqual(
+            [update[1] for update in updates],
+            [False, False, False, True],
         )
 
 

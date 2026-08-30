@@ -8,7 +8,7 @@ import tempfile
 import unittest
 from contextlib import asynccontextmanager, nullcontext
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, Mock, patch
 
 _ROOT = Path(__file__).resolve().parent.parent
 _HOME = Path(tempfile.mkdtemp(prefix="raptor-durable-"))
@@ -120,7 +120,13 @@ class TranscriptDurabilityTests(unittest.IsolatedAsyncioTestCase):
         sid = session.state["current_session_id"]
         seen_before_tool: list[int] = []
 
-        async def fake_stream(_target, chat_id, items, extra_instructions=""):
+        async def fake_stream(
+            _target,
+            chat_id,
+            items,
+            extra_instructions="",
+            **_kwargs,
+        ):
             # After user append + before/during model, user item exists.
             items_now = chat_store.item_events(sid)
             self.assertTrue(
@@ -192,6 +198,67 @@ class TranscriptDurabilityTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("function_call", types)
         self.assertIn("function_call_output", types)
         self.assertIn("message", types)
+
+    async def test_root_tool_activity_streams_and_tracks_execution(self) -> None:
+        responses = 0
+        streamed_call = {
+            "type": "function_call",
+            "name": "list_dir",
+            "call_id": "c1",
+            "arguments": "{}",
+        }
+        surface = Mock(
+            stream=AsyncMock(),
+            running=AsyncMock(),
+            finished=AsyncMock(),
+            clear=AsyncMock(),
+        )
+
+        async def fake_stream(
+            _target,
+            _chat_id,
+            _items,
+            *,
+            on_tool_call=None,
+            **_kwargs,
+        ):
+            nonlocal responses
+            responses += 1
+            if responses == 1:
+                await on_tool_call(streamed_call, True)
+                return {"output": [streamed_call]}
+            return {
+                "output": [
+                    {
+                        "type": "message",
+                        "content": [
+                            {"type": "output_text", "text": "done"}
+                        ],
+                    }
+                ]
+            }
+
+        async def execute(*_args, **_kwargs):
+            return {"ok": True}
+
+        with (
+            patch.object(agent_mod, "ToolActivitySurface", return_value=surface),
+            patch.object(agent_mod, "responses_create_stream", fake_stream),
+            patch.object(agent_mod, "execute_tool_with_approval", execute),
+            patch.object(agent_mod, "send", _noop),
+            patch.object(agent_mod, "typing_loop", _noop),
+            patch.object(agent_mod, "maybe_auto_compact", _noop),
+        ):
+            result = await agent_mod.agent_turn(1, "inspect")
+
+        self.assertTrue(result)
+        surface.stream.assert_awaited_once_with(streamed_call, True)
+        surface.running.assert_awaited_once_with(streamed_call)
+        surface.finished.assert_awaited_once_with(
+            streamed_call,
+            {"ok": True},
+        )
+        surface.clear.assert_awaited_once_with()
 
     async def test_post_delivery_compaction_failure_keeps_success(self) -> None:
         sent: list[str] = []
@@ -357,7 +424,13 @@ class TranscriptDurabilityTests(unittest.IsolatedAsyncioTestCase):
     ) -> None:
         sid = session.state["current_session_id"]
 
-        async def fake_stream(_target, chat_id, items, extra_instructions=""):
+        async def fake_stream(
+            _target,
+            chat_id,
+            items,
+            extra_instructions="",
+            **_kwargs,
+        ):
             return {
                 "output": [
                     {
@@ -497,7 +570,13 @@ class TranscriptDurabilityTests(unittest.IsolatedAsyncioTestCase):
         ]
         seen: dict[str, str] = {}
 
-        async def fake_stream(_target, chat_id, items, extra_instructions=""):
+        async def fake_stream(
+            _target,
+            chat_id,
+            items,
+            extra_instructions="",
+            **_kwargs,
+        ):
             seen["instructions"] = extra_instructions
             return {
                 "output": [

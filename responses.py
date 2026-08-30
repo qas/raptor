@@ -34,6 +34,10 @@ from response_errors import (
 _RETRYABLE_HTTP_STATUSES = {408, 429, 500, 502, 503, 504}
 _ResponseT = TypeVar("_ResponseT")
 MODEL_LIST_TIMEOUT_SECONDS = 10.0
+ToolCallStreamCallback = Callable[
+    [dict[str, Any], bool],
+    Awaitable[None],
+]
 
 
 @dataclass
@@ -602,6 +606,7 @@ async def stream_response_payload(
     payload: dict[str, Any],
     on_text: Callable[[str], Awaitable[None]] | None = None,
     on_reasoning_summary: Callable[[str], Awaitable[None]] | None = None,
+    on_tool_call: ToolCallStreamCallback | None = None,
     log_source: str = "responses",
     log_data: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -609,6 +614,7 @@ async def stream_response_payload(
     final_response: dict[str, Any] | None = None
     text = ""
     reasoning_summary = ""
+    tool_calls: dict[int, dict[str, Any]] = {}
     async with session.responses.stream(
         "POST",
         url,
@@ -652,6 +658,54 @@ async def stream_response_payload(
                 text += str(event.get("delta") or "")
                 if on_text is not None:
                     await on_text(text)
+            elif event_type == "response.output_item.added":
+                item = event.get("item")
+                output_index = event.get("output_index")
+                if (
+                    on_tool_call is not None
+                    and isinstance(output_index, int)
+                    and isinstance(item, dict)
+                    and item.get("type") == "function_call"
+                ):
+                    call = {
+                        "type": "function_call",
+                        "id": item.get("id"),
+                        "call_id": item.get("call_id"),
+                        "name": item.get("name"),
+                        "arguments": str(item.get("arguments") or ""),
+                    }
+                    tool_calls[output_index] = call
+                    await on_tool_call(dict(call), False)
+            elif event_type == "response.function_call_arguments.delta":
+                output_index = event.get("output_index")
+                if on_tool_call is not None and isinstance(output_index, int):
+                    call = tool_calls.setdefault(
+                        output_index,
+                        {
+                            "type": "function_call",
+                            "id": event.get("item_id"),
+                            "call_id": None,
+                            "name": None,
+                            "arguments": "",
+                        },
+                    )
+                    call["arguments"] += str(event.get("delta") or "")
+                    await on_tool_call(dict(call), False)
+            elif event_type == "response.function_call_arguments.done":
+                output_index = event.get("output_index")
+                if on_tool_call is not None and isinstance(output_index, int):
+                    call = tool_calls.setdefault(
+                        output_index,
+                        {
+                            "type": "function_call",
+                            "id": event.get("item_id"),
+                            "call_id": None,
+                            "name": None,
+                            "arguments": "",
+                        },
+                    )
+                    call["arguments"] = str(event.get("arguments") or "")
+                    await on_tool_call(dict(call), True)
             elif event_type == "response.completed":
                 completed = event.get("response")
                 if isinstance(completed, dict):
@@ -690,6 +744,7 @@ async def _responses_create_stream_once(
     reasoning_effort: str | None = None,
     reasoning_summary: str | None = None,
     replay_guard: ResponsesStreamReplayGuard | None = None,
+    on_tool_call: ToolCallStreamCallback | None = None,
 ) -> dict[str, Any]:
     target = await ensure_target(target)
     provider = model_provider(target)
@@ -780,6 +835,18 @@ async def _responses_create_stream_once(
                 replay_guard.observe(delta)
             await publish_reasoning_summary(delta)
 
+    async def collect_tool_call(
+        call: dict[str, Any],
+        complete: bool,
+    ) -> None:
+        if replay_guard is not None:
+            replay_guard.observe(
+                str(call.get("name") or "")
+                + str(call.get("arguments") or "")
+            )
+        if on_tool_call is not None:
+            await on_tool_call(call, complete)
+
     try:
         final_response = await stream_response_payload(
             url=f"{provider.base_url}/responses",
@@ -787,6 +854,7 @@ async def _responses_create_stream_once(
             payload=payload,
             on_text=collect_text,
             on_reasoning_summary=collect_reasoning,
+            on_tool_call=collect_tool_call if on_tool_call is not None else None,
         )
     except BaseException:
         if draft_task is not None and not draft_task.done():
@@ -817,6 +885,7 @@ async def responses_create_stream(
     max_output_tokens: int | None = None,
     reasoning_effort: str | None = None,
     reasoning_summary: str | None = None,
+    on_tool_call: ToolCallStreamCallback | None = None,
 ) -> dict[str, Any]:
     provider = model_provider(target)
     replay_guard = ResponsesStreamReplayGuard()
@@ -833,6 +902,7 @@ async def responses_create_stream(
                 reasoning_effort=reasoning_effort,
                 reasoning_summary=reasoning_summary,
                 replay_guard=replay_guard,
+                on_tool_call=on_tool_call,
             )
         except Exception as exc:
             replay_guard.reject_unsafe_replay(

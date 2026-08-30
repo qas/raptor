@@ -1,6 +1,5 @@
 """Tool-approval flow."""
 import asyncio
-import json
 import os
 import re
 from typing import Any
@@ -12,6 +11,7 @@ from session import APPROVAL_TOOLS, pending_approvals, state
 from observability import log_agent_activity, log_exception
 from tools import execute_tool
 from goals import suspend_goal_pin, sync_goal_pin
+from tool_activity import tool_preview
 
 
 def approval_enabled() -> bool:
@@ -24,50 +24,6 @@ def approval_required(
     return (
         approval_enabled()
         and call.get("name") in APPROVAL_TOOLS
-    )
-
-
-def approval_preview(
-    call: dict[str, Any],
-) -> str:
-    name = str(
-        call.get("name")
-        or "unknown"
-    )
-
-    raw_arguments = call.get(
-        "arguments"
-    ) or "{}"
-
-    try:
-        arguments = json.loads(
-            raw_arguments
-        )
-        rendered = json.dumps(
-            arguments,
-            indent=2,
-            ensure_ascii=False,
-        )
-    except (
-        TypeError,
-        json.JSONDecodeError,
-    ):
-        rendered = str(
-            raw_arguments
-        )
-
-    # Keep interactive status previews bounded across providers.
-    if len(rendered) > 3200:
-        rendered = (
-            rendered[:3150]
-            + "\n... [truncated]"
-        )
-
-    return (
-        "Tool: "
-        + name
-        + "\n\n"
-        + rendered
     )
 
 
@@ -113,7 +69,7 @@ async def request_tool_approval(
     approval_id = os.urandom(
         6
     ).hex()
-    preview = approval_preview(
+    preview = tool_preview(
         call
     )
 

@@ -217,6 +217,7 @@ transcript remains available as audit history.
 | `telegram.py` | Telegram adapter |
 | `responses_provider.py` | Inbound Responses-compatible HTTP adapter |
 | `presentation.py` | Provider-neutral status, controls, and activity policy |
+| `tool_activity.py` | Streamed root tool-call status and lifecycle projection |
 | `chat_store.py` | Append-only transcript storage |
 | `storage.py` | Crash-safe atomic local file replacement |
 | `context.py` | Active-context construction and checkpoint compaction |
@@ -270,10 +271,15 @@ Telegram replies remain in their originating topic.
 The persistent status slot has this priority:
 
 ```text
-approval > thread > goal > empty
+approval/tool activity > thread > goal > empty
 ```
 
-Steering is transient and is never pinned.
+With approval off, root-agent tool names and arguments stream into the same
+bounded status surface used for approvals. The surface changes to `Running`,
+then `Completed`, `Failed`, or `Interrupted`, and restores the active thread or
+goal when the agent turn ends. `/ask` uses the same lifecycle once its
+non-streaming model response yields a tool call. Steering is transient and is
+never pinned.
 
 ### Context and compaction
 

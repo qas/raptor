@@ -6,7 +6,7 @@ import session
 from thread_state import current_thread, thread_owner
 
 
-def _approval_status_active(
+def _tool_status_active(
     conversation_id: ConversationId,
     *,
     ignore_owner: str | None = None,
@@ -17,7 +17,7 @@ def _approval_status_active(
         runtime.pinned_status_conversation_id == conversation_id
         and owner != ignore_owner
         and isinstance(owner, str)
-        and owner.startswith("approval:")
+        and owner.startswith(("approval:", "tool:"))
     ):
         return True
     return any(
@@ -37,7 +37,7 @@ async def ensure_thread_status(
     owner = thread_owner(thread)
     if not thread or not owner:
         return
-    if _approval_status_active(
+    if _tool_status_active(
         conversation_id,
         ignore_owner=replace_owner,
     ):

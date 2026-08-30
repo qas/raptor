@@ -1997,6 +1997,20 @@ class GoalPinTests(unittest.IsolatedAsyncioTestCase):
             GOAL_ACTIVE,
         )
 
+    async def test_tool_activity_suppresses_goal_pin(self) -> None:
+        replace_goal("tool activity suppress")
+        await ensure_goal_pin(1)
+        await suspend_goal_pin(1)
+        runtime = session.current_runtime()
+        runtime.pinned_status_conversation_id = 1
+        runtime.pinned_status_message_id = 42
+        runtime.pinned_status_owner = "tool:t1"
+        await sync_goal_pin(1)
+
+        self.assertIsNone(session.current_runtime().goal_pin_message_id)
+        self.assertEqual(session.current_runtime().pinned_status_owner, "tool:t1")
+        self.assertEqual(current_goal()["status"], GOAL_ACTIVE)
+
     async def test_force_does_not_suppress_goal_pin(self) -> None:
         replace_goal("force alongside goal")
         await ensure_goal_pin(1)
@@ -2502,7 +2516,13 @@ class SetGoalToolTests(unittest.IsolatedAsyncioTestCase):
     ) -> None:
         during = {"authorized": None}
 
-        async def fake_stream(_target, chat_id, items, extra_instructions=""):
+        async def fake_stream(
+            _target,
+            chat_id,
+            items,
+            extra_instructions="",
+            **_kwargs,
+        ):
             during["authorized"] = (
                 session.current_runtime().goal_creation_authorized
             )

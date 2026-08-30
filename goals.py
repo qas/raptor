@@ -317,14 +317,14 @@ def _higher_priority_pin_active(
     *,
     ignore_owner: str | None = None,
 ) -> bool:
-    """True when approval owns the pinned status slot."""
+    """True when transient tool UI owns the pinned status slot."""
     runtime = session.current_runtime()
     pinned_owner = runtime.pinned_status_owner
     if (
         runtime.pinned_status_conversation_id == chat_id
         and pinned_owner != ignore_owner
         and isinstance(pinned_owner, str)
-        and pinned_owner.startswith("approval:")
+        and pinned_owner.startswith(("approval:", "tool:"))
     ):
         return True
     for entry in session.pending_approvals.values():

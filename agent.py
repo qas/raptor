@@ -42,7 +42,7 @@ from goals import (
 )
 from session import save_state, state, steer_queue
 import session
-from approval import execute_tool_with_approval
+from approval import approval_enabled, execute_tool_with_approval
 from chat_runtime import (
     activate_delivery_context,
     capture_delivery_context,
@@ -70,6 +70,7 @@ from response_errors import (
     TransientResponsesError,
 )
 from skills import skill_catalog_instructions
+from tool_activity import ToolActivitySurface
 
 
 TURN_ABORTED_GUIDANCE = (
@@ -402,6 +403,9 @@ async def agent_turn(
     resumed_subagents = list(
         state.get("interrupted_subagents", [])
     )
+    tool_activity = (
+        None if approval_enabled() else ToolActivitySurface(chat_id)
+    )
     turn_source = source or (
         "internal" if internal else "user"
     )
@@ -652,6 +656,11 @@ async def agent_turn(
                     chat_id,
                     items,
                     extra_instructions=extra_instructions,
+                    on_tool_call=(
+                        tool_activity.stream
+                        if tool_activity is not None
+                        else None
+                    ),
                 )
 
             async def _compact_forced(
@@ -729,11 +738,28 @@ async def agent_turn(
             exec_state["session_id"] = session_id
             exec_state["model_target"] = target.to_dict()
             exec_state["todo_state"] = todo_store_for_execution()
-            return await execute_tool_with_approval(
-                chat_id,
-                call,
-                execution_context=exec_state,
-            )
+            if tool_activity is not None:
+                await tool_activity.running(call)
+            try:
+                result = await execute_tool_with_approval(
+                    chat_id,
+                    call,
+                    execution_context=exec_state,
+                )
+            except asyncio.CancelledError:
+                if tool_activity is not None:
+                    await tool_activity.finished(
+                        call,
+                        interrupted_tool_result(),
+                    )
+                raise
+            except Exception:
+                if tool_activity is not None:
+                    await tool_activity.finished(call, {"ok": False})
+                raise
+            if tool_activity is not None:
+                await tool_activity.finished(call, result)
+            return result
 
         async def compact_work(
             active_work: list[dict[str, Any]],
@@ -910,6 +936,8 @@ async def agent_turn(
         return False
     finally:
         runtime.goal_creation_authorized = False
+        if tool_activity is not None:
+            await tool_activity.clear()
         typing_task.cancel()
         await asyncio.gather(typing_task, return_exceptions=True)
         if continue_pending:
