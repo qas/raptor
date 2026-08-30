@@ -6,10 +6,15 @@ import os
 from typing import Any
 
 from chat_provider import ConversationId
+from chat_runtime import get_chat_provider
 from config import CHAT_STREAM_INTERVAL
 from goals import suspend_goal_pin, sync_goal_pin
 from observability import log_exception
-from presentation import show_pinned_status
+from presentation import (
+    create_pinned_status,
+    delete_pinned_status,
+    show_pinned_status,
+)
 
 
 def tool_preview(call: dict[str, Any]) -> str:
@@ -31,12 +36,19 @@ def tool_preview(call: dict[str, Any]) -> str:
 
 
 class ToolActivitySurface:
-    """Reuse the pinned status slot for one root turn's tool calls."""
+    """Project one agent turn's tools through the canonical status bubble."""
 
-    def __init__(self, conversation_id: ConversationId) -> None:
+    def __init__(
+        self,
+        conversation_id: ConversationId,
+        *,
+        isolated: bool = False,
+    ) -> None:
         self.conversation_id = conversation_id
+        self.isolated = isolated
         self.owner = "tool:" + os.urandom(6).hex()
         self.active = False
+        self.message_id: int | str | None = None
         self._pending: tuple[str, dict[str, Any]] | None = None
         self._projection_task: asyncio.Task[None] | None = None
 
@@ -46,14 +58,28 @@ class ToolActivitySurface:
         call: dict[str, Any],
     ) -> None:
         try:
-            await show_pinned_status(
-                self.conversation_id,
-                self.owner,
-                status + "\n\n" + tool_preview(call),
-            )
+            text = status + "\n\n" + tool_preview(call)
+            if self.isolated and self.message_id is not None:
+                await get_chat_provider().edit_message(
+                    self.conversation_id,
+                    self.message_id,
+                    text,
+                )
+            elif self.isolated:
+                self.message_id = await create_pinned_status(
+                    self.conversation_id,
+                    text,
+                )
+            else:
+                await show_pinned_status(
+                    self.conversation_id,
+                    self.owner,
+                    text,
+                )
             if not self.active:
                 self.active = True
-                await suspend_goal_pin(self.conversation_id)
+                if not self.isolated:
+                    await suspend_goal_pin(self.conversation_id)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -113,10 +139,18 @@ class ToolActivitySurface:
         if not self.active:
             return
         try:
-            await sync_goal_pin(
-                self.conversation_id,
-                released_owner=self.owner,
-            )
+            if self.isolated:
+                if self.message_id is not None:
+                    await delete_pinned_status(
+                        self.conversation_id,
+                        self.message_id,
+                    )
+                    self.message_id = None
+            else:
+                await sync_goal_pin(
+                    self.conversation_id,
+                    released_owner=self.owner,
+                )
         except asyncio.CancelledError:
             raise
         except Exception as exc:

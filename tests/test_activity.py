@@ -15,6 +15,7 @@ os.environ.setdefault("TG_USER_ID", "1")
 os.environ.setdefault("TG_CHAT_IDS", "1")
 
 import activity
+from model_providers import ModelTarget
 
 
 class RecordingActivityProvider:
@@ -74,6 +75,13 @@ class RecordingActivityProvider:
     ) -> None:
         self.restored.append(surface_id)
 
+    def activity_surface_conversation_id(
+        self,
+        conversation_id,
+        surface_id,
+    ) -> str:
+        return f"{conversation_id}:{surface_id}"
+
 
 class FailingUpdateProvider(RecordingActivityProvider):
     async def update_activity_surface(
@@ -111,6 +119,9 @@ class PartiallyBrokenRestoreProvider(RecordingActivityProvider):
 
 class ActivityProjectionTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
+        activity.session.set_default_model_target(
+            ModelTarget("local", "test-model")
+        )
         runtime = activity.session.set_default_chat("conversation")
         self.runtime_context = activity.session.bound_runtime(runtime)
         self.runtime_context.__enter__()
@@ -155,6 +166,21 @@ class ActivityProjectionTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.sleep(0)
 
         self.assertEqual(provider.updates, [changed])
+
+    def test_activity_conversation_resolves_through_provider(self) -> None:
+        provider = RecordingActivityProvider()
+        record = {
+            "id": "worker",
+            "chat_id": "parent",
+            "activity_surface_id": "child",
+        }
+
+        with patch.object(activity, "get_chat_provider", return_value=provider):
+            conversation_id = activity.subagent_activity_conversation_id(
+                record
+            )
+
+        self.assertEqual(conversation_id, "parent:child")
 
     async def test_metadata_and_messages_use_separate_bounds(self) -> None:
         provider = RecordingActivityProvider()

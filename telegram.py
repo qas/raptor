@@ -880,6 +880,7 @@ def _reply_markup(controls: Controls) -> dict[str, Any] | None:
 
 @dataclass
 class _TelegramActivityTopic:
+    parent_conversation_id: ConversationId | None = None
     reasoning_message_id: int | None = None
     reasoning_text: str = ""
     reply_message_id: int | None = None
@@ -1030,18 +1031,39 @@ class TelegramProvider:
                 return None
             conversation_id = chat.get("id")
             thread_id = _message_thread_id(message)
-            interactive = self._is_interactive(conversation_id, thread_id)
+            source_conversation_id = (
+                _telegram_conversation_id(conversation_id, thread_id)
+                if isinstance(conversation_id, int)
+                else None
+            )
+            configured_chat = (
+                self._chats.get(conversation_id)
+                if isinstance(conversation_id, int)
+                else None
+            )
+            topic = (
+                configured_chat.activity_topics.get(thread_id)
+                if configured_chat is not None and thread_id is not None
+                else None
+            )
+            logical_conversation_id = (
+                topic.parent_conversation_id
+                if topic is not None and topic.parent_conversation_id is not None
+                else source_conversation_id
+            )
             return IncomingAction(
                 action_id=str(callback.get("id") or ""),
-                conversation_id=(
-                    _telegram_conversation_id(conversation_id, thread_id)
-                    if isinstance(conversation_id, int)
-                    else None
-                ),
+                conversation_id=logical_conversation_id,
                 sender_id=sender_id,
                 message_id=message.get("message_id"),
                 data=str(callback.get("data") or ""),
-                interactive=interactive,
+                interactive=(
+                    topic is not None
+                    or self._is_interactive(conversation_id, thread_id)
+                ),
+                presentation_conversation_id=(
+                    source_conversation_id if topic is not None else None
+                ),
             )
         message = update.get("message")
         if not isinstance(message, dict) or "text" not in message:
@@ -1166,6 +1188,14 @@ class TelegramProvider:
         controls: Controls = (),
     ) -> int:
         payload: dict[str, Any] = _telegram_payload(conversation_id)
+        chat_id, topic_id = _telegram_destination(conversation_id)
+        chat = self._chats.get(chat_id)
+        if (
+            TELEGRAM_SUBAGENT_TOPICS_SILENT
+            and chat is not None
+            and topic_id in chat.activity_topics
+        ):
+            payload["disable_notification"] = True
         markup = _reply_markup(controls)
         if markup is not None:
             payload["reply_markup"] = markup
@@ -1277,7 +1307,9 @@ class TelegramProvider:
                 existing_surface_id
             )
             if await _reopen_forum_topic(chat_id, topic_id):
-                chat.activity_topics[topic_id] = _TelegramActivityTopic()
+                chat.activity_topics[topic_id] = _TelegramActivityTopic(
+                    parent_conversation_id=conversation_id,
+                )
                 await send(
                     _telegram_conversation_id(chat_id, topic_id),
                     snapshot.title,
@@ -1295,7 +1327,9 @@ class TelegramProvider:
         )
         if not isinstance(topic_id, int) or topic_id <= 1:
             raise RuntimeError("Telegram returned no forum topic ID")
-        chat.activity_topics[topic_id] = _TelegramActivityTopic()
+        chat.activity_topics[topic_id] = _TelegramActivityTopic(
+            parent_conversation_id=conversation_id,
+        )
         topic_conversation = _telegram_conversation_id(chat_id, topic_id)
         try:
             task_message_id = await _send_messages(
@@ -1342,7 +1376,7 @@ class TelegramProvider:
             raise ValueError("activity surface belongs to another Telegram chat")
         topic = chat.activity_topics.setdefault(
             topic_id,
-            _TelegramActivityTopic(),
+            _TelegramActivityTopic(parent_conversation_id=conversation_id),
         )
         await self._update_activity_topic_output(
             chat_id,
@@ -1351,6 +1385,19 @@ class TelegramProvider:
             snapshot,
             include_reply=True,
         )
+
+    def activity_surface_conversation_id(
+        self,
+        conversation_id: ConversationId,
+        surface_id: str,
+    ) -> ConversationId:
+        chat_id, _parent_thread_id = _telegram_destination(conversation_id)
+        topic_id, _task_message_id = _parse_activity_surface_id(surface_id)
+        chat = self._chats.get(chat_id)
+        topic = chat.activity_topics.get(topic_id) if chat is not None else None
+        if topic is None or topic.parent_conversation_id != conversation_id:
+            raise ValueError("activity surface belongs to another Telegram chat")
+        return _telegram_conversation_id(chat_id, topic_id)
 
     async def append_activity_message(
         self,
@@ -1421,7 +1468,7 @@ class TelegramProvider:
             raise ValueError("activity surface belongs to another Telegram chat")
         topic = chat.activity_topics.setdefault(
             topic_id,
-            _TelegramActivityTopic(),
+            _TelegramActivityTopic(parent_conversation_id=conversation_id),
         )
         await self._update_activity_topic_output(
             chat_id,
@@ -1475,7 +1522,10 @@ class TelegramProvider:
                 "activity surface belongs to an unconfigured Telegram forum"
             )
         topic_id, _task_message_id = _parse_activity_surface_id(surface_id)
-        chat.activity_topics.setdefault(topic_id, _TelegramActivityTopic())
+        chat.activity_topics.setdefault(
+            topic_id,
+            _TelegramActivityTopic(parent_conversation_id=conversation_id),
+        )
 
     async def answer_action(
         self,

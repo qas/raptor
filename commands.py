@@ -530,6 +530,9 @@ async def command(
         try:
             target_provider = model_provider(target)
             target_settings = target_provider.settings_for(target.model)
+        except ValueError:
+            target_settings = ModelSettings()
+        try:
             models = (
                 await asyncio.wait_for(
                     list_models(target.provider_id, max_retries=0),
@@ -541,7 +544,6 @@ async def command(
 
         except Exception as exc:
             log_exception("responses", "model_list_error", exc)
-            target_settings = ModelSettings()
             models = []
             responses_status = (
                 "unconfigured"
@@ -570,6 +572,7 @@ async def command(
             context_limit_line = (
                 f"context estimate: ~{context_tokens():,} tokens\n"
                 f"context limit: {context_window:,} tokens\n"
+                f"auto-compact: enabled\n"
                 f"compact threshold: {budget:,} tokens "
                 f"({int(CONTEXT_COMPACT_RATIO * 100)}%)\n"
                 f"safety reserve: {CONTEXT_SAFETY_TOKENS:,} tokens"

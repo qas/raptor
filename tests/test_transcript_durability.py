@@ -201,6 +201,7 @@ class TranscriptDurabilityTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_root_tool_activity_streams_and_tracks_execution(self) -> None:
         responses = 0
+        typing_events: list[str] = []
         streamed_call = {
             "type": "function_call",
             "name": "list_dir",
@@ -224,9 +225,14 @@ class TranscriptDurabilityTests(unittest.IsolatedAsyncioTestCase):
         ):
             nonlocal responses
             responses += 1
+            await asyncio.sleep(0)
             if responses == 1:
                 await on_tool_call(streamed_call, True)
                 return {"output": [streamed_call]}
+            self.assertEqual(
+                typing_events,
+                ["started", "stopped", "started"],
+            )
             return {
                 "output": [
                     {
@@ -239,14 +245,22 @@ class TranscriptDurabilityTests(unittest.IsolatedAsyncioTestCase):
             }
 
         async def execute(*_args, **_kwargs):
+            self.assertEqual(typing_events, ["started", "stopped"])
             return {"ok": True}
+
+        async def typing(_chat_id):
+            typing_events.append("started")
+            try:
+                await asyncio.Future()
+            except asyncio.CancelledError:
+                typing_events.append("stopped")
 
         with (
             patch.object(agent_mod, "ToolActivitySurface", return_value=surface),
             patch.object(agent_mod, "responses_create_stream", fake_stream),
             patch.object(agent_mod, "execute_tool_with_approval", execute),
             patch.object(agent_mod, "send", _noop),
-            patch.object(agent_mod, "typing_loop", _noop),
+            patch.object(agent_mod, "typing_loop", typing),
             patch.object(agent_mod, "maybe_auto_compact", _noop),
         ):
             result = await agent_mod.agent_turn(1, "inspect")
@@ -259,6 +273,10 @@ class TranscriptDurabilityTests(unittest.IsolatedAsyncioTestCase):
             {"ok": True},
         )
         surface.clear.assert_awaited_once_with()
+        self.assertEqual(
+            typing_events,
+            ["started", "stopped", "started", "stopped"],
+        )
 
     async def test_post_delivery_compaction_failure_keeps_success(self) -> None:
         sent: list[str] = []

@@ -16,6 +16,7 @@ from chat_provider import (
 )
 from observability import log_exception
 from activity import (
+    ActivityConversationProvider,
     ActivityFinishResult,
     ActivitySnapshot,
     ActivitySurfaceProvider,
@@ -222,11 +223,20 @@ class MultiProvider:
                 sender_id=sender_id,
             )
         elif isinstance(event, IncomingAction):
+            presentation_conversation_id = (
+                self._conversation_id(
+                    provider,
+                    event.presentation_conversation_id,
+                )
+                if event.presentation_conversation_id is not None
+                else None
+            )
             normalized = replace(
                 event,
                 action_id=f"{provider.name}:{event.action_id}",
                 conversation_id=conversation_id,
                 sender_id=sender_id,
+                presentation_conversation_id=presentation_conversation_id,
             )
         else:
             normalized = event
@@ -416,6 +426,23 @@ class MultiProvider:
         ):
             raise ValueError("activity surface and conversation differ")
         return provider, raw_id, nested_id
+
+    def activity_surface_conversation_id(
+        self,
+        conversation_id: ConversationId,
+        surface_id: str,
+    ) -> ConversationId:
+        provider, raw_id, nested_id = self._route_activity_surface(
+            conversation_id,
+            surface_id,
+        )
+        if not isinstance(provider, ActivityConversationProvider):
+            return conversation_id
+        nested_conversation_id = provider.activity_surface_conversation_id(
+            raw_id,
+            nested_id,
+        )
+        return self._conversation_id(provider, nested_conversation_id)
 
     async def update_activity_surface(
         self,

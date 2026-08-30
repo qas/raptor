@@ -2150,6 +2150,79 @@ class PinnedStatusSlotTests(unittest.IsolatedAsyncioTestCase):
             },
         )
 
+    async def test_subagent_approval_uses_same_bubble_in_child_topic(
+        self,
+    ) -> None:
+        from approval import handle_approval_action, request_tool_approval
+        from chat_provider import IncomingAction
+        from chat_runtime import get_chat_provider
+        import telegram
+
+        chat = telegram.telegram_provider._chats.setdefault(
+            1,
+            telegram._TelegramChat(),
+        )
+        chat.activity_topics[42] = (
+            telegram._TelegramActivityTopic(
+                parent_conversation_id="1/10",
+            )
+        )
+        self.addCleanup(
+            chat.activity_topics.pop,
+            42,
+            None,
+        )
+
+        request = asyncio.create_task(
+            request_tool_approval(
+                "1/10",
+                {
+                    "name": "shell",
+                    "arguments": '{"cmd":"pwd"}',
+                },
+                presentation_chat_id="1/42",
+            )
+        )
+        await asyncio.sleep(0)
+        self.assertIsNone(
+            session.current_runtime().pinned_status_message_id
+        )
+        approval_id = next(iter(session.pending_approvals))
+        action = IncomingAction(
+            action_id="action-1",
+            conversation_id="1/10",
+            sender_id=get_chat_provider().authorized_user_id,
+            message_id=321,
+            data=f"approval:{approval_id}:approve",
+            presentation_conversation_id="1/42",
+        )
+
+        self.assertTrue(await handle_approval_action(action))
+        self.assertEqual(await request, "approve")
+
+        sent = next(
+            payload
+            for method, payload in self.calls
+            if method == "sendMessage"
+        )
+        self.assertEqual(sent["chat_id"], 1)
+        self.assertEqual(sent["message_thread_id"], 42)
+        self.assertTrue(sent["disable_notification"])
+        self.assertIn("⚠️ Approval required", sent["text"])
+        buttons = sent["reply_markup"]["inline_keyboard"][0]
+        self.assertEqual(
+            [button["text"] for button in buttons],
+            ["✅ Approve", "❌ Deny"],
+        )
+        self.assertIn(
+            ("unpinChatMessage", {"chat_id": 1, "message_id": 321}),
+            self.calls,
+        )
+        self.assertIn(
+            ("deleteMessage", {"chat_id": 1, "message_id": 321}),
+            self.calls,
+        )
+
     async def test_approval_cleanup_failure_does_not_block_decision(
         self,
     ) -> None:

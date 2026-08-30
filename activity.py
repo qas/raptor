@@ -101,6 +101,17 @@ class ActivitySurfaceProvider(Protocol):
     ) -> None: ...
 
 
+@runtime_checkable
+class ActivityConversationProvider(Protocol):
+    """Resolve an activity surface's interactive conversation."""
+
+    def activity_surface_conversation_id(
+        self,
+        conversation_id: ConversationId,
+        surface_id: str,
+    ) -> ConversationId: ...
+
+
 class ActivityProjection:
     """Coalesce nonessential updates without slowing agent execution."""
 
@@ -329,6 +340,36 @@ async def append_subagent_activity_input(
             exc,
             {"activity_id": _bounded_activity_field(record.get("id"))},
         )
+
+
+def subagent_activity_conversation_id(
+    record: dict[str, Any],
+    *,
+    fallback: ConversationId | None = None,
+) -> ConversationId:
+    """Return the provider-owned child conversation when one exists."""
+    conversation_id = record.get("chat_id") or fallback
+    if conversation_id is None:
+        raise ValueError("subagent activity requires a parent conversation")
+    surface_id = str(record.get("activity_surface_id") or "")
+    if not surface_id:
+        return conversation_id
+    try:
+        provider = get_chat_provider()
+        if not isinstance(provider, ActivityConversationProvider):
+            return conversation_id
+        return provider.activity_surface_conversation_id(
+            conversation_id,
+            surface_id,
+        )
+    except Exception as exc:
+        log_exception(
+            "activity",
+            "surface_conversation_error",
+            exc,
+            {"activity_id": _bounded_activity_field(record.get("id"))},
+        )
+        return conversation_id
 
 
 def publish_subagent_response(

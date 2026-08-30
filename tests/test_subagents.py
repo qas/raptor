@@ -170,6 +170,7 @@ class BackgroundSubagentTests(unittest.IsolatedAsyncioTestCase):
         stream = AsyncMock(return_value=completed)
         on_text = AsyncMock()
         on_reasoning = AsyncMock()
+        on_tool = AsyncMock()
 
         with patch.object(subagents, "stream_response_payload", stream):
             result = await subagents._create_subagent_response_once(
@@ -182,6 +183,7 @@ class BackgroundSubagentTests(unittest.IsolatedAsyncioTestCase):
                 reasoning_summary="auto",
                 on_text=on_text,
                 on_reasoning_summary=on_reasoning,
+                on_tool_call=on_tool,
             )
 
         self.assertEqual(result, completed)
@@ -192,6 +194,7 @@ class BackgroundSubagentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(kwargs["payload"]["reasoning"]["summary"], "auto")
         self.assertIs(kwargs["on_text"], on_text)
         self.assertIs(kwargs["on_reasoning_summary"], on_reasoning)
+        self.assertIs(kwargs["on_tool_call"], on_tool)
 
     async def test_public_subagent_stream_is_never_replayed(self) -> None:
         for callback_name in ("on_text", "on_reasoning_summary"):
@@ -221,6 +224,35 @@ class BackgroundSubagentTests(unittest.IsolatedAsyncioTestCase):
                         )
 
                 self.assertEqual(attempts, 1)
+
+    async def test_public_subagent_tool_stream_is_never_replayed(self) -> None:
+        attempts = 0
+
+        async def interrupted(_target, _items, **kwargs):
+            nonlocal attempts
+            attempts += 1
+            await kwargs["on_tool_call"](
+                {"name": "shell", "arguments": '{"cmd":"pwd"}'},
+                False,
+            )
+            raise IncompleteResponsesStreamError("disconnected")
+
+        with patch.object(
+            subagents,
+            "_create_subagent_response_once",
+            interrupted,
+        ):
+            with self.assertRaises(PartialResponsesStreamError):
+                await subagents.create_subagent_response(
+                    self.target,
+                    [],
+                    agent_id="worker-1",
+                    allow_subagents=False,
+                    depth=1,
+                    on_tool_call=AsyncMock(),
+                )
+
+        self.assertEqual(attempts, 1)
 
     async def test_background_runtime_projects_reasoning_and_reply(self) -> None:
         record = {
@@ -288,6 +320,94 @@ class BackgroundSubagentTests(unittest.IsolatedAsyncioTestCase):
                 {"reply": "Found the issue"},
             ],
         )
+
+    async def test_subagent_reuses_canonical_tool_activity_surface(self) -> None:
+        record = {
+            "id": "worker-1",
+            "model_target": self.target.to_dict(),
+            "session_id": "session-1",
+            "background": True,
+            "activity_surface_id": "telegram:42/77",
+            "pending_inputs": [],
+            "tool_events": [],
+            "todos": [],
+        }
+        session.subagent_records["worker-1"] = record
+        call = {
+            "type": "function_call",
+            "name": "read_file",
+            "call_id": "call-1",
+            "arguments": '{"path":"README.md"}',
+        }
+        response_count = 0
+        surface = AsyncMock()
+
+        async def create_response(_target, _items, **kwargs):
+            nonlocal response_count
+            response_count += 1
+            if response_count == 1:
+                await kwargs["on_tool_call"](call, False)
+                await kwargs["on_tool_call"](call, True)
+                return {"status": "completed", "output": [call]}
+            return {
+                "status": "completed",
+                "output": [
+                    {
+                        "type": "message",
+                        "content": [
+                            {"type": "output_text", "text": "done"}
+                        ],
+                    }
+                ],
+            }
+
+        with (
+            patch.object(
+                subagents,
+                "build_active_context",
+                return_value=[{"role": "user", "content": "Inspect"}],
+            ),
+            patch.object(
+                subagents,
+                "skill_catalog_instructions",
+                AsyncMock(return_value=""),
+            ),
+            patch.object(subagents, "target_input_budget", return_value=0),
+            patch.object(subagents, "create_subagent_response", create_response),
+            patch.object(subagents, "append_item"),
+            patch.object(subagents, "save_state"),
+            patch.object(
+                subagents,
+                "subagent_activity_conversation_id",
+                return_value="telegram:123/42",
+            ),
+            patch.object(
+                subagents,
+                "ToolActivitySurface",
+                return_value=surface,
+            ) as surface_type,
+            patch("approval.approval_enabled", return_value=False),
+            patch(
+                "approval.execute_tool_with_approval",
+                AsyncMock(return_value={"ok": True}),
+            ),
+        ):
+            result = await subagents.run_subagent(
+                agent_id="worker-1",
+                chat_id="telegram:123",
+                depth=1,
+                allow_subagents=False,
+            )
+
+        self.assertEqual(result, "done")
+        surface_type.assert_called_once_with(
+            "telegram:123/42",
+            isolated=True,
+        )
+        self.assertEqual(surface.stream.await_count, 2)
+        surface.running.assert_awaited_once_with(call)
+        surface.finished.assert_awaited_once_with(call, {"ok": True})
+        surface.clear.assert_awaited_once_with()
 
     async def test_failed_subagent_turn_records_terminal_outcome(self) -> None:
         record = {

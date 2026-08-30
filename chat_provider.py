@@ -42,6 +42,7 @@ class IncomingAction:
     message_id: MessageId | None
     data: str
     interactive: bool = True
+    presentation_conversation_id: ConversationId | None = None
 
 
 ChatEvent: TypeAlias = IncomingMessage | IncomingAction

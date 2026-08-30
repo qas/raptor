@@ -155,6 +155,16 @@ class QueueProvider:
             ("activity_update", conversation_id, surface_id, snapshot)
         )
 
+    def activity_surface_conversation_id(
+        self,
+        conversation_id,
+        surface_id,
+    ):
+        self.calls.append(
+            ("activity_conversation", conversation_id, surface_id)
+        )
+        return f"{conversation_id}/activity"
+
     async def append_activity_message(
         self,
         conversation_id,
@@ -328,11 +338,16 @@ class MultiProviderTests(unittest.IsolatedAsyncioTestCase):
                 sender_id=self.api.authorized_user_id,
                 message_id="status-1",
                 data="approval:abc:approve",
+                presentation_conversation_id="api:child",
             )
         )
         batch = await self.multi.poll(None, timeout=1)
         event = batch.events[0]
         self.assertEqual(event.action_id, "responses_api:action-1")
+        self.assertEqual(
+            event.presentation_conversation_id,
+            "responses_api:api:child",
+        )
         await self.multi.answer_action(event.action_id, "accepted")
         self.assertIn(
             ("answer", "action-1", "accepted", False),
@@ -406,6 +421,18 @@ class MultiProviderTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertFalse(
             any(call[0].startswith("activity_") for call in self.api.calls)
+        )
+
+    def test_activity_conversation_stays_on_its_provider(self) -> None:
+        conversation_id = self.multi.activity_surface_conversation_id(
+            "telegram:123",
+            "telegram:topic/message",
+        )
+
+        self.assertEqual(conversation_id, "telegram:123/activity")
+        self.assertEqual(
+            self.telegram.calls[-1],
+            ("activity_conversation", "123", "topic/message"),
         )
 
     async def test_existing_activity_surface_reopens_on_same_provider(

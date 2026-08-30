@@ -308,7 +308,9 @@ Compaction sends a plain rendered record set rather than malformed native tool
 call fragments. A completed compaction with no visible summary is retried once;
 if it remains empty, the failure is classified as transient and an active goal
 is paused instead of blocked. Providers may show a temporary animated
-`Compacting.` / `Compacting..` / `Compacting...` indicator.
+`Compacting.` / `Compacting..` / `Compacting...` indicator. `/status` reports
+the configured context limit and threshold compaction state even when the
+provider's live model-list request is unavailable.
 
 ### Retries and continuation
 
@@ -367,10 +369,15 @@ a Telegram forum, Raptor creates a persistent `Subagent: <id>` topic for both
 foreground and background children; scheduling mode does not change their
 visible activity surface. The delegated task, public reasoning summary,
 streamed reply, and final assistant message appear as ordinary messages without
-exposing the child's transcript or tool payloads. Raptor removes user input
-from that topic because the parent owns steering. The topic remains open across
-completed runs and is reused when the same subagent is continued. Deleting a
-stopped subagent removes its topic and durable runtime record.
+exposing the child's transcript or tool payloads. Root and child tools use the
+same status-bubble implementation. With approval enabled, the child's bubble
+has the same preview and Approve/Deny controls inside its topic. With approval
+off, that bubble streams the same `Preparing tool`, `Running`, and terminal
+lifecycle as a root tool. Raptor never adds a second tool-status message.
+Raptor removes user input from that topic because the parent owns steering. The
+topic remains open across completed runs and is reused when the same subagent
+is continued. Deleting a stopped subagent removes its topic and durable runtime
+record.
 Each parent-authored steer starts a new reply segment in the topic, so later
 streaming appears below that steer instead of editing an earlier reply above it.
 

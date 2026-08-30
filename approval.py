@@ -6,7 +6,12 @@ from typing import Any
 
 from chat_provider import ActionButton, ConversationId, IncomingAction
 from chat_runtime import get_chat_provider
-from presentation import clear_pinned_status, show_pinned_status
+from presentation import (
+    clear_pinned_status,
+    create_pinned_status,
+    delete_pinned_status,
+    show_pinned_status,
+)
 from session import APPROVAL_TOOLS, pending_approvals, state
 from observability import log_agent_activity, log_exception
 from tools import execute_tool
@@ -37,6 +42,7 @@ async def finalize_approval_message(
     entry["ui_finalized"] = True
 
     chat_id = entry.get("chat_id")
+    presentation_chat_id = entry.get("presentation_chat_id") or chat_id
     approval_id = str(entry.get("id") or "")
 
     log_agent_activity(
@@ -47,10 +53,18 @@ async def finalize_approval_message(
         return
 
     try:
-        await sync_goal_pin(
-            chat_id,
-            released_owner="approval:" + approval_id,
-        )
+        if presentation_chat_id != chat_id:
+            message_id = entry.get("message_id")
+            if message_id is not None:
+                await delete_pinned_status(
+                    presentation_chat_id,
+                    message_id,
+                )
+        else:
+            await sync_goal_pin(
+                chat_id,
+                released_owner="approval:" + approval_id,
+            )
     except asyncio.CancelledError:
         raise
     except Exception as exc:
@@ -60,6 +74,8 @@ async def finalize_approval_message(
 async def request_tool_approval(
     chat_id: ConversationId,
     call: dict[str, Any],
+    *,
+    presentation_chat_id: ConversationId | None = None,
 ) -> str:
     loop = asyncio.get_running_loop()
     future: asyncio.Future[str] = (
@@ -76,6 +92,7 @@ async def request_tool_approval(
     entry: dict[str, Any] = {
         "id": approval_id,
         "chat_id": chat_id,
+        "presentation_chat_id": presentation_chat_id or chat_id,
         "message_id": None,
         "call": call,
         "preview": preview,
@@ -85,23 +102,35 @@ async def request_tool_approval(
     pending_approvals[approval_id] = entry
 
     try:
-        message_id = await show_pinned_status(
-            chat_id,
-            "approval:" + approval_id,
-            "⚠️ Approval required\n\n" + preview,
-            controls=((
-                ActionButton(
-                    "✅ Approve",
-                    f"approval:{approval_id}:approve",
-                ),
-                ActionButton(
-                    "❌ Deny",
-                    f"approval:{approval_id}:deny",
-                ),
-            ),),
-        )
+        controls = ((
+            ActionButton(
+                "✅ Approve",
+                f"approval:{approval_id}:approve",
+            ),
+            ActionButton(
+                "❌ Deny",
+                f"approval:{approval_id}:deny",
+            ),
+        ),)
+        if (
+            presentation_chat_id is not None
+            and presentation_chat_id != chat_id
+        ):
+            message_id = await create_pinned_status(
+                presentation_chat_id,
+                "⚠️ Approval required\n\n" + preview,
+                controls,
+            )
+        else:
+            message_id = await show_pinned_status(
+                chat_id,
+                "approval:" + approval_id,
+                "⚠️ Approval required\n\n" + preview,
+                controls=controls,
+            )
         entry["message_id"] = message_id
-        await suspend_goal_pin(chat_id)
+        if presentation_chat_id is None or presentation_chat_id == chat_id:
+            await suspend_goal_pin(chat_id)
     except asyncio.CancelledError:
         pending_approvals.pop(approval_id, None)
         if not future.done():
@@ -110,7 +139,7 @@ async def request_tool_approval(
         raise
     except Exception:
         pending_approvals.pop(approval_id, None)
-        await sync_goal_pin(chat_id)
+        await finalize_approval_message(entry, "failed")
         raise
 
     try:
@@ -139,6 +168,7 @@ async def execute_tool_with_approval(
     *,
     execution_context: dict[str, Any]
     | None = None,
+    presentation_chat_id: ConversationId | None = None,
 ) -> dict[str, Any]:
     if not approval_required(
         call
@@ -157,6 +187,7 @@ async def execute_tool_with_approval(
     decision = await request_tool_approval(
         chat_id,
         call,
+        presentation_chat_id=presentation_chat_id,
     )
 
     if decision == "approve":
@@ -288,11 +319,21 @@ async def handle_approval_action(action: IncomingAction) -> bool:
             "Approval is no longer pending.",
         )
 
-        if callback_chat_id is not None:
-            await clear_pinned_status(
-                callback_chat_id,
-                owner="approval:" + approval_id,
-            )
+        presentation_chat_id = (
+            action.presentation_conversation_id or callback_chat_id
+        )
+        if presentation_chat_id is not None:
+            if presentation_chat_id != callback_chat_id:
+                if action.message_id is not None:
+                    await delete_pinned_status(
+                        presentation_chat_id,
+                        action.message_id,
+                    )
+            else:
+                await clear_pinned_status(
+                    presentation_chat_id,
+                    owner="approval:" + approval_id,
+                )
         return True
 
     future = entry.get(

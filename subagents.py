@@ -14,6 +14,7 @@ from activity import (
     open_subagent_activity,
     publish_subagent_activity,
     publish_subagent_response,
+    subagent_activity_conversation_id,
 )
 from chat_provider import ConversationId
 from chat_store import (
@@ -50,6 +51,7 @@ from response_errors import (
 )
 from responses import (
     ResponsesStreamReplayGuard,
+    ToolCallStreamCallback,
     parse_http_response_error,
     retry_transient_response,
     stream_response_payload,
@@ -64,6 +66,7 @@ from session import (
     state,
 )
 from skills import skill_catalog_instructions
+from tool_activity import ToolActivitySurface
 
 _background_reservations = 0
 _SUBAGENT_ROSTER_TEXT_CHARS = 160
@@ -310,8 +313,13 @@ async def _create_subagent_response_once(
     reasoning_summary: str | None = None,
     on_text: Callable[[str], Awaitable[None]] | None = None,
     on_reasoning_summary: Callable[[str], Awaitable[None]] | None = None,
+    on_tool_call: ToolCallStreamCallback | None = None,
 ) -> dict[str, Any]:
-    streaming = on_text is not None or on_reasoning_summary is not None
+    streaming = (
+        on_text is not None
+        or on_reasoning_summary is not None
+        or on_tool_call is not None
+    )
     provider = model_provider(target)
     settings = provider.settings_for(target.model)
     payload = build_subagent_payload(
@@ -337,6 +345,7 @@ async def _create_subagent_response_once(
             payload=payload,
             on_text=on_text,
             on_reasoning_summary=on_reasoning_summary,
+            on_tool_call=on_tool_call,
             log_source="subagent",
             log_data={"agent_id": agent_id},
         )
@@ -377,8 +386,20 @@ async def create_subagent_response(
     reasoning_summary: str | None = None,
     on_text: Callable[[str], Awaitable[None]] | None = None,
     on_reasoning_summary: Callable[[str], Awaitable[None]] | None = None,
+    on_tool_call: ToolCallStreamCallback | None = None,
 ) -> dict[str, Any]:
     replay_guard = ResponsesStreamReplayGuard()
+
+    async def project_tool_call(
+        call: dict[str, Any],
+        complete: bool,
+    ) -> None:
+        replay_guard.observe(
+            str(call.get("name") or "")
+            + str(call.get("arguments") or "")
+        )
+        if on_tool_call is not None:
+            await on_tool_call(call, complete)
 
     async def request() -> dict[str, Any]:
         try:
@@ -395,6 +416,9 @@ async def create_subagent_response(
                 reasoning_summary=reasoning_summary,
                 on_text=replay_guard.wrap(on_text),
                 on_reasoning_summary=replay_guard.wrap(on_reasoning_summary),
+                on_tool_call=(
+                    project_tool_call if on_tool_call is not None else None
+                ),
             )
         except Exception as exc:
             replay_guard.reject_unsafe_replay(
@@ -469,7 +493,7 @@ async def run_subagent(
     depth: int,
     allow_subagents: bool,
 ) -> str:
-    from approval import execute_tool_with_approval
+    from approval import approval_enabled, execute_tool_with_approval
     record = session.subagent_records[agent_id]
     target = record_model_target(record)
     input_budget = target_input_budget(target)
@@ -483,6 +507,15 @@ async def run_subagent(
     previous_events = list(record.get("tool_events", []))
     recovery_context = record.get("recovery_context")
     skills_instructions = await skill_catalog_instructions()
+    presentation_chat_id = subagent_activity_conversation_id(
+        record,
+        fallback=chat_id,
+    )
+    tool_activity = (
+        ToolActivitySurface(presentation_chat_id, isolated=True)
+        if record.get("activity_surface_id") and not approval_enabled()
+        else None
+    )
 
     async def drain_inputs(
         active_work: list[dict[str, Any]],
@@ -618,6 +651,13 @@ async def run_subagent(
                     reasoning_summary=summary,
                 )
 
+            async def publish_tool_call(
+                call: dict[str, Any],
+                complete: bool,
+            ) -> None:
+                if tool_activity is not None:
+                    await tool_activity.stream(call, complete)
+
             return await create_subagent_response(
                 target,
                 items,
@@ -627,6 +667,9 @@ async def run_subagent(
                 extra_instructions=recovery_inst,
                 on_text=publish_text,
                 on_reasoning_summary=publish_reasoning,
+                on_tool_call=(
+                    publish_tool_call if tool_activity is not None else None
+                ),
             )
 
         async def _compact_forced(items):
@@ -701,11 +744,29 @@ async def run_subagent(
         tool_context["session_id"] = session_id
         tool_context["model_target"] = target.to_dict()
         tool_context["todo_state"] = record
-        return await execute_tool_with_approval(
-            chat_id,
-            call,
-            execution_context=tool_context,
-        )
+        if tool_activity is not None:
+            await tool_activity.running(call)
+        try:
+            result = await execute_tool_with_approval(
+                chat_id,
+                call,
+                execution_context=tool_context,
+                presentation_chat_id=presentation_chat_id,
+            )
+        except asyncio.CancelledError:
+            if tool_activity is not None:
+                await tool_activity.finished(
+                    call,
+                    {"ok": False, "status": "interrupted"},
+                )
+            raise
+        except Exception:
+            if tool_activity is not None:
+                await tool_activity.finished(call, {"ok": False})
+            raise
+        if tool_activity is not None:
+            await tool_activity.finished(call, result)
+        return result
 
     async def compact_work(
         active_work: list[dict[str, Any]],
@@ -778,6 +839,9 @@ async def run_subagent(
                 through_seq=int(outcome["seq"]),
             )
         raise
+    finally:
+        if tool_activity is not None:
+            await tool_activity.clear()
     record["tool_events"] = _bounded_tool_events(
         previous_events + list(result["tool_events"])
     )

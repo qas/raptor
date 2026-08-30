@@ -38,6 +38,7 @@ class ModelCommandTests(unittest.IsolatedAsyncioTestCase):
                     id="alpha",
                     base_url="http://alpha.example/v1",
                     default_model="alpha-model",
+                    context_window=131072,
                 ),
                 "beta": ModelProvider(
                     id="beta",
@@ -111,6 +112,32 @@ class ModelCommandTests(unittest.IsolatedAsyncioTestCase):
             f"version: {display_version()}\n",
             send.await_args.args[1],
         )
+
+    async def test_status_keeps_context_settings_when_models_are_down(
+        self,
+    ) -> None:
+        send = AsyncMock()
+        with (
+            patch.object(commands, "send", send),
+            patch.object(
+                commands,
+                "get_chat_provider",
+                return_value=SimpleNamespace(name="test"),
+            ),
+            patch.object(
+                commands,
+                "list_models",
+                AsyncMock(side_effect=OSError("offline")),
+            ),
+        ):
+            handled = await commands.command(1, "/status")
+
+        self.assertTrue(handled)
+        status = send.await_args.args[1]
+        self.assertIn("Responses: down/unreachable\n", status)
+        self.assertIn("context limit: 131,072 tokens\n", status)
+        self.assertIn("auto-compact: enabled\n", status)
+        self.assertNotIn("auto-compact: disabled", status)
 
     async def test_subagents_reports_current_session_records(self) -> None:
         session.subagent_records["worker-1"] = {

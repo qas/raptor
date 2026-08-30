@@ -283,6 +283,38 @@ class ChatProviderContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(texts[3].startswith("Completed\n\nTool: shell"))
         self.assertIsNone(session.current_runtime().pinned_status_owner)
 
+    async def test_isolated_tool_activity_uses_same_pinned_bubble(self) -> None:
+        from tool_activity import ToolActivitySurface
+
+        surface = ToolActivitySurface(
+            "!room:example.org/child",
+            isolated=True,
+        )
+        call = {
+            "type": "function_call",
+            "name": "shell",
+            "call_id": "c1",
+            "arguments": '{"command":"pwd"}',
+        }
+
+        await surface.running(call)
+        await surface.finished(call, {"ok": True})
+        await surface.clear()
+
+        methods = [call[0] for call in self.provider.calls]
+        self.assertEqual(
+            methods,
+            ["create", "pin", "edit", "unpin", "delete"],
+        )
+        texts = [
+            call[3]
+            for call in self.provider.calls
+            if call[0] in {"create", "edit"}
+        ]
+        self.assertTrue(texts[0].startswith("Running\n\nTool: shell"))
+        self.assertTrue(texts[1].startswith("Completed\n\nTool: shell"))
+        self.assertIsNone(session.current_runtime().pinned_status_owner)
+
     async def test_tool_activity_clear_preserves_newer_status_owner(self) -> None:
         from presentation import show_pinned_status
         from tool_activity import ToolActivitySurface
@@ -874,6 +906,43 @@ class TelegramNormalizationTests(unittest.TestCase):
 
         self.assertIsInstance(event, IncomingMessage)
         self.assertFalse(event.interactive)
+
+    def test_activity_topic_action_routes_to_parent_runtime(self) -> None:
+        import telegram
+
+        provider = telegram.TelegramProvider()
+        provider._chats[1].activity_topics[42] = (
+            telegram._TelegramActivityTopic(
+                parent_conversation_id="1/10",
+            )
+        )
+        event = provider.normalize_update(
+            {
+                "callback_query": {
+                    "id": "callback-1",
+                    "from": {"id": 1},
+                    "data": "approval:abc:approve",
+                    "message": {
+                        "message_id": 11,
+                        "message_thread_id": 42,
+                        "is_topic_message": True,
+                        "chat": {"id": 1, "type": "supergroup"},
+                    },
+                }
+            }
+        )
+
+        self.assertEqual(
+            event,
+            IncomingAction(
+                action_id="callback-1",
+                conversation_id="1/10",
+                sender_id=1,
+                message_id=11,
+                data="approval:abc:approve",
+                presentation_conversation_id="1/42",
+            ),
+        )
 
     def test_chat_and_topic_membership_are_isolated(self) -> None:
         import telegram

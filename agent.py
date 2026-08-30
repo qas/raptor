@@ -393,7 +393,24 @@ async def agent_turn(
     input_recorded: bool = False,
     source_message_id: int | str | None = None,
 ) -> bool | RetryableTurnFailure:
-    typing_task = asyncio.create_task(typing_loop(chat_id))
+    typing_task: asyncio.Task[None] | None = asyncio.create_task(
+        typing_loop(chat_id)
+    )
+
+    async def pause_typing() -> None:
+        nonlocal typing_task
+        task = typing_task
+        typing_task = None
+        if task is None:
+            return
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+    def resume_typing() -> None:
+        nonlocal typing_task
+        if typing_task is None:
+            typing_task = asyncio.create_task(typing_loop(chat_id))
+
     target = session.current_model_target()
     session_id = current_session_id()
     continue_pending = True
@@ -734,6 +751,8 @@ async def agent_turn(
         async def execute_call(
             call: dict[str, Any],
         ) -> dict[str, Any]:
+            await pause_typing()
+            resume_after_tool = True
             exec_state = dict(state)
             exec_state["session_id"] = session_id
             exec_state["model_target"] = target.to_dict()
@@ -746,7 +765,11 @@ async def agent_turn(
                     call,
                     execution_context=exec_state,
                 )
+                if tool_activity is not None:
+                    await tool_activity.finished(call, result)
+                return result
             except asyncio.CancelledError:
+                resume_after_tool = False
                 if tool_activity is not None:
                     await tool_activity.finished(
                         call,
@@ -757,9 +780,9 @@ async def agent_turn(
                 if tool_activity is not None:
                     await tool_activity.finished(call, {"ok": False})
                 raise
-            if tool_activity is not None:
-                await tool_activity.finished(call, result)
-            return result
+            finally:
+                if resume_after_tool:
+                    resume_typing()
 
         async def compact_work(
             active_work: list[dict[str, Any]],
@@ -938,8 +961,7 @@ async def agent_turn(
         runtime.goal_creation_authorized = False
         if tool_activity is not None:
             await tool_activity.clear()
-        typing_task.cancel()
-        await asyncio.gather(typing_task, return_exceptions=True)
+        await pause_typing()
         if continue_pending:
             while True:
                 try:

@@ -41,6 +41,44 @@ async def _unpin_and_delete(
         log_exception("presentation", "delete_error", exc)
 
 
+async def create_pinned_status(
+    conversation_id: ConversationId,
+    text: str,
+    controls: Controls = (),
+) -> MessageId:
+    """Create one pinned status using the canonical provider presentation."""
+    provider = get_chat_provider()
+    effective_controls = controls if provider.capabilities.controls else ()
+    message_id = await provider.create_message(
+        conversation_id,
+        text,
+        effective_controls,
+    )
+    if not provider.capabilities.pins:
+        return message_id
+    try:
+        await provider.pin_message(conversation_id, message_id)
+    except Exception:
+        try:
+            await provider.delete_message(conversation_id, message_id)
+        except Exception as cleanup_exc:
+            log_exception(
+                "presentation",
+                "failed_pin_cleanup_error",
+                cleanup_exc,
+            )
+        raise
+    return message_id
+
+
+async def delete_pinned_status(
+    conversation_id: ConversationId,
+    message_id: MessageId,
+) -> None:
+    """Remove a status created by :func:`create_pinned_status`."""
+    await _unpin_and_delete(conversation_id, message_id)
+
+
 async def show_pinned_status(
     conversation_id: ConversationId,
     owner: str,
@@ -84,27 +122,11 @@ async def show_pinned_status(
                 runtime.pinned_status_message_id = None
                 runtime.pinned_status_owner = None
 
-        message_id = await provider.create_message(
+        message_id = await create_pinned_status(
             conversation_id,
             text,
             effective_controls,
         )
-        if provider.capabilities.pins:
-            try:
-                await provider.pin_message(conversation_id, message_id)
-            except Exception:
-                try:
-                    await provider.delete_message(
-                        conversation_id,
-                        message_id,
-                    )
-                except Exception as cleanup_exc:
-                    log_exception(
-                        "presentation",
-                        "failed_pin_cleanup_error",
-                        cleanup_exc,
-                    )
-                raise
         runtime.pinned_status_conversation_id = conversation_id
         runtime.pinned_status_message_id = message_id
         runtime.pinned_status_owner = owner
