@@ -287,10 +287,12 @@ The persistent status slot has this priority:
 approval/tool activity > thread > goal > empty
 ```
 
-With approval off, root-agent tool names and arguments stream into the same
-bounded status surface used for approvals. The surface changes to `Running`,
-then `Completed`, `Failed`, or `Interrupted`, and restores the active thread or
-goal when the agent turn ends. `/ask` uses the same lifecycle once its
+Each root-agent tool call gets a fresh bounded status bubble. Its arguments
+stream while the call is prepared; the same bubble changes to `Running`, then
+`Completed`, `Failed`, `Denied`, or `Interrupted`. Approval adds Approve/Deny
+controls to that bubble before execution. Terminal bubbles remain in history,
+are unpinned, and never change again. Active thread or goal status is restored
+before the final answer is delivered. `/ask` uses the same lifecycle once its
 non-streaming model response yields a tool call. Steering is transient and is
 never pinned.
 
@@ -373,7 +375,8 @@ exposing the child's transcript or tool payloads. Root and child tools use the
 same status-bubble implementation. With approval enabled, the child's bubble
 has the same preview and Approve/Deny controls inside its topic. With approval
 off, that bubble streams the same `Preparing tool`, `Running`, and terminal
-lifecycle as a root tool. Raptor never adds a second tool-status message.
+lifecycle as a root tool. Every call gets one bubble; Raptor never adds a
+second tool-status message for the same call.
 Raptor removes user input from that topic because the parent owns steering. The
 topic remains open across completed runs and is reused when the same subagent
 is continued. Deleting a stopped subagent removes its topic and durable runtime

@@ -41,9 +41,11 @@ class MultiProvider:
         self.name = ",".join(provider.name for provider in providers)
         self.capabilities = self._combined_capabilities()
         primary = providers[0]
-        self.primary_conversation_id = self._conversation_id(
-            primary,
-            primary.primary_conversation_id,
+        raw_primary = primary.primary_conversation_id
+        self.primary_conversation_id = (
+            self._conversation_id(primary, raw_primary)
+            if str(raw_primary).strip()
+            else raw_primary
         )
         self._poll_tasks: dict[str, asyncio.Task[PollResult]] = {}
         self._cursors: dict[str, object | None] = {
@@ -156,6 +158,11 @@ class MultiProvider:
             for provider in self.providers:
                 await provider.initialize(commands)
                 initialized.append(provider)
+            primary = self.providers[0]
+            self.primary_conversation_id = self._conversation_id(
+                primary,
+                primary.primary_conversation_id,
+            )
             self.capabilities = self._combined_capabilities()
         except Exception:
             for provider in reversed(initialized):

@@ -202,17 +202,21 @@ class TranscriptDurabilityTests(unittest.IsolatedAsyncioTestCase):
     async def test_root_tool_activity_streams_and_tracks_execution(self) -> None:
         responses = 0
         typing_events: list[str] = []
+        presentation_events: list[str] = []
         streamed_call = {
             "type": "function_call",
             "name": "list_dir",
             "call_id": "c1",
             "arguments": "{}",
         }
+        async def clear_surface():
+            presentation_events.append("clear")
+
         surface = Mock(
             stream=AsyncMock(),
             running=AsyncMock(),
             finished=AsyncMock(),
-            clear=AsyncMock(),
+            clear=AsyncMock(side_effect=clear_surface),
         )
 
         async def fake_stream(
@@ -244,9 +248,13 @@ class TranscriptDurabilityTests(unittest.IsolatedAsyncioTestCase):
                 ]
             }
 
-        async def execute(*_args, **_kwargs):
+        async def execute(*_args, **kwargs):
             self.assertEqual(typing_events, ["started", "stopped"])
+            self.assertIs(kwargs["tool_activity"], surface)
             return {"ok": True}
+
+        async def send_answer(*_args, **_kwargs):
+            presentation_events.append("send")
 
         async def typing(_chat_id):
             typing_events.append("started")
@@ -259,7 +267,7 @@ class TranscriptDurabilityTests(unittest.IsolatedAsyncioTestCase):
             patch.object(agent_mod, "ToolActivitySurface", return_value=surface),
             patch.object(agent_mod, "responses_create_stream", fake_stream),
             patch.object(agent_mod, "execute_tool_with_approval", execute),
-            patch.object(agent_mod, "send", _noop),
+            patch.object(agent_mod, "send", send_answer),
             patch.object(agent_mod, "typing_loop", typing),
             patch.object(agent_mod, "maybe_auto_compact", _noop),
         ):
@@ -267,12 +275,12 @@ class TranscriptDurabilityTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(result)
         surface.stream.assert_awaited_once_with(streamed_call, True)
-        surface.running.assert_awaited_once_with(streamed_call)
         surface.finished.assert_awaited_once_with(
             streamed_call,
             {"ok": True},
         )
-        surface.clear.assert_awaited_once_with()
+        self.assertEqual(surface.clear.await_count, 2)
+        self.assertEqual(presentation_events[:2], ["clear", "send"])
         self.assertEqual(
             typing_events,
             ["started", "stopped", "started", "stopped"],

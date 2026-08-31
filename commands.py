@@ -71,12 +71,11 @@ from chat_runtime import (
 )
 from engine import (
     function_call_output,
-    interrupted_tool_result,
     response_calls,
     response_output,
     response_text,
 )
-from approval import approval_enabled, execute_tool_with_approval
+from approval import execute_tool_with_approval
 from model_providers import MODEL_CONFIGURATION, ModelSettings, ModelTarget
 from responses import (
     MODEL_LIST_TIMEOUT_SECONDS,
@@ -121,9 +120,7 @@ async def _run_stateless_ask(
     current_task = asyncio.current_task()
     try:
         with bound_delivery_context(chat_id, delivery_context):
-            tool_activity = (
-                None if approval_enabled() else ToolActivitySurface(chat_id)
-            )
+            tool_activity = ToolActivitySurface(chat_id)
             try:
                 target = session.current_model_target()
                 ask_instructions = await skill_catalog_instructions()
@@ -153,41 +150,36 @@ async def _run_stateless_ask(
                         )
                         execution_context["model_target"] = target.to_dict()
                         execution_context["todo_state"] = state
-                        if tool_activity is not None:
-                            await tool_activity.running(call)
                         try:
                             result = await execute_tool_with_approval(
                                 chat_id,
                                 call,
                                 execution_context=execution_context,
+                                tool_activity=tool_activity,
                             )
                         except asyncio.CancelledError:
-                            if tool_activity is not None:
-                                await tool_activity.finished(
-                                    call,
-                                    interrupted_tool_result(),
-                                )
+                            await tool_activity.finished(
+                                call,
+                                {"ok": False, "status": "interrupted"},
+                            )
                             raise
                         except Exception:
-                            if tool_activity is not None:
-                                await tool_activity.finished(
-                                    call,
-                                    {"ok": False},
-                                )
+                            await tool_activity.finished(call, {"ok": False})
                             raise
-                        if tool_activity is not None:
-                            await tool_activity.finished(call, result)
+                        await tool_activity.finished(call, result)
                         work.append(function_call_output(call, result))
             except asyncio.CancelledError:
+                await tool_activity.clear()
                 await send(chat_id, "Ask cancelled.")
                 raise
             except Exception as exc:
+                await tool_activity.clear()
                 await send(chat_id, f"Ask error: {type(exc).__name__}: {exc}")
             else:
+                await tool_activity.clear()
                 await send(chat_id, answer)
             finally:
-                if tool_activity is not None:
-                    await tool_activity.clear()
+                await tool_activity.clear()
     finally:
         if turns.finish(current_task):
             ensure_root_session(chat_id, None)

@@ -213,6 +213,37 @@ class MultiProviderTests(unittest.IsolatedAsyncioTestCase):
     async def asyncTearDown(self) -> None:
         await self.multi.close()
 
+    async def test_empty_primary_is_validated_by_provider_initialize(self) -> None:
+        unconfigured = QueueProvider("unconfigured", "")
+        unconfigured.initialize = AsyncMock(
+            side_effect=RuntimeError("provider configuration required")
+        )
+
+        multi = MultiProvider((unconfigured, self.api))
+        self.addAsyncCleanup(multi.close)
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "provider configuration required",
+        ):
+            await multi.initialize(())
+        unconfigured.initialize.assert_awaited_once_with(())
+
+    async def test_primary_is_resolved_after_provider_initialize(self) -> None:
+        delayed = QueueProvider("delayed", "")
+
+        async def initialize(commands) -> None:
+            delayed.calls.append(("initialize", commands))
+            delayed.primary_conversation_id = "ready"
+
+        delayed.initialize = initialize
+        multi = MultiProvider((delayed, self.api))
+        self.addAsyncCleanup(multi.close)
+
+        await multi.initialize(())
+
+        self.assertEqual(multi.primary_conversation_id, "delayed:ready")
+
     async def test_close_logs_each_provider_failure(self) -> None:
         with (
             patch.object(

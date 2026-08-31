@@ -386,11 +386,10 @@ class BackgroundSubagentTests(unittest.IsolatedAsyncioTestCase):
                 "ToolActivitySurface",
                 return_value=surface,
             ) as surface_type,
-            patch("approval.approval_enabled", return_value=False),
             patch(
                 "approval.execute_tool_with_approval",
                 AsyncMock(return_value={"ok": True}),
-            ),
+            ) as execute,
         ):
             result = await subagents.run_subagent(
                 agent_id="worker-1",
@@ -402,10 +401,10 @@ class BackgroundSubagentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result, "done")
         surface_type.assert_called_once_with(
             "telegram:123/42",
-            isolated=True,
+            manage_root_status=False,
         )
         self.assertEqual(surface.stream.await_count, 2)
-        surface.running.assert_awaited_once_with(call)
+        self.assertIs(execute.await_args.kwargs["tool_activity"], surface)
         surface.finished.assert_awaited_once_with(call, {"ok": True})
         surface.clear.assert_awaited_once_with()
 

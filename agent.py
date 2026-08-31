@@ -42,7 +42,7 @@ from goals import (
 )
 from session import save_state, state, steer_queue
 import session
-from approval import approval_enabled, execute_tool_with_approval
+from approval import execute_tool_with_approval
 from chat_runtime import (
     activate_delivery_context,
     capture_delivery_context,
@@ -420,9 +420,7 @@ async def agent_turn(
     resumed_subagents = list(
         state.get("interrupted_subagents", [])
     )
-    tool_activity = (
-        None if approval_enabled() else ToolActivitySurface(chat_id)
-    )
+    tool_activity = ToolActivitySurface(chat_id)
     turn_source = source or (
         "internal" if internal else "user"
     )
@@ -560,6 +558,8 @@ async def agent_turn(
         *,
         reset_context: bool = False,
     ) -> None:
+        await tool_activity.clear()
+        await pause_typing()
         delivery_seq = prepare_delivery(assistant_message(message))
         if reset_context:
             reset_model_context(
@@ -757,28 +757,16 @@ async def agent_turn(
             exec_state["session_id"] = session_id
             exec_state["model_target"] = target.to_dict()
             exec_state["todo_state"] = todo_store_for_execution()
-            if tool_activity is not None:
-                await tool_activity.running(call)
             try:
                 result = await execute_tool_with_approval(
                     chat_id,
                     call,
                     execution_context=exec_state,
+                    tool_activity=tool_activity,
                 )
-                if tool_activity is not None:
-                    await tool_activity.finished(call, result)
                 return result
             except asyncio.CancelledError:
                 resume_after_tool = False
-                if tool_activity is not None:
-                    await tool_activity.finished(
-                        call,
-                        interrupted_tool_result(),
-                    )
-                raise
-            except Exception:
-                if tool_activity is not None:
-                    await tool_activity.finished(call, {"ok": False})
                 raise
             finally:
                 if resume_after_tool:
@@ -847,9 +835,12 @@ async def agent_turn(
             compact_context=compact_work,
             record_items=record_items,
             record_terminal_items=record_terminal_items,
+            report_tool_result=tool_activity.finished,
         )
         if final_output_seq is None:
             raise RuntimeError("Final response was not archived")
+        await tool_activity.clear()
+        await pause_typing()
         try:
             await send(chat_id, str(result["text"]))
         except Exception as send_exc:
@@ -959,8 +950,7 @@ async def agent_turn(
         return False
     finally:
         runtime.goal_creation_authorized = False
-        if tool_activity is not None:
-            await tool_activity.clear()
+        await tool_activity.clear()
         await pause_typing()
         if continue_pending:
             while True:

@@ -105,6 +105,10 @@ RecordTerminalItems = Callable[
     None,
 ]
 ReportActivity = Callable[[str], None]
+ReportToolResult = Callable[
+    [dict[str, Any], dict[str, Any]],
+    Awaitable[None],
+]
 
 
 def estimate_tokens(value: Any) -> int:
@@ -190,6 +194,7 @@ async def run_agent(
     record_items: RecordItems | None = None,
     record_terminal_items: RecordTerminalItems | None = None,
     report_activity: ReportActivity | None = None,
+    report_tool_result: ReportToolResult | None = None,
 ) -> dict[str, Any]:
     turn_inputs: list[dict[str, Any]] = []
     tool_events: list[dict[str, Any]] = []
@@ -291,6 +296,8 @@ async def run_agent(
                     call_result = await execute_call(call)
             except asyncio.CancelledError:
                 call_result = interrupted_tool_result()
+                if report_tool_result:
+                    await report_tool_result(call, call_result)
                 event["status"] = "interrupted"
                 event["result"] = call_result
                 if checkpoint:
@@ -319,6 +326,8 @@ async def run_agent(
                     "ok": False,
                     "error": "Tool returned a non-object result",
                 }
+            if report_tool_result:
+                await report_tool_result(call, call_result)
             event["status"] = (
                 "completed" if call_result.get("ok") else "failed"
             )

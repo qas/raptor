@@ -79,6 +79,20 @@ async def delete_pinned_status(
     await _unpin_and_delete(conversation_id, message_id)
 
 
+async def release_pinned_status(
+    conversation_id: ConversationId,
+    message_id: MessageId,
+) -> None:
+    """Unpin a terminal status while preserving it in conversation history."""
+    provider = get_chat_provider()
+    if not provider.capabilities.pins:
+        return
+    try:
+        await provider.unpin_message(conversation_id, message_id)
+    except Exception as exc:
+        log_exception("presentation", "unpin_error", exc)
+
+
 async def show_pinned_status(
     conversation_id: ConversationId,
     owner: str,

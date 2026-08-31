@@ -6,17 +6,10 @@ from typing import Any
 
 from chat_provider import ActionButton, ConversationId, IncomingAction
 from chat_runtime import get_chat_provider
-from presentation import (
-    clear_pinned_status,
-    create_pinned_status,
-    delete_pinned_status,
-    show_pinned_status,
-)
 from session import APPROVAL_TOOLS, pending_approvals, state
 from observability import log_agent_activity, log_exception
 from tools import execute_tool
-from goals import suspend_goal_pin, sync_goal_pin
-from tool_activity import tool_preview
+from tool_activity import ToolActivitySurface
 
 
 def approval_enabled() -> bool:
@@ -32,50 +25,11 @@ def approval_required(
     )
 
 
-async def finalize_approval_message(
-    entry: dict[str, Any],
-    status: str,
-) -> None:
-    if entry.get("ui_finalized"):
-        return
-
-    entry["ui_finalized"] = True
-
-    chat_id = entry.get("chat_id")
-    presentation_chat_id = entry.get("presentation_chat_id") or chat_id
-    approval_id = str(entry.get("id") or "")
-
-    log_agent_activity(
-        f"approval UI finalized: {status}"
-    )
-
-    if chat_id is None:
-        return
-
-    try:
-        if presentation_chat_id != chat_id:
-            message_id = entry.get("message_id")
-            if message_id is not None:
-                await delete_pinned_status(
-                    presentation_chat_id,
-                    message_id,
-                )
-        else:
-            await sync_goal_pin(
-                chat_id,
-                released_owner="approval:" + approval_id,
-            )
-    except asyncio.CancelledError:
-        raise
-    except Exception as exc:
-        log_exception("approval", "status_cleanup_error", exc)
-
-
 async def request_tool_approval(
     chat_id: ConversationId,
     call: dict[str, Any],
     *,
-    presentation_chat_id: ConversationId | None = None,
+    tool_activity: ToolActivitySurface,
 ) -> str:
     loop = asyncio.get_running_loop()
     future: asyncio.Future[str] = (
@@ -85,19 +39,12 @@ async def request_tool_approval(
     approval_id = os.urandom(
         6
     ).hex()
-    preview = tool_preview(
-        call
-    )
-
     entry: dict[str, Any] = {
         "id": approval_id,
         "chat_id": chat_id,
-        "presentation_chat_id": presentation_chat_id or chat_id,
         "message_id": None,
         "call": call,
-        "preview": preview,
         "future": future,
-        "ui_finalized": False,
     }
     pending_approvals[approval_id] = entry
 
@@ -112,34 +59,15 @@ async def request_tool_approval(
                 f"approval:{approval_id}:deny",
             ),
         ),)
-        if (
-            presentation_chat_id is not None
-            and presentation_chat_id != chat_id
-        ):
-            message_id = await create_pinned_status(
-                presentation_chat_id,
-                "⚠️ Approval required\n\n" + preview,
-                controls,
-            )
-        else:
-            message_id = await show_pinned_status(
-                chat_id,
-                "approval:" + approval_id,
-                "⚠️ Approval required\n\n" + preview,
-                controls=controls,
-            )
+        message_id = await tool_activity.approval(call, controls)
         entry["message_id"] = message_id
-        if presentation_chat_id is None or presentation_chat_id == chat_id:
-            await suspend_goal_pin(chat_id)
     except asyncio.CancelledError:
         pending_approvals.pop(approval_id, None)
         if not future.done():
             future.cancel()
-        await finalize_approval_message(entry, "cancelled")
         raise
     except Exception:
         pending_approvals.pop(approval_id, None)
-        await finalize_approval_message(entry, "failed")
         raise
 
     try:
@@ -149,10 +77,6 @@ async def request_tool_approval(
         if not future.done():
             future.cancel()
 
-        await finalize_approval_message(
-            entry,
-            "⏹ Cancelled",
-        )
         raise
 
     finally:
@@ -169,60 +93,72 @@ async def execute_tool_with_approval(
     execution_context: dict[str, Any]
     | None = None,
     presentation_chat_id: ConversationId | None = None,
+    tool_activity: ToolActivitySurface | None = None,
 ) -> dict[str, Any]:
-    if not approval_required(
-        call
-    ):
-        return await execute_tool(
+    owned_activity = False
+
+    async def finish_owned_activity(result: dict[str, Any]) -> None:
+        if tool_activity is None or not owned_activity:
+            return
+        await tool_activity.finished(call, result)
+        await tool_activity.clear()
+
+    try:
+        if approval_required(call):
+            log_agent_activity("waiting for approval")
+            if tool_activity is None:
+                tool_activity = ToolActivitySurface(
+                    presentation_chat_id or chat_id,
+                    manage_root_status=(
+                        presentation_chat_id is None
+                        or presentation_chat_id == chat_id
+                    ),
+                )
+                owned_activity = True
+            decision = await request_tool_approval(
+                chat_id,
+                call,
+                tool_activity=tool_activity,
+            )
+            if decision != "approve":
+                if decision == "steer":
+                    log_agent_activity("approval superseded by steering")
+                    result = {
+                        "ok": False,
+                        "error": (
+                            "Tool execution cancelled because a steering "
+                            "message superseded the pending approval."
+                        ),
+                        "approval": "superseded",
+                    }
+                else:
+                    log_agent_activity("tool denied")
+                    result = {
+                        "ok": False,
+                        "error": "Tool execution denied by user.",
+                        "approval": "denied",
+                    }
+                await finish_owned_activity(result)
+                return result
+            log_agent_activity("tool approved")
+
+        if tool_activity is not None:
+            await tool_activity.running(call)
+        result = await execute_tool(
             call,
             chat_id=chat_id,
-            execution_context=(
-                execution_context
-            ),
+            execution_context=execution_context,
         )
-
-    log_agent_activity(
-        "waiting for approval"
-    )
-    decision = await request_tool_approval(
-        chat_id,
-        call,
-        presentation_chat_id=presentation_chat_id,
-    )
-
-    if decision == "approve":
-        log_agent_activity(
-            "tool approved"
+    except asyncio.CancelledError:
+        await finish_owned_activity(
+            {"ok": False, "status": "interrupted"},
         )
-        return await execute_tool(
-            call,
-            chat_id=chat_id,
-            execution_context=(
-                execution_context
-            ),
-        )
-
-    if decision == "steer":
-        log_agent_activity(
-            "approval superseded by steering"
-        )
-        return {
-            "ok": False,
-            "error": (
-                "Tool execution cancelled because a steering message "
-                "superseded the pending approval."
-            ),
-            "approval": "superseded",
-        }
-
-    log_agent_activity(
-        "tool denied"
-    )
-    return {
-        "ok": False,
-        "error": "Tool execution denied by user.",
-        "approval": "denied",
-    }
+        raise
+    except Exception:
+        await finish_owned_activity({"ok": False})
+        raise
+    await finish_owned_activity(result)
+    return result
 
 
 async def supersede_pending_approvals(
@@ -252,11 +188,6 @@ async def supersede_pending_approvals(
             "steer"
         )
         superseded += 1
-
-        await finalize_approval_message(
-            entry,
-            "↪️ Superseded by steering",
-        )
 
     return superseded
 
@@ -319,21 +250,6 @@ async def handle_approval_action(action: IncomingAction) -> bool:
             "Approval is no longer pending.",
         )
 
-        presentation_chat_id = (
-            action.presentation_conversation_id or callback_chat_id
-        )
-        if presentation_chat_id is not None:
-            if presentation_chat_id != callback_chat_id:
-                if action.message_id is not None:
-                    await delete_pinned_status(
-                        presentation_chat_id,
-                        action.message_id,
-                    )
-            else:
-                await clear_pinned_status(
-                    presentation_chat_id,
-                    owner="approval:" + approval_id,
-                )
         return True
 
     future = entry.get(
@@ -354,15 +270,6 @@ async def handle_approval_action(action: IncomingAction) -> bool:
 
     future.set_result(
         decision
-    )
-
-    await finalize_approval_message(
-        entry,
-        (
-            "✅ Approved"
-            if decision == "approve"
-            else "❌ Denied"
-        ),
     )
 
     return True

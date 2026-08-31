@@ -8,6 +8,52 @@ from engine import function_call_output, run_agent
 
 
 class AgentEngineTests(unittest.IsolatedAsyncioTestCase):
+    async def test_invalid_tool_arguments_report_terminal_result(self) -> None:
+        responses = [
+            {
+                "output": [{
+                    "type": "function_call",
+                    "name": "shell",
+                    "call_id": "call-1",
+                    "arguments": "{",
+                }]
+            },
+            {
+                "output": [{
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "done"}],
+                }]
+            },
+        ]
+        executed = False
+        reported: list[tuple[dict, dict]] = []
+
+        async def create_response(_work):
+            return responses.pop(0)
+
+        async def execute_call(_call):
+            nonlocal executed
+            executed = True
+            return {"ok": True}
+
+        async def report_tool_result(call, result):
+            reported.append((call, result))
+
+        await run_agent(
+            work=[],
+            create_response=create_response,
+            execute_call=execute_call,
+            source="test",
+            max_tool_rounds=1,
+            report_tool_result=report_tool_result,
+        )
+
+        self.assertFalse(executed)
+        self.assertEqual(reported[0][0]["call_id"], "call-1")
+        self.assertFalse(reported[0][1]["ok"])
+        self.assertIn("bad JSON arguments", reported[0][1]["error"])
+
     async def test_terminal_output_uses_distinct_recording_boundary(
         self,
     ) -> None:

@@ -493,7 +493,7 @@ async def run_subagent(
     depth: int,
     allow_subagents: bool,
 ) -> str:
-    from approval import approval_enabled, execute_tool_with_approval
+    from approval import execute_tool_with_approval
     record = session.subagent_records[agent_id]
     target = record_model_target(record)
     input_budget = target_input_budget(target)
@@ -512,8 +512,8 @@ async def run_subagent(
         fallback=chat_id,
     )
     tool_activity = (
-        ToolActivitySurface(presentation_chat_id, isolated=True)
-        if record.get("activity_surface_id") and not approval_enabled()
+        ToolActivitySurface(presentation_chat_id, manage_root_status=False)
+        if record.get("activity_surface_id")
         else None
     )
 
@@ -744,29 +744,13 @@ async def run_subagent(
         tool_context["session_id"] = session_id
         tool_context["model_target"] = target.to_dict()
         tool_context["todo_state"] = record
-        if tool_activity is not None:
-            await tool_activity.running(call)
-        try:
-            result = await execute_tool_with_approval(
-                chat_id,
-                call,
-                execution_context=tool_context,
-                presentation_chat_id=presentation_chat_id,
-            )
-        except asyncio.CancelledError:
-            if tool_activity is not None:
-                await tool_activity.finished(
-                    call,
-                    {"ok": False, "status": "interrupted"},
-                )
-            raise
-        except Exception:
-            if tool_activity is not None:
-                await tool_activity.finished(call, {"ok": False})
-            raise
-        if tool_activity is not None:
-            await tool_activity.finished(call, result)
-        return result
+        return await execute_tool_with_approval(
+            chat_id,
+            call,
+            execution_context=tool_context,
+            presentation_chat_id=presentation_chat_id,
+            tool_activity=tool_activity,
+        )
 
     async def compact_work(
         active_work: list[dict[str, Any]],
@@ -820,6 +804,9 @@ async def run_subagent(
             report_activity=lambda detail: publish_subagent_activity(
                 record,
                 detail,
+            ),
+            report_tool_result=(
+                tool_activity.finished if tool_activity is not None else None
             ),
         )
     except asyncio.CancelledError:

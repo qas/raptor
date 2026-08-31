@@ -2092,12 +2092,12 @@ class PinnedStatusSlotTests(unittest.IsolatedAsyncioTestCase):
         self._tg_patch.start()
         self.addCleanup(self._tg_patch.stop)
 
-    async def test_approval_reuses_pinned_slot_and_restores_in_place(
+    async def test_approval_uses_fresh_bubble_then_restores_goal(
         self,
     ) -> None:
-        from approval import finalize_approval_message
-        from chat_provider import ActionButton
-        from presentation import show_pinned_status
+        from approval import execute_tool_with_approval, handle_approval_action
+        from chat_provider import IncomingAction
+        from chat_runtime import get_chat_provider
 
         goal = replace_goal("shared slot")
         await ensure_goal_pin(1)
@@ -2107,53 +2107,61 @@ class PinnedStatusSlotTests(unittest.IsolatedAsyncioTestCase):
             f"goal:{goal['id']}",
         )
 
-        approval_id = "abc123"
-        await show_pinned_status(
-            1,
-            f"approval:{approval_id}",
-            "Approval required",
-            controls=((ActionButton("Approve", "approval:test"),),),
-        )
-        await suspend_goal_pin(1)
-        entry = {
-            "id": approval_id,
-            "chat_id": 1,
-            "message_id": 321,
-            "ui_finalized": False,
-        }
-        session.pending_approvals[approval_id] = entry
-
-        await finalize_approval_message(entry, "approved")
-
+        session.state["approval_mode"] = "on"
+        call = {"name": "shell", "arguments": '{"cmd":"pwd"}'}
+        with patch(
+            "approval.execute_tool",
+            AsyncMock(return_value={"ok": True}),
+        ):
+            execution = asyncio.create_task(
+                execute_tool_with_approval(
+                    1,
+                    call,
+                )
+            )
+            await asyncio.sleep(0)
+            approval_id = next(iter(session.pending_approvals))
+            handled = await handle_approval_action(
+                IncomingAction(
+                    action_id="action-1",
+                    conversation_id=1,
+                    sender_id=get_chat_provider().authorized_user_id,
+                    message_id=321,
+                    data=f"approval:{approval_id}:approve",
+                )
+            )
+            self.assertTrue(handled)
+            self.assertEqual(await execution, {"ok": True})
         self.assertEqual(session.current_runtime().pinned_status_message_id, 321)
         self.assertEqual(
             session.current_runtime().pinned_status_owner,
             f"goal:{goal['id']}",
         )
         methods = [method for method, _payload in self.calls]
-        self.assertEqual(methods.count("sendMessage"), 1)
-        self.assertEqual(methods.count("pinChatMessage"), 1)
-        self.assertGreaterEqual(methods.count("editMessageText"), 2)
-        self.assertNotIn("unpinChatMessage", methods)
-        self.assertNotIn("deleteMessage", methods)
-        pin_payload = next(
+        self.assertEqual(methods.count("sendMessage"), 3)
+        self.assertEqual(methods.count("pinChatMessage"), 3)
+        self.assertEqual(methods.count("editMessageText"), 2)
+        self.assertEqual(methods.count("unpinChatMessage"), 2)
+        self.assertEqual(methods.count("deleteMessage"), 1)
+        approval_payload = [
             payload
             for method, payload in self.calls
-            if method == "pinChatMessage"
-        )
-        self.assertEqual(
-            pin_payload,
-            {
-                "chat_id": 1,
-                "message_id": 321,
-                "disable_notification": True,
-            },
-        )
+            if method == "sendMessage"
+        ][1]
+        self.assertIn("⚠️ Approval required", approval_payload["text"])
+        edits = [
+            payload
+            for method, payload in self.calls
+            if method == "editMessageText"
+        ]
+        self.assertTrue(edits[0]["text"].startswith("Running"))
+        self.assertTrue(edits[1]["text"].startswith("Completed"))
+        self.assertEqual(edits[0]["reply_markup"], {"inline_keyboard": []})
 
     async def test_subagent_approval_uses_same_bubble_in_child_topic(
         self,
     ) -> None:
-        from approval import handle_approval_action, request_tool_approval
+        from approval import execute_tool_with_approval, handle_approval_action
         from chat_provider import IncomingAction
         from chat_runtime import get_chat_provider
         import telegram
@@ -2173,13 +2181,18 @@ class PinnedStatusSlotTests(unittest.IsolatedAsyncioTestCase):
             None,
         )
 
+        session.state["approval_mode"] = "on"
+        call = {"name": "shell", "arguments": '{"cmd":"pwd"}'}
+        execute = patch(
+            "approval.execute_tool",
+            AsyncMock(return_value={"ok": True}),
+        )
+        execute.start()
+        self.addCleanup(execute.stop)
         request = asyncio.create_task(
-            request_tool_approval(
+            execute_tool_with_approval(
                 "1/10",
-                {
-                    "name": "shell",
-                    "arguments": '{"cmd":"pwd"}',
-                },
+                call,
                 presentation_chat_id="1/42",
             )
         )
@@ -2198,7 +2211,7 @@ class PinnedStatusSlotTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertTrue(await handle_approval_action(action))
-        self.assertEqual(await request, "approve")
+        self.assertEqual(await request, {"ok": True})
 
         sent = next(
             payload
@@ -2214,16 +2227,22 @@ class PinnedStatusSlotTests(unittest.IsolatedAsyncioTestCase):
             [button["text"] for button in buttons],
             ["✅ Approve", "❌ Deny"],
         )
+        edits = [
+            payload
+            for method, payload in self.calls
+            if method == "editMessageText"
+        ]
+        self.assertTrue(edits[0]["text"].startswith("Running"))
+        self.assertTrue(edits[1]["text"].startswith("Completed"))
         self.assertIn(
             ("unpinChatMessage", {"chat_id": 1, "message_id": 321}),
             self.calls,
         )
-        self.assertIn(
-            ("deleteMessage", {"chat_id": 1, "message_id": 321}),
-            self.calls,
+        self.assertFalse(
+            any(method == "deleteMessage" for method, _payload in self.calls)
         )
 
-    async def test_approval_cleanup_failure_does_not_block_decision(
+    async def test_approval_action_resolves_decision_without_ui_cleanup(
         self,
     ) -> None:
         from approval import handle_approval_action
@@ -2236,7 +2255,6 @@ class PinnedStatusSlotTests(unittest.IsolatedAsyncioTestCase):
             "id": approval_id,
             "chat_id": 1,
             "future": future,
-            "ui_finalized": False,
         }
         action = IncomingAction(
             action_id="action-1",
@@ -2246,11 +2264,7 @@ class PinnedStatusSlotTests(unittest.IsolatedAsyncioTestCase):
             data=f"approval:{approval_id}:approve",
         )
 
-        with patch(
-            "approval.sync_goal_pin",
-            AsyncMock(side_effect=RuntimeError("presentation unavailable")),
-        ):
-            handled = await handle_approval_action(action)
+        handled = await handle_approval_action(action)
 
         self.assertTrue(handled)
         self.assertEqual(future.result(), "approve")
