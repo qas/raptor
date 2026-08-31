@@ -3,9 +3,10 @@
 import asyncio
 import json
 import os
+from collections import deque
 from typing import Any
 
-from chat_provider import ConversationId, Controls
+from chat_provider import ConversationId, Controls, MessageId
 from chat_runtime import get_chat_provider
 from config import CHAT_STREAM_INTERVAL
 from goals import suspend_goal_pin, sync_goal_pin
@@ -17,6 +18,9 @@ from presentation import (
     release_pinned_status,
 )
 import session
+
+
+MAX_RETAINED_TOOL_BUBBLES = 64
 
 
 def tool_preview(call: dict[str, Any]) -> str:
@@ -50,6 +54,7 @@ class ToolActivitySurface:
         self.manage_root_status = manage_root_status
         self.owner = "tool:" + os.urandom(6).hex()
         self.message_id: int | str | None = None
+        self._completed_message_ids: deque[MessageId] = deque()
         self._root_status_suspended = False
         self._pending: tuple[str, dict[str, Any], Controls] | None = None
         self._projection_task: asyncio.Task[None] | None = None
@@ -140,6 +145,28 @@ class ToolActivitySurface:
             raise RuntimeError("Could not present tool approval")
         return self.message_id
 
+    async def _delete_completed_message(self, message_id: MessageId) -> None:
+        try:
+            await get_chat_provider().delete_message(
+                self.conversation_id,
+                message_id,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            log_exception("tool_activity", "bubble_cleanup_error", exc)
+
+    async def _delete_active_message(self, message_id: MessageId) -> None:
+        try:
+            await delete_pinned_status(
+                self.conversation_id,
+                message_id,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            log_exception("tool_activity", "bubble_cleanup_error", exc)
+
     async def finished(
         self,
         call: dict[str, Any],
@@ -157,7 +184,12 @@ class ToolActivitySurface:
         message_id = self.message_id
         if message_id is not None:
             await release_pinned_status(self.conversation_id, message_id)
-        self.message_id = None
+            if len(self._completed_message_ids) >= MAX_RETAINED_TOOL_BUBBLES:
+                oldest = self._completed_message_ids[0]
+                await self._delete_completed_message(oldest)
+                self._completed_message_ids.popleft()
+            self._completed_message_ids.append(message_id)
+            self.message_id = None
 
     async def clear(self) -> None:
         task = self._projection_task
@@ -166,13 +198,14 @@ class ToolActivitySurface:
         if task is not None and not task.done():
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
+        if self.message_id is not None:
+            await self._delete_active_message(self.message_id)
+            self.message_id = None
+        while self._completed_message_ids:
+            message_id = self._completed_message_ids[-1]
+            await self._delete_completed_message(message_id)
+            self._completed_message_ids.pop()
         try:
-            if self.message_id is not None:
-                await delete_pinned_status(
-                    self.conversation_id,
-                    self.message_id,
-                )
-                self.message_id = None
             if self.manage_root_status and self._root_status_suspended:
                 runtime = session.current_runtime()
                 if (

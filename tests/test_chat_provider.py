@@ -243,7 +243,9 @@ class ChatProviderContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(methods, ["create", "delete"])
         self.assertEqual(provider.calls[0][-1], ())
 
-    async def test_tool_activity_preserves_terminal_bubble(self) -> None:
+    async def test_tool_activity_streams_then_removes_terminal_bubble(
+        self,
+    ) -> None:
         from tool_activity import ToolActivitySurface
 
         surface = ToolActivitySurface("!room:example.org")
@@ -270,7 +272,7 @@ class ChatProviderContractTests(unittest.IsolatedAsyncioTestCase):
         methods = [call[0] for call in self.provider.calls]
         self.assertEqual(
             methods,
-            ["create", "pin", "edit", "edit", "edit", "unpin"],
+            ["create", "pin", "edit", "edit", "edit", "unpin", "delete"],
         )
         texts = [
             call[3]
@@ -304,7 +306,7 @@ class ChatProviderContractTests(unittest.IsolatedAsyncioTestCase):
         methods = [call[0] for call in self.provider.calls]
         self.assertEqual(
             methods,
-            ["create", "pin", "edit", "unpin"],
+            ["create", "pin", "edit", "unpin", "delete"],
         )
         texts = [
             call[3]
@@ -369,6 +371,7 @@ class ChatProviderContractTests(unittest.IsolatedAsyncioTestCase):
         await surface.finished(first, {"ok": True})
         await surface.running(second)
         await surface.finished(second, {"ok": True})
+        await surface.clear()
 
         creates = [
             call for call in self.provider.calls if call[0] == "create"
@@ -381,6 +384,107 @@ class ChatProviderContractTests(unittest.IsolatedAsyncioTestCase):
         ]
         self.assertEqual(len(first_edits), 1)
         self.assertTrue(first_edits[0][3].startswith("Completed"))
+        deletes = [
+            call[2]
+            for call in self.provider.calls
+            if call[0] == "delete"
+        ]
+        self.assertEqual(deletes, ["$event-2", "$event-1"])
+
+    async def test_tool_activity_bounds_bubbles_retained_until_clear(
+        self,
+    ) -> None:
+        from tool_activity import ToolActivitySurface
+
+        surface = ToolActivitySurface(
+            "!room:example.org/child",
+            manage_root_status=False,
+        )
+        first = {
+            "name": "shell",
+            "call_id": "c1",
+            "arguments": '{"command":"pwd"}',
+        }
+        second = {
+            "name": "read_file",
+            "call_id": "c2",
+            "arguments": '{"path":"README.md"}',
+        }
+
+        with patch("tool_activity.MAX_RETAINED_TOOL_BUBBLES", 1):
+            await surface.running(first)
+            await surface.finished(first, {"ok": True})
+            await surface.running(second)
+            await surface.finished(second, {"ok": True})
+
+            deletes = [
+                call[2]
+                for call in self.provider.calls
+                if call[0] == "delete"
+            ]
+            self.assertEqual(deletes, ["$event-1"])
+
+            await surface.clear()
+
+        deletes = [
+            call[2]
+            for call in self.provider.calls
+            if call[0] == "delete"
+        ]
+        self.assertEqual(deletes, ["$event-1", "$event-2"])
+
+    async def test_tool_bubble_delete_failure_does_not_block_restoration(
+        self,
+    ) -> None:
+        from tool_activity import ToolActivitySurface
+
+        surface = ToolActivitySurface("!room:example.org")
+        call = {
+            "name": "shell",
+            "call_id": "c1",
+            "arguments": '{"command":"pwd"}',
+        }
+        await surface.running(call)
+        await surface.finished(call, {"ok": True})
+
+        with (
+            patch.object(
+                self.provider,
+                "delete_message",
+                AsyncMock(side_effect=RuntimeError("unavailable")),
+            ),
+            patch("tool_activity.log_exception") as logged,
+        ):
+            await surface.clear()
+
+        logged.assert_called_once()
+        self.assertIsNone(session.current_runtime().pinned_status_owner)
+
+    async def test_active_tool_delete_failure_does_not_block_restoration(
+        self,
+    ) -> None:
+        from tool_activity import ToolActivitySurface
+
+        surface = ToolActivitySurface("!room:example.org")
+        call = {
+            "name": "shell",
+            "call_id": "c1",
+            "arguments": '{"command":"pwd"}',
+        }
+        await surface.running(call)
+
+        with (
+            patch.object(
+                self.provider,
+                "delete_message",
+                AsyncMock(side_effect=RuntimeError("unavailable")),
+            ),
+            patch("presentation.log_exception") as logged,
+        ):
+            await surface.clear()
+
+        logged.assert_called_once()
+        self.assertIsNone(session.current_runtime().pinned_status_owner)
 
     async def test_tool_replaces_then_restores_thread_status(self) -> None:
         from thread_status import ensure_thread_status
