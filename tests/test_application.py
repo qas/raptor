@@ -179,6 +179,7 @@ class ApplicationLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 "ensure_target",
                 AsyncMock(return_value=ModelTarget("local", "test")),
             ),
+            patch.object(application, "initialize_builtin_skills"),
             patch.object(application, "start_skill_discovery"),
             patch.object(application, "close_skill_discovery", AsyncMock()),
             patch.object(application, "ensure_chat_dirs"),
@@ -272,6 +273,10 @@ class ApplicationLifecycleTests(unittest.IsolatedAsyncioTestCase):
             patch.object(application, "start_skill_discovery"),
             patch.object(
                 application,
+                "initialize_builtin_skills",
+            ) as initialize_skills,
+            patch.object(
+                application,
                 "ensure_target",
                 AsyncMock(return_value=ModelTarget("local", "test")),
             ),
@@ -283,6 +288,7 @@ class ApplicationLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 await application.main()
 
         provider.close.assert_awaited_once()
+        initialize_skills.assert_called_once_with()
         close_skills.assert_awaited_once()
         client.aclose.assert_awaited_once()
         with self.assertRaisesRegex(RuntimeError, "not been initialized"):

@@ -1,19 +1,32 @@
-"""Progressive discovery and loading for workspace ``.skills`` entries."""
+"""Progressive discovery and loading for workspace skill entries."""
 
 import asyncio
 import ast
 import heapq
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from config import AGENT_WORKDIR, MAX_TOOL_OUTPUT
-from storage import FileTooLargeError, read_text_bounded
+from storage import (
+    FileTooLargeError,
+    read_bytes_bounded,
+    read_text_bounded,
+    write_bytes_exclusive_atomic,
+)
 
 
-SKILLS_ROOT = AGENT_WORKDIR / ".skills"
+SKILLS_ROOTS = (
+    AGENT_WORKDIR / ".raptor" / "skills",
+    AGENT_WORKDIR / ".agent" / "skills",
+)
 MAX_DISCOVERED_SKILLS = 256
 MAX_FRONTMATTER_CHARS = 16 * 1024
+MAX_BUILTIN_SKILL_BYTES = 32 * 1024
+BUILTIN_CREATE_SKILL = (
+    Path(__file__).parent / "assets" / "skills" / "create-skill" / "SKILL.md"
+)
 
 
 @dataclass(frozen=True)
@@ -118,32 +131,63 @@ def _read_frontmatter(path: Path) -> str:
     return "".join(parts)
 
 
-def _discover_sync() -> SkillSnapshot:
-    root = SKILLS_ROOT.resolve()
-    if not root.is_dir():
-        return SkillSnapshot((), ())
+def _advertised_skills(
+    errors: list[str],
+) -> Iterator[tuple[int, Path, Path]]:
+    for root_index, configured_root in enumerate(SKILLS_ROOTS):
+        try:
+            root = configured_root.resolve()
+            if not root.is_dir():
+                continue
+            for path in configured_root.rglob("SKILL.md"):
+                yield root_index, path, root
+        except OSError as exc:
+            errors.append(f"{configured_root}: {exc}")
 
+
+def initialize_builtin_skills(
+    root: Path = SKILLS_ROOTS[0],
+    source: Path = BUILTIN_CREATE_SKILL,
+) -> tuple[str, ...]:
+    """Create missing Raptor-owned starter skills without replacing edits."""
+    skill_dir = root / "create-skill"
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    resolved_root = root.resolve()
+    if not _inside(skill_dir.resolve(), resolved_root):
+        raise RuntimeError("built-in skill directory escapes .raptor/skills")
+    path = skill_dir / "SKILL.md"
+    if path.exists() or path.is_symlink():
+        return ()
+    try:
+        write_bytes_exclusive_atomic(
+            path,
+            read_bytes_bounded(source, MAX_BUILTIN_SKILL_BYTES),
+            mode=0o644,
+        )
+    except FileExistsError:
+        return ()
+    return (str(path),)
+
+
+def _discover_sync() -> SkillSnapshot:
     found: list[SkillMetadata] = []
     errors: list[str] = []
     names: set[str] = set()
-    try:
-        advertised_paths = heapq.nsmallest(
-            MAX_DISCOVERED_SKILLS + 1,
-            SKILLS_ROOT.rglob("SKILL.md"),
-        )
-    except OSError as exc:
-        return SkillSnapshot((), (f"{SKILLS_ROOT}: {exc}",))
+    advertised_paths = heapq.nsmallest(
+        MAX_DISCOVERED_SKILLS + 1,
+        _advertised_skills(errors),
+        key=lambda item: (item[0], item[1]),
+    )
     if len(advertised_paths) > MAX_DISCOVERED_SKILLS:
         advertised_paths.pop()
         errors.append(
-            f"{SKILLS_ROOT}: discovery exceeds "
-            f"{MAX_DISCOVERED_SKILLS} skills"
+            f"skill discovery exceeds {MAX_DISCOVERED_SKILLS} skills"
         )
-    for advertised_path in advertised_paths:
+    for _, advertised_path, root in advertised_paths:
         try:
             path = advertised_path.resolve(strict=True)
             if not _inside(path, root):
-                raise ValueError("skill path escapes .skills")
+                raise ValueError("skill path escapes configured root")
             contents = _read_frontmatter(path)
             metadata = _frontmatter(contents)
             name = metadata.get("name", "").strip() or path.parent.name
@@ -218,7 +262,8 @@ async def skill_catalog_instructions() -> str:
     lines = [
         "<skills_instructions>",
         "## Skills",
-        "Skills are workspace workflows discovered from `.skills`.",
+        "Skills are workspace workflows discovered from `.raptor/skills` "
+        "and `.agent/skills`.",
         "Only metadata is listed here. When the user names a skill with "
         "`$name`, or the task clearly matches a description, call "
         "`read_skill` before taking task actions and follow the complete "

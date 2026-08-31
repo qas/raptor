@@ -68,9 +68,10 @@ curl -fsSL \
 
 `raptor` uses the current directory as `AGENT_WORKDIR` unless configured.
 On first startup, Raptor creates missing `AGENTS.md` and `MEMORY.md` templates
-in that workspace without replacing existing files. Their bounded UTF-8
-contents become persistent instructions and context for the main agent and
-subagents for the lifetime of the process; restart Raptor after editing them.
+and `.raptor/skills/create-skill/SKILL.md` in that workspace without replacing
+existing files. The bounded UTF-8 identity-file contents become persistent
+instructions and context for the main agent and subagents for the lifetime of
+the process; restart Raptor after editing them.
 
 Create `.raptor/config.toml` in the workspace:
 
@@ -240,7 +241,7 @@ transcript remains available as audit history.
 | `subagents.py` | Isolated foreground and background subagents |
 | `shell_supervisor.py` | Child process-group ownership and exit enforcement |
 | `shell_sessions.py` | Managed shell state, PTYs, polling, and completion |
-| `skills.py` | Progressive `.skills` discovery and loading |
+| `skills.py` | Progressive workspace skill discovery and loading |
 | `commands.py` | Provider-neutral slash commands |
 | `threads.py` | Temporary branch lifecycle and merge policy |
 
@@ -428,11 +429,15 @@ of guessing or silently discarding durable state.
 
 ## Skills
 
-Raptor discovers skills recursively under `$AGENT_WORKDIR/.skills` using this
-layout:
+Raptor discovers skills recursively under `$AGENT_WORKDIR/.raptor/skills` and
+`$AGENT_WORKDIR/.agent/skills` using this layout:
 
 ```text
-.skills/
+.raptor/skills/
+  skill-name/
+    SKILL.md
+
+.agent/skills/
   skill-name/
     SKILL.md
 ```
@@ -440,7 +445,9 @@ layout:
 Discovery loads only frontmatter metadata into normal instructions. The full
 `SKILL.md` is loaded when a user names the skill or the task matches its
 description. Referenced resources remain unloaded until the skill needs them.
-Root agents and subagents share the catalog.
+Root agents and subagents share the catalog. On boot, Raptor creates a missing
+`.raptor/skills/create-skill/SKILL.md` starter without replacing an existing
+copy.
 
 ## Add a chat provider
 
@@ -575,7 +582,7 @@ context_safety_tokens = 4096
 
 | Variable | Default | Purpose |
 |---|---:|---|
-| `AGENT_WORKDIR` | launch directory | Workspace, shell working directory, and `.skills` parent |
+| `AGENT_WORKDIR` | launch directory | Workspace, shell working directory, and skill-root parent |
 | `RAPTOR_HOME` | `$AGENT_WORKDIR/.raptor` | Durable state and transcript directory |
 | `RAPTOR_CONFIG` | `$RAPTOR_HOME/config.toml` | Raptor TOML configuration file |
 | `RAPTOR_LOG` | `$RAPTOR_HOME/raptor.log` | Daemon stdout/stderr event log |

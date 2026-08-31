@@ -37,7 +37,11 @@ from model_providers import MODEL_CONFIGURATION
 from responses import ensure_target
 from session import bootstrap_runtime_storage, rehydrate_pending_inputs, state
 from shell_sessions import cancel_shell_sessions
-from skills import close_skill_discovery, start_skill_discovery
+from skills import (
+    close_skill_discovery,
+    initialize_builtin_skills,
+    start_skill_discovery,
+)
 from subagents import (
     cancel_background_subagents,
     restore_pending_subagent_completions,
@@ -109,6 +113,7 @@ async def main(on_ready: Callable[[], None] | None = None) -> None:
 
     try:
         initialize_workspace_identity()
+        initialize_builtin_skills()
         default_target = await ensure_target(MODEL_CONFIGURATION.default_target)
         session.set_default_model_target(default_target)
         # Metadata discovery overlaps provider/model startup. Full skill

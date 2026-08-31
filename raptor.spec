@@ -4,7 +4,10 @@ from pathlib import Path
 from PyInstaller.utils.hooks import collect_data_files
 
 
-build_data = [("pyproject.toml", ".")]
+build_data = [
+    ("pyproject.toml", "."),
+    ("assets/skills", "assets/skills"),
+]
 if Path(".raptor-build.json").is_file():
     build_data.append((".raptor-build.json", "."))
 
