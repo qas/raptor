@@ -28,26 +28,108 @@ MAX_RETAINED_TOOL_BUBBLES = 64
 MAX_CONSOLE_LINES = 7
 MAX_CONSOLE_COMMAND_CHARS = 900
 MAX_CONSOLE_LINE_CHARS = 300
+MAX_TOOL_NAME_CHARS = 128
+MAX_TOOL_PREVIEW_CHARS = 3200
 WAIT_UPDATE_INTERVAL_SECONDS = 5
 _TOOL_VIEW_PREFIX = "toolview"
+
+
+def _field_label(key: object) -> str:
+    normalized = "".join(
+        character if character.isalnum() else " "
+        for character in str(key)
+    )
+    words = normalized.split()
+    if not words:
+        return "Value"
+    acronyms = {"api", "id", "uri", "url"}
+    rendered = [
+        word.upper() if word.lower() in acronyms else word.lower()
+        for word in words
+    ]
+    if words[0].lower() not in acronyms:
+        rendered[0] = rendered[0].capitalize()
+    if len(rendered) > 1 and words[-1].lower() == "ms":
+        rendered[-1] = "(ms)"
+    return " ".join(rendered)
+
+
+def _fenced_value(value: str, language: str, limit: int) -> str:
+    opening = "```" + language + "\n"
+    closing = "\n```"
+    safe = value.replace("```", "``\u200b`")
+    if len(opening) + len(safe) + len(closing) <= limit:
+        return opening + safe + closing
+    suffix = "\n... [truncated]"
+    keep = max(0, limit - len(opening) - len(suffix) - len(closing))
+    return opening + safe[:keep] + suffix + closing
+
+
+def _render_argument_value(value: object, limit: int) -> str:
+    if isinstance(value, str):
+        if "\n" not in value and "`" not in value:
+            inline = "`" + value + "`"
+            if len(inline) <= limit:
+                return inline
+        return _fenced_value(value, "text", limit)
+    if value is None:
+        return "`null`"
+    if isinstance(value, bool):
+        return "`" + str(value).lower() + "`"
+    if isinstance(value, (int, float)):
+        return "`" + str(value) + "`"
+    rendered = json.dumps(value, indent=2, ensure_ascii=False)
+    return _fenced_value(rendered, "json", limit)
+
+
+def _render_arguments(arguments: object, limit: int) -> str:
+    if not isinstance(arguments, dict):
+        rendered = (
+            arguments
+            if isinstance(arguments, str)
+            else json.dumps(arguments, indent=2, ensure_ascii=False)
+        )
+        return "**Arguments:**\n" + _fenced_value(
+            str(rendered),
+            "json",
+            max(32, limit - len("**Arguments:**\n")),
+        )
+    if not arguments:
+        return "**Arguments:** `none`"
+    sections: list[str] = []
+    used = 0
+    for key, value in arguments.items():
+        label = "**" + _field_label(key) + ":**"
+        separator = "\n\n" if sections else ""
+        minimum = len(separator) + len(label) + 1 + 32
+        if limit - used < minimum:
+            omission = separator + "... [additional fields omitted]"
+            if used + len(omission) <= limit:
+                sections.append(omission)
+            break
+        available = limit - used - len(separator) - len(label) - 1
+        rendered = _render_argument_value(value, available)
+        section = separator + label
+        section += " " if not rendered.startswith("```") else "\n"
+        section += rendered
+        sections.append(section)
+        used += len(section)
+    return "".join(sections)
 
 
 def tool_preview(call: dict[str, Any]) -> str:
     """Render the bounded call preview shared with tool approval."""
     name = str(call.get("name") or "unknown")
+    if len(name) > MAX_TOOL_NAME_CHARS:
+        name = name[:MAX_TOOL_NAME_CHARS - 3] + "..."
     raw_arguments = call.get("arguments") or "{}"
     try:
         arguments = json.loads(raw_arguments)
-        rendered = json.dumps(
-            arguments,
-            indent=2,
-            ensure_ascii=False,
-        )
     except (TypeError, json.JSONDecodeError):
-        rendered = str(raw_arguments)
-    if len(rendered) > 3200:
-        rendered = rendered[:3150] + "\n... [truncated]"
-    return "Tool: " + name + "\n\n" + rendered
+        arguments = str(raw_arguments)
+    heading = "**Tool:** `" + name.replace("`", "") + "`"
+    remaining = MAX_TOOL_PREVIEW_CHARS - len(heading) - 2
+    return heading + "\n\n" + _render_arguments(arguments, remaining)
 
 
 def _bounded_tail(text: str, limit: int) -> str:

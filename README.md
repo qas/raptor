@@ -340,11 +340,12 @@ them before it sends the final answer. Tool activity never replaces an active
 thread or goal pin. `/task` uses the same lifecycle after its non-streaming model
 response produces a tool call. On Telegram, shell bubbles open in `Console`,
 which streams the latest seven output lines; one button toggles between that
-view and `Info`. Empty `write_stdin` polls edit one waiting bubble every five
-seconds instead of exposing polling arguments. Steering is transient and is
-never pinned. Set `chat.tool_activity = false` to hide nonessential transient
-tool bubbles. Approval prompts remain visible because they require an operator
-decision.
+view and `Info`. Info renders arguments as labeled fields, with multiline and
+nested values in code blocks. Empty `write_stdin` polls edit one waiting bubble
+every five seconds instead of exposing polling arguments. Steering is transient
+and is never pinned. Set `chat.tool_activity = false` to hide nonessential
+transient tool bubbles. Approval prompts remain visible because they require an
+operator decision.
 
 ### Context and compaction
 

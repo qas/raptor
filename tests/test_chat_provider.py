@@ -1,5 +1,6 @@
 """Chat-provider contract and provider-neutral orchestration tests."""
 import asyncio
+import json
 import os
 import stat
 import sys
@@ -296,11 +297,34 @@ class ChatProviderContractTests(unittest.IsolatedAsyncioTestCase):
             for call in self.provider.calls
             if call[0] in {"create", "edit"}
         ]
-        self.assertTrue(texts[0].startswith("Preparing tool\n\nTool: shell"))
-        self.assertIn('"command": "pwd"', texts[1])
-        self.assertTrue(texts[2].startswith("Running\n\nTool: shell"))
-        self.assertTrue(texts[3].startswith("Completed\n\nTool: shell"))
+        preview = "**Tool:** `shell`\n\n**Command:** `pwd`"
+        self.assertTrue(texts[0].startswith("Preparing tool\n\n**Tool:**"))
+        self.assertIn(preview, texts[1])
+        self.assertTrue(texts[2].startswith("Running\n\n" + preview))
+        self.assertTrue(texts[3].startswith("Completed\n\n" + preview))
         self.assertIsNone(session.current_runtime().pinned_status_owner)
+
+    def test_tool_preview_is_bounded_and_humanizes_field_names(self) -> None:
+        from tool_activity import MAX_TOOL_PREVIEW_CHARS, tool_preview
+
+        preview = tool_preview({
+            "name": "write_stdin",
+            "arguments": json.dumps({
+                "session_id": "shell-1",
+                "yield_time_ms": 300_000,
+                "unsafe**label": "safe",
+                "content": "x" * 10_000,
+                "later": "omitted",
+            }),
+        })
+
+        self.assertLessEqual(len(preview), MAX_TOOL_PREVIEW_CHARS)
+        self.assertIn("**Session ID:** `shell-1`", preview)
+        self.assertIn("**Yield time (ms):** `300000`", preview)
+        self.assertIn("**Unsafe label:** `safe`", preview)
+        self.assertIn("... [truncated]", preview)
+        self.assertNotIn("**Later:**", preview)
+        self.assertTrue(preview.endswith("```"))
 
     async def test_tool_activity_exposes_process_output_to_provider(
         self,
@@ -443,7 +467,9 @@ class ChatProviderContractTests(unittest.IsolatedAsyncioTestCase):
                 for call in reversed(self.provider.calls)
                 if call[0] == "edit"
             )
-            self.assertTrue(info_edit[3].startswith("Running\n\nTool: shell"))
+            self.assertTrue(info_edit[3].startswith(
+                "Running\n\n**Tool:** `shell`"
+            ))
             self.assertEqual(
                 [button.label for button in info_edit[4][0]],
                 ["Console"],
@@ -716,7 +742,7 @@ class ChatProviderContractTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(
             self.provider.calls[0][3].startswith(
-                "Running\n\nTool: write_stdin"
+                "Running\n\n**Tool:** `write_stdin`"
             )
         )
 
@@ -735,7 +761,7 @@ class ChatProviderContractTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(
             self.provider.calls[0][3].startswith(
-                "Running\n\nTool: write_stdin"
+                "Running\n\n**Tool:** `write_stdin`"
             )
         )
 
@@ -764,8 +790,12 @@ class ChatProviderContractTests(unittest.IsolatedAsyncioTestCase):
             for call in self.provider.calls
             if call[0] in {"create", "edit"}
         ]
-        self.assertTrue(texts[0].startswith("Running\n\nTool: shell"))
-        self.assertTrue(texts[1].startswith("Completed\n\nTool: shell"))
+        self.assertTrue(texts[0].startswith(
+            "Running\n\n**Tool:** `shell`"
+        ))
+        self.assertTrue(texts[1].startswith(
+            "Completed\n\n**Tool:** `shell`"
+        ))
         self.assertIsNone(session.current_runtime().pinned_status_owner)
 
     async def test_tool_activity_preserves_existing_status_owner(self) -> None:
@@ -1818,6 +1848,39 @@ class TelegramMultiChatTests(unittest.IsolatedAsyncioTestCase):
 
 
 class TelegramTransportTests(unittest.IsolatedAsyncioTestCase):
+    def test_tool_info_renders_structured_arguments_as_telegram_html(
+        self,
+    ) -> None:
+        import telegram
+        from tool_activity import tool_preview
+
+        preview = tool_preview({
+            "name": "edit_file",
+            "arguments": (
+                '{"path":"README.md","content":"first\\nsecond",'
+                '"options":{"mode":"replace"}}'
+            ),
+        })
+
+        self.assertEqual(
+            preview,
+            "**Tool:** `edit_file`\n\n"
+            "**Path:** `README.md`\n\n"
+            "**Content:**\n```text\nfirst\nsecond\n```\n\n"
+            "**Options:**\n```json\n{\n  \"mode\": \"replace\"\n}\n```",
+        )
+        rendered = telegram.markdown_to_telegram_html(preview)
+        self.assertIn("<b>Tool:</b> <code>edit_file</code>", rendered)
+        self.assertIn("<b>Path:</b> <code>README.md</code>", rendered)
+        self.assertIn(
+            '<pre><code class="language-text">first\nsecond</code></pre>',
+            rendered,
+        )
+        self.assertIn(
+            '<pre><code class="language-json">',
+            rendered,
+        )
+
     def test_tool_console_uses_telegram_bash_rendering(self) -> None:
         import telegram
 
