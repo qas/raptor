@@ -273,6 +273,12 @@ class InstallScriptTests(unittest.TestCase):
                 encoding="utf-8",
             )
             stat.chmod(0o755)
+            timeout = bin_dir / "timeout"
+            timeout.write_text(
+                "#!/bin/sh\nshift\nexec \"$@\"\n",
+                encoding="utf-8",
+            )
+            timeout.chmod(0o755)
             os_release = root / "os-release"
             os_release.write_text("ID=ubuntu\n", encoding="utf-8")
             restriction = root / "restriction"
