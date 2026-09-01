@@ -610,7 +610,9 @@ possible match beneath it.
 Directory symlinks are traversed within the same scan bounds, and matching
 physical targets are denied regardless of which symlink reaches them. Cycles
 stop when the same physical directory is reached with the same remaining glob
-match state.
+match state. Patterns with the same fixed directory prefix share one traversal.
+Shell patterns are expanded immediately before each managed command; direct
+filesystem-tool checks evaluate paths at the time of each tool call.
 Unconfigured `deny_read` defaults to an empty list and does not change shell
 behavior.
 

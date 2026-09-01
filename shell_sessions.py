@@ -463,7 +463,9 @@ async def run_shell(
     policy_file = None
     try:
         policy_file = tempfile.TemporaryFile(mode="w+b")
-        policy_file.write(FILESYSTEM_POLICY.shell_payload().encode("utf-8"))
+        policy_file.write(
+            FILESYSTEM_POLICY.supervisor_payload().encode("utf-8")
+        )
         policy_file.flush()
         policy_file.seek(0)
         policy_fd = policy_file.fileno()

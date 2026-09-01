@@ -7,10 +7,8 @@ import sys
 import time
 from collections.abc import Callable
 
-from filesystem_permissions import (
-    FileAccessPolicy,
-    build_shell_sandbox_launch,
-)
+from filesystem_permissions import FileAccessPolicy
+from shell_sandbox import build_shell_sandbox_launch
 
 SUPERVISOR_MODE = "_shell-supervisor"
 
@@ -64,7 +62,7 @@ def _run(
         if len(encoded_policy) > _MAX_POLICY_BYTES:
             raise ValueError("shell filesystem policy exceeds size limit")
         policy_payload = encoded_policy.decode("utf-8")
-        policy = FileAccessPolicy.from_shell_payload(policy_payload)
+        policy = FileAccessPolicy.from_supervisor_payload(policy_payload)
         launch = build_shell_sandbox_launch(command, policy)
     except (OSError, RuntimeError, ValueError) as exc:
         print(f"raptor sandbox: {exc}", file=sys.stderr)
