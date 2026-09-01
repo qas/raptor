@@ -5,7 +5,7 @@ REPO="${RAPTOR_REPO:-qas/raptor}"
 INSTALL_ROOT="${RAPTOR_INSTALL_ROOT:-${XDG_DATA_HOME:-$HOME/.local/share}/raptor}"
 BIN_DIR="${RAPTOR_BIN_DIR:-$HOME/.local/bin}"
 VERSION="${RAPTOR_VERSION:-}"
-SANDBOX_PROBE_TIMEOUT_SECONDS=5
+SANDBOX_PROBE_TIMEOUT_SECONDS=15
 SANDBOX_ERROR_LIMIT_BYTES=4096
 
 die() {
@@ -129,6 +129,7 @@ report_linux_sandbox() {
     temporary_directory=$1
     os_release=${2:-/etc/os-release}
     restriction=${3:-/proc/sys/kernel/apparmor_restrict_unprivileged_userns}
+    probe_executable=$4
     probe_timeout=${SANDBOX_PROBE_TIMEOUT_SECONDS:-5}
     error_limit=${SANDBOX_ERROR_LIMIT_BYTES:-4096}
     if ! bwrap_path=$(command -v bwrap 2>/dev/null); then
@@ -154,10 +155,18 @@ report_linux_sandbox() {
             "Raptor will fail closed if permissions.filesystem.deny_read is configured."
         return
     fi
+    if [ ! -x "$probe_executable" ]; then
+        printf '%s\n' \
+            "Linux shell sandbox: not verified (Raptor probe is unavailable)" \
+            "Raptor will verify Bubblewrap before each restricted shell command."
+        return
+    fi
     sandbox_error="${temporary_directory}/bubblewrap-probe-error"
-    if timeout "$probe_timeout" "$bwrap_path" \
-        --ro-bind / / /bin/true 2>"$sandbox_error"; then
-        printf '%s\n' "Linux shell sandbox: ready"
+    sandbox_output="${temporary_directory}/bubblewrap-probe-output"
+    if timeout "$probe_timeout" "$probe_executable" \
+        --check-sandbox >"$sandbox_output" 2>"$sandbox_error"; then
+        output=$(head -c "$error_limit" "$sandbox_output")
+        printf '%s\n' "${output:-Linux shell sandbox: ready}"
         return
     fi
     error=$(head -c "$error_limit" "$sandbox_error")
@@ -312,7 +321,9 @@ install_release() {
     printf 'Installed Raptor %s to %s\n' "$VERSION" "$dest"
     printf 'Command: %s\n' "${BIN_DIR}/raptor"
     if [ "$platform_os" = linux ]; then
-        report_linux_sandbox "$tmp"
+        report_linux_sandbox "$tmp" /etc/os-release \
+            /proc/sys/kernel/apparmor_restrict_unprivileged_userns \
+            "$dest/raptor"
     fi
     case ":$PATH:" in
         *":${BIN_DIR}:"*) ;;

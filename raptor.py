@@ -35,7 +35,12 @@ def run() -> int:
 
         print(f"raptor {display_version()}")
         return 0
-    owns_runtime = not (args.status or args.stop_daemon or args.check_proxy)
+    owns_runtime = not (
+        args.status
+        or args.stop_daemon
+        or args.check_proxy
+        or args.check_sandbox
+    )
     if owns_runtime and not acquire_runtime_lock():
         print("Raptor is already running", file=sys.stderr)
         return 1
@@ -52,6 +57,15 @@ def run() -> int:
                 return 1
             print("Proxy: reachable")
             print(f"Egress IP: {address}")
+            return 0
+        if args.check_sandbox:
+            from shell_sandbox import probe_linux_shell_sandbox
+            try:
+                probe_linux_shell_sandbox()
+            except Exception as exc:
+                print(str(exc), file=sys.stderr)
+                return 1
+            print("Linux shell sandbox: ready")
             return 0
         if args.status:
             return cli_runtime_status()

@@ -279,6 +279,12 @@ class InstallScriptTests(unittest.TestCase):
                 encoding="utf-8",
             )
             timeout.chmod(0o755)
+            probe = bin_dir / "raptor-probe"
+            probe.write_text(
+                "#!/bin/sh\nexec bwrap\n",
+                encoding="utf-8",
+            )
+            probe.chmod(0o755)
             os_release = root / "os-release"
             os_release.write_text("ID=ubuntu\n", encoding="utf-8")
             restriction = root / "restriction"
@@ -294,11 +300,12 @@ class InstallScriptTests(unittest.TestCase):
                     "trusted_linux_bwrap",
                     "report_linux_sandbox",
                 ),
-                'report_linux_sandbox "$1" "$2" "$3"',
+                'report_linux_sandbox "$1" "$2" "$3" "$4"',
                 arguments=(
                     str(root),
                     str(os_release),
                     str(restriction),
+                    str(probe),
                 ),
                 cwd=_ROOT,
                 env=env,
@@ -307,6 +314,52 @@ class InstallScriptTests(unittest.TestCase):
             self.assertEqual(completed.returncode, 0, completed.stderr)
             self.assertIn("Ubuntu AppArmor denied", completed.stdout)
             self.assertIn("#ubuntu-apparmor", completed.stdout)
+
+    def test_installer_probes_from_raptor_security_context(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            for name, source in (
+                ("bwrap", "#!/bin/sh\nexit 99\n"),
+                ("stat", "#!/bin/sh\nprintf '%s\\n' '0 755'\n"),
+                ("timeout", "#!/bin/sh\nshift\nexec \"$@\"\n"),
+                (
+                    "raptor-probe",
+                    "#!/bin/sh\nprintf '%s\\n' "
+                    "'Linux shell sandbox: ready'\n",
+                ),
+            ):
+                executable = bin_dir / name
+                executable.write_text(source, encoding="utf-8")
+                executable.chmod(0o755)
+            env = os.environ.copy()
+            env["PATH"] = f"{bin_dir}:{env['PATH']}"
+
+            completed = _run_helpers(
+                (
+                    "linux_sandbox_install_command",
+                    "linux_distribution_id",
+                    "ubuntu_userns_restriction_enabled",
+                    "trusted_linux_bwrap",
+                    "report_linux_sandbox",
+                ),
+                'report_linux_sandbox "$1" "$2" "$3" "$4"',
+                arguments=(
+                    str(root),
+                    str(root / "missing-os-release"),
+                    str(root / "missing-restriction"),
+                    str(bin_dir / "raptor-probe"),
+                ),
+                cwd=_ROOT,
+                env=env,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertEqual(
+                completed.stdout,
+                "Linux shell sandbox: ready\n",
+            )
 
     def test_unknown_argument_is_rejected(self) -> None:
         completed = subprocess.run(

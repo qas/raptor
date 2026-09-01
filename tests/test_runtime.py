@@ -243,6 +243,7 @@ finally:
                 status=False,
                 stop_daemon=False,
                 check_proxy=False,
+                check_sandbox=False,
                 daemon=False,
             )
         )
@@ -292,6 +293,7 @@ finally:
             status=False,
             stop_daemon=False,
             check_proxy=False,
+            check_sandbox=False,
             daemon=False,
         )
         runtime_module.cli_runtime_status = lambda: 0
@@ -366,6 +368,7 @@ finally:
             status=False,
             stop_daemon=False,
             check_proxy=False,
+            check_sandbox=False,
             daemon=True,
         )
         runtime_module.cli_runtime_status = lambda: 0
@@ -421,6 +424,7 @@ finally:
             status=False,
             stop_daemon=False,
             check_proxy=False,
+            check_sandbox=False,
             daemon=True,
         )
         runtime_module.cli_runtime_status = lambda: 0
@@ -562,6 +566,7 @@ finally:
             status=True,
             stop_daemon=False,
             check_proxy=False,
+            check_sandbox=False,
             daemon=False,
         )
         runtime_module.cli_runtime_status = lambda: 7
@@ -579,12 +584,87 @@ finally:
         self.assertEqual(result, 7)
         acquire.assert_not_called()
 
+    def test_sandbox_check_runs_without_runtime_ownership(self) -> None:
+        runtime_module = types.ModuleType("runtime")
+        runtime_module.parse_args = lambda: Namespace(
+            status=False,
+            stop_daemon=False,
+            check_proxy=False,
+            check_sandbox=True,
+            daemon=False,
+        )
+        runtime_module.cli_runtime_status = lambda: 0
+        runtime_module.stop_daemon = lambda: 0
+        runtime_module.daemonize = lambda: None
+        runtime_module.set_runtime = lambda **_kw: None
+        runtime_module.clear_runtime_if_ours = lambda: None
+        sandbox_module = types.ModuleType("shell_sandbox")
+        checked: list[bool] = []
+        sandbox_module.probe_linux_shell_sandbox = lambda: checked.append(True)
+        with (
+            patch.object(raptor, "acquire_runtime_lock") as acquire,
+            patch.dict(
+                sys.modules,
+                {
+                    "runtime": runtime_module,
+                    "shell_sandbox": sandbox_module,
+                },
+            ),
+            redirect_stdout(io.StringIO()) as output,
+        ):
+            result = raptor.run()
+
+        self.assertEqual(result, 0)
+        self.assertEqual(checked, [True])
+        self.assertEqual(output.getvalue(), "Linux shell sandbox: ready\n")
+        acquire.assert_not_called()
+
+    def test_sandbox_check_reports_failure_without_runtime_ownership(
+        self,
+    ) -> None:
+        runtime_module = types.ModuleType("runtime")
+        runtime_module.parse_args = lambda: Namespace(
+            status=False,
+            stop_daemon=False,
+            check_proxy=False,
+            check_sandbox=True,
+            daemon=False,
+        )
+        runtime_module.cli_runtime_status = lambda: 0
+        runtime_module.stop_daemon = lambda: 0
+        runtime_module.daemonize = lambda: None
+        runtime_module.set_runtime = lambda **_kw: None
+        runtime_module.clear_runtime_if_ours = lambda: None
+        sandbox_module = types.ModuleType("shell_sandbox")
+
+        def fail_probe() -> None:
+            raise RuntimeError("permission denied")
+
+        sandbox_module.probe_linux_shell_sandbox = fail_probe
+        with (
+            patch.object(raptor, "acquire_runtime_lock") as acquire,
+            patch.dict(
+                sys.modules,
+                {
+                    "runtime": runtime_module,
+                    "shell_sandbox": sandbox_module,
+                },
+            ),
+            redirect_stderr(io.StringIO()) as error,
+        ):
+            result = raptor.run()
+
+        self.assertEqual(result, 1)
+        self.assertEqual(error.getvalue(), "permission denied\n")
+        acquire.assert_not_called()
+
     def test_proxy_check_reports_egress_without_runtime_ownership(self) -> None:
         runtime_module = types.ModuleType("runtime")
         runtime_module.parse_args = lambda: Namespace(
             status=False,
             stop_daemon=False,
             check_proxy=True,
+            check_sandbox=False,
             daemon=False,
         )
         runtime_module.cli_runtime_status = lambda: 0
@@ -623,6 +703,7 @@ finally:
             status=False,
             stop_daemon=False,
             check_proxy=True,
+            check_sandbox=False,
             daemon=False,
         )
         runtime_module.cli_runtime_status = lambda: 0

@@ -5,12 +5,17 @@ from __future__ import annotations
 import os
 import shutil
 import stat
+import subprocess
 import sys
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from filesystem_permissions import FileAccessPolicy, PreparedDeniedPath
+
+
+SANDBOX_PROBE_TIMEOUT_SECONDS = 5
+SANDBOX_PROBE_ERROR_BYTES = 4096
 
 
 @dataclass
@@ -107,6 +112,30 @@ def _trusted_bubblewrap() -> Path:
             "bubblewrap must be root-owned and not group/world writable"
         )
     return executable
+
+
+def probe_linux_shell_sandbox() -> None:
+    """Verify Bubblewrap from the current executable's security context."""
+    if not sys.platform.startswith("linux"):
+        raise RuntimeError("Linux shell sandbox probing requires Linux")
+    executable = _trusted_bubblewrap()
+    try:
+        completed = subprocess.run(
+            [str(executable), "--ro-bind", "/", "/", "/bin/true"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            check=False,
+            timeout=SANDBOX_PROBE_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError("bubblewrap probe timed out") from exc
+    if completed.returncode == 0:
+        return
+    error = completed.stderr[:SANDBOX_PROBE_ERROR_BYTES].decode(
+        "utf-8",
+        errors="replace",
+    ).strip()
+    raise RuntimeError(error or "bubblewrap probe failed without an error")
 
 
 def _make_inheritable(fd: int) -> int:

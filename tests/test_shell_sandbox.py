@@ -11,6 +11,66 @@ from filesystem_permissions import FileAccessPolicy
 
 
 class ShellSandboxTests(unittest.TestCase):
+    def test_linux_probe_runs_bubblewrap_in_current_security_context(
+        self,
+    ) -> None:
+        completed = subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout=b"",
+            stderr=b"",
+        )
+        with (
+            patch.object(shell_sandbox.sys, "platform", "linux"),
+            patch.object(
+                shell_sandbox,
+                "_trusted_bubblewrap",
+                return_value=Path("/usr/bin/bwrap"),
+            ),
+            patch.object(
+                shell_sandbox.subprocess,
+                "run",
+                return_value=completed,
+            ) as run,
+        ):
+            shell_sandbox.probe_linux_shell_sandbox()
+
+        run.assert_called_once_with(
+            ["/usr/bin/bwrap", "--ro-bind", "/", "/", "/bin/true"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            check=False,
+            timeout=shell_sandbox.SANDBOX_PROBE_TIMEOUT_SECONDS,
+        )
+
+    def test_linux_probe_reports_bounded_bubblewrap_error(self) -> None:
+        completed = subprocess.CompletedProcess(
+            args=[],
+            returncode=1,
+            stdout=b"",
+            stderr=b"x" * (shell_sandbox.SANDBOX_PROBE_ERROR_BYTES + 100),
+        )
+        with (
+            patch.object(shell_sandbox.sys, "platform", "linux"),
+            patch.object(
+                shell_sandbox,
+                "_trusted_bubblewrap",
+                return_value=Path("/usr/bin/bwrap"),
+            ),
+            patch.object(
+                shell_sandbox.subprocess,
+                "run",
+                return_value=completed,
+            ),
+        ):
+            with self.assertRaises(RuntimeError) as raised:
+                shell_sandbox.probe_linux_shell_sandbox()
+
+        self.assertEqual(
+            len(str(raised.exception)),
+            shell_sandbox.SANDBOX_PROBE_ERROR_BYTES,
+        )
+
     def test_bubblewrap_launch_masks_denied_file_with_no_permissions(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory).resolve()

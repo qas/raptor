@@ -185,6 +185,12 @@ def parse_args() -> argparse.Namespace:
         help="test the configured proxy and show its public egress IP",
     )
 
+    mode.add_argument(
+        "--check-sandbox",
+        action="store_true",
+        help="test Linux Bubblewrap from Raptor's security context",
+    )
+
     return parser.parse_args()
 
 
