@@ -326,6 +326,8 @@ _COMPACTION = config_section(
     _CONFIG,
     "compaction",
     {
+        "model_provider",
+        "model",
         "output_tokens",
         "generation_tokens",
         "reasoning_effort",

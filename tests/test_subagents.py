@@ -72,6 +72,58 @@ class BackgroundSubagentTests(unittest.IsolatedAsyncioTestCase):
         session.subagent_records.clear()
         session.set_current_model_target(self.target)
 
+    async def test_compaction_uses_configured_model_target(self) -> None:
+        compact_target = ModelTarget("worker", "compact-model")
+        configuration = ModelConfiguration(
+            providers=self.configuration.providers,
+            default_target=self.target,
+            compaction_provider_id="worker",
+            compaction_model="compact-model",
+        )
+        record = {
+            "id": "worker-1",
+            "session_id": "subagent-session",
+            "model_target": self.target.to_dict(),
+        }
+        captured: dict[str, object] = {}
+
+        async def compact(*_args, **kwargs):
+            captured.update(kwargs)
+            kwargs["estimate_compaction_request"]([], "instructions")
+            await kwargs["create_compaction_response"]([], "instructions")
+            return True
+
+        estimate = Mock(return_value=1)
+        create = AsyncMock(return_value={})
+        with (
+            patch.object(subagents, "MODEL_CONFIGURATION", configuration),
+            patch.object(responses, "MODEL_CONFIGURATION", configuration),
+            patch.object(subagents, "compact_session", compact),
+            patch.object(
+                subagents,
+                "estimate_subagent_request_tokens",
+                estimate,
+            ),
+            patch.object(subagents, "create_subagent_response", create),
+        ):
+            result = await subagents.compact_subagent_session(
+                record,
+                allow_subagents=False,
+                depth=1,
+            )
+
+        self.assertTrue(result)
+        self.assertEqual(estimate.call_args.args[0], compact_target)
+        self.assertEqual(create.await_args.args[0], compact_target)
+        self.assertEqual(
+            captured["input_budget"],
+            subagents.target_input_budget(compact_target),
+        )
+        self.assertEqual(
+            captured["generation_budget"],
+            subagents.target_generation_budget(compact_target),
+        )
+
     async def _run_nested_tree(
         self,
         nested_started: asyncio.Event,
@@ -401,7 +453,6 @@ class BackgroundSubagentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result, "done")
         surface_type.assert_called_once_with(
             "telegram:123/42",
-            manage_root_status=False,
         )
         self.assertEqual(surface.stream.await_count, 2)
         self.assertIs(execute.await_args.kwargs["tool_activity"], surface)

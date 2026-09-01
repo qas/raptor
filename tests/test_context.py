@@ -5,7 +5,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 _ROOT = Path(__file__).resolve().parent.parent
 _HOME = Path(tempfile.mkdtemp(prefix="raptor-context-"))
@@ -748,6 +748,32 @@ class EnsureUnderBudgetTests(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(self._chat_patch.stop)
         chat_store._SEQ_CACHE.clear()
         self.session_id = chat_store.create_session(model_target=TEST_MODEL_TARGET, kind="main", chat_key="local")
+
+    async def test_compaction_request_uses_its_own_input_budget(self) -> None:
+        chat_store.append_item(
+            self.session_id,
+            {"role": "user", "content": "compact me"},
+            source="user",
+        )
+        captured: dict[str, object] = {}
+
+        async def compact(*_args, **kwargs):
+            captured.update(kwargs)
+            raise RuntimeError("captured")
+
+        with patch.object(context, "compact_session", compact):
+            with self.assertRaisesRegex(RuntimeError, "captured"):
+                await context.ensure_context_under_budget(
+                    self.session_id,
+                    estimate_active_fn=lambda items: 100 if items else 0,
+                    estimate_compaction_request=lambda *_args: 1,
+                    create_compaction_response=AsyncMock(),
+                    force=True,
+                    input_budget=50,
+                    compaction_input_budget=20,
+                )
+
+        self.assertEqual(captured["input_budget"], 20)
 
     async def test_real_estimator_compacts_huge_archive_under_budget(
         self,

@@ -14,6 +14,7 @@ os.environ.setdefault("TG_USER_ID", "1")
 
 import responses
 from model_providers import (
+    ModelConfiguration,
     ModelTarget,
     load_model_configuration,
 )
@@ -22,6 +23,10 @@ from model_providers import (
 CONFIG = """
 model_provider = "alpha"
 model = "alpha-large"
+
+[compaction]
+model_provider = "beta"
+model = "beta-cheap"
 
 [model_providers.alpha]
 base_url = "https://alpha.example/v1/"
@@ -100,6 +105,70 @@ class ModelProviderTests(unittest.IsolatedAsyncioTestCase):
             self.configuration.select_target(parent=parent, model="alpha-small"),
             ModelTarget("alpha", "alpha-small"),
         )
+
+    def test_compaction_target_uses_optional_override(self) -> None:
+        parent = ModelTarget("alpha", "alpha-large")
+        self.assertEqual(
+            self.configuration.select_compaction_target(parent),
+            ModelTarget("beta", "beta-cheap"),
+        )
+
+    def test_compaction_target_inherits_parent_when_unconfigured(self) -> None:
+        self.path.write_text(
+            "model_provider = 'alpha'\n\n"
+            "[model_providers.alpha]\n"
+            "base_url = 'https://alpha.example/v1'\n"
+            "default_model = 'alpha-default'\n",
+            encoding="utf-8",
+        )
+        configuration = load_model_configuration(self.path)
+        parent = ModelTarget("alpha", "session-model")
+        self.assertEqual(
+            configuration.select_compaction_target(parent),
+            parent,
+        )
+
+    def test_compaction_provider_only_uses_provider_default(self) -> None:
+        configuration = ModelConfiguration(
+            providers=self.configuration.providers,
+            default_target=ModelTarget("alpha", "alpha-large"),
+            compaction_provider_id="alpha",
+        )
+        self.assertEqual(
+            configuration.select_compaction_target(
+                ModelTarget("alpha", "session-model")
+            ),
+            ModelTarget("alpha", "alpha-small"),
+        )
+
+    def test_compaction_model_only_uses_parent_provider(self) -> None:
+        configuration = ModelConfiguration(
+            providers=self.configuration.providers,
+            default_target=ModelTarget("alpha", "alpha-large"),
+            compaction_model="compact-model",
+        )
+        self.assertEqual(
+            configuration.select_compaction_target(
+                ModelTarget("beta", "session-model")
+            ),
+            ModelTarget("beta", "compact-model"),
+        )
+
+    def test_unknown_compaction_provider_fails_fast(self) -> None:
+        self.path.write_text(
+            "model_provider = 'alpha'\n\n"
+            "[compaction]\n"
+            "model_provider = 'missing'\n\n"
+            "[model_providers.alpha]\n"
+            "base_url = 'https://alpha.example/v1'\n"
+            "default_model = 'alpha-default'\n",
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(
+            ValueError,
+            "Unknown compaction model provider",
+        ):
+            load_model_configuration(self.path)
 
     def test_secret_is_lazy_and_never_part_of_target(self) -> None:
         provider = self.configuration.provider("alpha")

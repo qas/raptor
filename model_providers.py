@@ -85,6 +85,8 @@ class ModelProvider:
 class ModelConfiguration:
     providers: dict[str, ModelProvider]
     default_target: ModelTarget
+    compaction_provider_id: str | None = None
+    compaction_model: str | None = None
 
     def provider(self, provider_id: str) -> ModelProvider:
         try:
@@ -122,6 +124,28 @@ class ModelConfiguration:
             )
         return self.validate_target(
             ModelTarget(selected_provider_id, selected_model)
+        )
+
+    def select_compaction_target(self, parent: ModelTarget) -> ModelTarget:
+        """Resolve the optional compaction override against an agent target."""
+        if self.compaction_provider_id is None and self.compaction_model is None:
+            return self.validate_target(parent)
+        provider_id = (
+            self.compaction_provider_id or parent.provider_id
+        ).strip()
+        provider = self.provider(provider_id)
+        model = (
+            provider.default_model
+            if self.compaction_model is None
+            else self.compaction_model
+        ).strip()
+        if not model:
+            raise ValueError(
+                f"Model provider {provider_id!r} has no default_model; "
+                "set compaction.model explicitly"
+            )
+        return self.validate_target(
+            ModelTarget(provider_id=provider_id, model=model)
         )
 
 
@@ -307,9 +331,37 @@ def load_model_configuration(path: Path = CONFIG_PATH) -> ModelConfiguration:
         "model",
         provider.default_model,
     ) or ""
+    compaction_raw = data.get("compaction", {})
+    if not isinstance(compaction_raw, dict):
+        raise ValueError("compaction must be a table")
+    compaction_provider_id = _optional_string(
+        compaction_raw.get("model_provider"),
+        "compaction.model_provider",
+        None,
+    )
+    compaction_model = _optional_string(
+        compaction_raw.get("model"),
+        "compaction.model",
+        None,
+    )
+    if compaction_provider_id is not None:
+        if compaction_provider_id not in providers:
+            raise ValueError(
+                "Unknown compaction model provider "
+                f"{compaction_provider_id!r}"
+            )
+        if compaction_model is None and not providers[
+            compaction_provider_id
+        ].default_model:
+            raise ValueError(
+                f"Model provider {compaction_provider_id!r} has no "
+                "default_model; set compaction.model explicitly"
+            )
     return ModelConfiguration(
         providers=providers,
         default_target=ModelTarget(default_provider_id, default_model),
+        compaction_provider_id=compaction_provider_id,
+        compaction_model=compaction_model,
     )
 
 

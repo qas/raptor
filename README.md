@@ -568,6 +568,9 @@ timeout = 0
 max_load_bytes = 16777216
 
 [compaction]
+# Optional: omit both to use each agent's active model target.
+# model_provider = "economy"
+# model = "economy-model"
 output_tokens = 4000
 generation_tokens = 8096
 reasoning_effort = "low"
@@ -577,6 +580,13 @@ max_record_chars = 12000
 context_ratio = 0.82
 context_safety_tokens = 4096
 ```
+
+`compaction.model_provider` and `compaction.model` optionally route checkpoint
+summarization through a cheaper configured model target. With neither set,
+compaction inherits the active chat or subagent target. Setting only
+`model_provider` uses that provider's `default_model`; setting only `model`
+uses that model on the active target's provider. This does not change the
+model assigned to the conversation or subagent.
 
 ### Runtime and providers
 

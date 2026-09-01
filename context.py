@@ -741,6 +741,7 @@ async def ensure_context_under_budget(
     include_continuation: bool = False,
     log_source: str = "context",
     input_budget: int | None = None,
+    compaction_input_budget: int | None = None,
     generation_budget: int | None = None,
 ) -> list[dict[str, Any]]:
     """Compact until rebuilt active context is under the input budget.
@@ -753,6 +754,11 @@ async def ensure_context_under_budget(
         context_input_budget()
         if input_budget is None
         else max(0, input_budget)
+    )
+    compact_budget = (
+        budget
+        if compaction_input_budget is None
+        else max(0, compaction_input_budget)
     )
 
     def _active_work() -> list[dict[str, Any]]:
@@ -826,7 +832,7 @@ async def ensure_context_under_budget(
             ),
             force=pass_force,
             reason=attempt_reason,
-            input_budget=budget,
+            input_budget=compact_budget,
             generation_budget=generation_budget,
         )
         if not ok:

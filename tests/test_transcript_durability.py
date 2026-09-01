@@ -23,11 +23,12 @@ if str(_ROOT) not in sys.path:
 import agent as agent_mod
 import chat_store
 import controller
+import responses
 from response_errors import MalformedToolCallError
 import session
 from turn_runtime import turns
 import subagents
-from model_providers import ModelTarget
+from model_providers import ModelConfiguration, ModelProvider, ModelTarget
 
 
 async def _noop(*_a, **_k):
@@ -115,6 +116,64 @@ class TranscriptDurabilityTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIs(captured["force"], True)
         self.assertEqual(captured["reason"], "manual")
+
+    async def test_manual_compaction_uses_configured_model_target(self) -> None:
+        cheap = ModelTarget("economy", "compact-model")
+        configuration = ModelConfiguration(
+            providers={
+                "local": ModelProvider(
+                    id="local",
+                    base_url="http://local.example/v1",
+                    default_model="model-a",
+                    context_window=131072,
+                ),
+                "economy": ModelProvider(
+                    id="economy",
+                    base_url="http://economy.example/v1",
+                    default_model="compact-model",
+                    context_window=32768,
+                ),
+            },
+            default_target=self.target,
+            compaction_provider_id="economy",
+        )
+        captured: dict[str, object] = {}
+
+        async def compact(*_args, **kwargs):
+            captured.update(kwargs)
+            kwargs["estimate_compaction_request"]([], "instructions")
+            await kwargs["create_compaction_response"]([], "instructions")
+            return False
+
+        @asynccontextmanager
+        async def indicator(*_args, **_kwargs):
+            yield
+
+        estimate = Mock(return_value=1)
+        create = AsyncMock(return_value={})
+        expected_input_budget = 0
+        expected_generation_budget = 0
+        with (
+            patch.object(agent_mod, "MODEL_CONFIGURATION", configuration),
+            patch.object(responses, "MODEL_CONFIGURATION", configuration),
+            patch.object(agent_mod, "compact_session", compact),
+            patch.object(agent_mod, "estimate_compaction_request", estimate),
+            patch.object(agent_mod, "create_compaction_response", create),
+            patch.object(agent_mod, "compacting_indicator", indicator),
+            patch.object(agent_mod, "typing_loop", _noop),
+            patch.object(agent_mod, "send", _noop),
+        ):
+            await agent_mod.compact_context("durability:chat")
+            expected_input_budget = agent_mod._input_budget(cheap)
+            expected_generation_budget = agent_mod._generation_budget(cheap)
+
+        self.assertEqual(estimate.call_args.args[0], cheap)
+        self.assertEqual(create.await_args.args[0], cheap)
+        self.assertEqual(captured["input_budget"], expected_input_budget)
+        self.assertEqual(
+            captured["generation_budget"],
+            expected_generation_budget,
+        )
 
     async def test_items_written_during_turn(self) -> None:
         sid = session.state["current_session_id"]

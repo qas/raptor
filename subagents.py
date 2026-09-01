@@ -447,12 +447,13 @@ async def compact_subagent_session(
     session_id = str(record["session_id"])
     agent_id = str(record["id"])
     target = record_model_target(record)
-    generation_budget = target_generation_budget(target)
-    input_budget = target_input_budget(target)
+    compaction_target = MODEL_CONFIGURATION.select_compaction_target(target)
+    generation_budget = target_generation_budget(compaction_target)
+    input_budget = target_input_budget(compaction_target)
 
     def estimate(items, instructions):
         return estimate_subagent_request_tokens(
-            target,
+            compaction_target,
             items,
             allow_subagents=allow_subagents,
             depth=depth,
@@ -464,7 +465,7 @@ async def compact_subagent_session(
 
     async def create(items, instructions):
         return await create_subagent_response(
-            target,
+            compaction_target,
             items,
             agent_id=agent_id,
             allow_subagents=allow_subagents,
@@ -496,8 +497,12 @@ async def run_subagent(
     from approval import execute_tool_with_approval
     record = session.subagent_records[agent_id]
     target = record_model_target(record)
+    compaction_target = MODEL_CONFIGURATION.select_compaction_target(target)
     input_budget = target_input_budget(target)
-    generation_budget = target_generation_budget(target)
+    compaction_input_budget = target_input_budget(compaction_target)
+    compaction_generation_budget = target_generation_budget(
+        compaction_target
+    )
     session_id = str(record["session_id"])
     work = build_active_context(session_id)
     if not work:
@@ -588,33 +593,34 @@ async def run_subagent(
                     ),
                     estimate_compaction_request=lambda items, instructions: (
                         estimate_subagent_request_tokens(
-                            target,
+                            compaction_target,
                             items,
                             allow_subagents=allow_subagents,
                             depth=depth,
                             tools=[],
                             extra_instructions=instructions,
-                            max_output_tokens=generation_budget,
+                            max_output_tokens=compaction_generation_budget,
                             reasoning_effort=COMPACTION_REASONING_EFFORT,
                         )
                     ),
                     create_compaction_response=lambda items, instructions: (
                         create_subagent_response(
-                            target,
+                            compaction_target,
                             items,
                             agent_id=agent_id,
                             allow_subagents=allow_subagents,
                             depth=depth,
                             tools=[],
                             extra_instructions=instructions,
-                            max_output_tokens=generation_budget,
+                            max_output_tokens=compaction_generation_budget,
                             reasoning_effort=COMPACTION_REASONING_EFFORT,
                         )
                     ),
                     reason="threshold",
                     log_source="subagent",
                     input_budget=budget,
-                    generation_budget=generation_budget,
+                    compaction_input_budget=compaction_input_budget,
+                    generation_budget=compaction_generation_budget,
                 )
                 active_work[:] = fitted
                 estimate = estimate_subagent_request_tokens(
@@ -686,26 +692,26 @@ async def run_subagent(
                 ),
                 estimate_compaction_request=lambda work, instructions: (
                     estimate_subagent_request_tokens(
-                        target,
+                        compaction_target,
                         work,
                         allow_subagents=allow_subagents,
                         depth=depth,
                         tools=[],
                         extra_instructions=instructions,
-                        max_output_tokens=generation_budget,
+                        max_output_tokens=compaction_generation_budget,
                         reasoning_effort=COMPACTION_REASONING_EFFORT,
                     )
                 ),
                 create_compaction_response=lambda work, instructions: (
                     create_subagent_response(
-                        target,
+                        compaction_target,
                         work,
                         agent_id=agent_id,
                         allow_subagents=allow_subagents,
                         depth=depth,
                         tools=[],
                         extra_instructions=instructions,
-                        max_output_tokens=generation_budget,
+                        max_output_tokens=compaction_generation_budget,
                         reasoning_effort=COMPACTION_REASONING_EFFORT,
                     )
                 ),
@@ -714,7 +720,8 @@ async def run_subagent(
                 include_continuation=True,
                 log_source="subagent",
                 input_budget=input_budget,
-                generation_budget=generation_budget,
+                compaction_input_budget=compaction_input_budget,
+                generation_budget=compaction_generation_budget,
             )
             return rebuilt
 

@@ -63,7 +63,7 @@ from responses import (
     responses_create,
     responses_create_stream,
 )
-from model_providers import ModelTarget
+from model_providers import MODEL_CONFIGURATION, ModelTarget
 from response_errors import (
     ContextLengthError,
     MalformedToolCallError,
@@ -317,20 +317,25 @@ async def compact_context(
     typing_task = asyncio.create_task(typing_loop(chat_id))
     try:
         target = session.current_model_target()
+        compaction_target = MODEL_CONFIGURATION.select_compaction_target(target)
         session_id = current_session_id()
         async with compacting_indicator(chat_id):
             ok = await compact_session(
                 session_id,
                 estimate_compaction_request=lambda items, instructions: (
-                    estimate_compaction_request(target, items, instructions)
+                    estimate_compaction_request(
+                        compaction_target, items, instructions
+                    )
                 ),
                 create_compaction_response=lambda items, instructions: (
-                    create_compaction_response(target, items, instructions)
+                    create_compaction_response(
+                        compaction_target, items, instructions
+                    )
                 ),
                 force=True,
                 reason=reason,
-                input_budget=_input_budget(target),
-                generation_budget=_generation_budget(target),
+                input_budget=_input_budget(compaction_target),
+                generation_budget=_generation_budget(compaction_target),
             )
         if not ok:
             await send(chat_id, "Nothing to compact.")
@@ -350,6 +355,7 @@ async def compact_context(
 
 async def maybe_auto_compact(chat_id: ConversationId) -> None:
     target = session.current_model_target()
+    compaction_target = MODEL_CONFIGURATION.select_compaction_target(target)
     budget = _input_budget(target)
     if not budget:
         return
@@ -370,15 +376,20 @@ async def maybe_auto_compact(chat_id: ConversationId) -> None:
                 )
             ),
             estimate_compaction_request=lambda items, instructions: (
-                estimate_compaction_request(target, items, instructions)
+                estimate_compaction_request(
+                    compaction_target, items, instructions
+                )
             ),
             create_compaction_response=lambda items, instructions: (
-                create_compaction_response(target, items, instructions)
+                create_compaction_response(
+                    compaction_target, items, instructions
+                )
             ),
             reason="threshold",
             log_source="agent",
             input_budget=budget,
-            generation_budget=_generation_budget(target),
+            compaction_input_budget=_input_budget(compaction_target),
+            generation_budget=_generation_budget(compaction_target),
         )
     await send(chat_id, _checkpoint_saved_message(session_id))
 
@@ -412,6 +423,7 @@ async def agent_turn(
             typing_task = asyncio.create_task(typing_loop(chat_id))
 
     target = session.current_model_target()
+    compaction_target = MODEL_CONFIGURATION.select_compaction_target(target)
     session_id = current_session_id()
     continue_pending = True
     response_delivered = False
@@ -643,21 +655,26 @@ async def agent_turn(
                             estimate_compaction_request=(
                                 lambda items, instructions: (
                                     estimate_compaction_request(
-                                        target, items, instructions
+                                        compaction_target, items, instructions
                                     )
                                 )
                             ),
                             create_compaction_response=(
                                 lambda items, instructions: (
                                     create_compaction_response(
-                                        target, items, instructions
+                                        compaction_target, items, instructions
                                     )
                                 )
                             ),
                             reason="threshold",
                             log_source="agent",
                             input_budget=budget,
-                            generation_budget=_generation_budget(target),
+                            compaction_input_budget=(
+                                _input_budget(compaction_target)
+                            ),
+                            generation_budget=(
+                                _generation_budget(compaction_target)
+                            ),
                         )
                     active_work[:] = fitted
                     estimate = estimate_response_request_tokens(
@@ -697,14 +714,14 @@ async def agent_turn(
                         estimate_compaction_request=(
                             lambda items, instructions: (
                                 estimate_compaction_request(
-                                    target, items, instructions
+                                    compaction_target, items, instructions
                                 )
                             )
                         ),
                         create_compaction_response=(
                             lambda items, instructions: (
                                 create_compaction_response(
-                                    target, items, instructions
+                                    compaction_target, items, instructions
                                 )
                             )
                         ),
@@ -713,7 +730,12 @@ async def agent_turn(
                         include_continuation=True,
                         log_source="agent",
                         input_budget=_input_budget(target),
-                        generation_budget=_generation_budget(target),
+                        compaction_input_budget=(
+                            _input_budget(compaction_target)
+                        ),
+                        generation_budget=(
+                            _generation_budget(compaction_target)
+                        ),
                     )
                 log_event(
                     "agent",
@@ -800,14 +822,14 @@ async def agent_turn(
                     estimate_compaction_request=(
                         lambda items, instructions: (
                             estimate_compaction_request(
-                                target, items, instructions
+                                compaction_target, items, instructions
                             )
                         )
                     ),
                     create_compaction_response=(
                         lambda items, instructions: (
                             create_compaction_response(
-                                target, items, instructions
+                                compaction_target, items, instructions
                             )
                         )
                     ),
@@ -816,7 +838,8 @@ async def agent_turn(
                     include_continuation=force,
                     log_source="agent",
                     input_budget=_input_budget(target),
-                    generation_budget=_generation_budget(target),
+                    compaction_input_budget=_input_budget(compaction_target),
+                    generation_budget=_generation_budget(compaction_target),
                 )
             log_event(
                 "agent",
