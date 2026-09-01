@@ -65,6 +65,12 @@ def current_exit_request() -> ExitRequest | None:
     return _exit_request
 
 
+def discard_exit_request() -> None:
+    """Abort an exit request whose admitting event could not be finalized."""
+    global _exit_request
+    _exit_request = None
+
+
 def take_exit_request() -> ExitRequest | None:
     global _exit_request
     request = _exit_request

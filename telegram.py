@@ -3,10 +3,12 @@ import asyncio
 import re
 from dataclasses import dataclass, field
 from html import escape
+from pathlib import Path
 from typing import Any
 
 import httpx
 
+from activity import ActivityFinishResult, ActivitySnapshot
 from chat_provider import (
     ChatEvent,
     ConversationId,
@@ -27,7 +29,8 @@ from config import (
 )
 from network import outbound_http_client
 from observability import log_event, log_exception
-from activity import ActivityFinishResult, ActivitySnapshot
+from runtime_paths import RAPTOR_HOME
+from storage import FileTooLargeError, read_text_bounded, write_text_atomic
 
 _client: httpx.AsyncClient | None = None
 
@@ -35,6 +38,9 @@ _CHAT_REQUEST_INTERVAL = 1.1
 _GLOBAL_REQUEST_INTERVAL = 1.0 / 28.0
 _MESSAGE_PREVIEW_LIMIT = 3900
 _DELETE_MESSAGES_LIMIT = 100
+_POLL_LIMIT = 100
+_CURSOR_PATH = RAPTOR_HOME / "providers" / "telegram.cursor"
+_MAX_CURSOR_BYTES = 64
 _PACED_CHAT_METHODS = frozenset(
     {
         "deletemessage",
@@ -908,8 +914,11 @@ class TelegramProvider:
         typing=True,
     )
 
-    def __init__(self) -> None:
+    def __init__(self, *, cursor_path: Path = _CURSOR_PATH) -> None:
         self._chat_ids = TG_CHAT_IDS
+        self._cursor_path = cursor_path
+        self._cursor = self._load_cursor()
+        self._event_cursors: dict[int, int] = {}
         self.primary_conversation_id = (
             _telegram_conversation_id(self._chat_ids[0], None)
             if self._chat_ids
@@ -918,6 +927,36 @@ class TelegramProvider:
         self._chats: dict[int, _TelegramChat] = {
             chat_id: _TelegramChat() for chat_id in self._chat_ids
         }
+
+    def _load_cursor(self) -> int | None:
+        try:
+            raw = read_text_bounded(
+                self._cursor_path,
+                _MAX_CURSOR_BYTES,
+            ).strip()
+        except FileNotFoundError:
+            return None
+        except FileTooLargeError as exc:
+            raise RuntimeError(
+                "Telegram cursor exceeds its size limit"
+            ) from exc
+        except (OSError, UnicodeError) as exc:
+            raise RuntimeError("Could not load Telegram cursor") from exc
+        if not raw.isascii() or not raw.isdigit():
+            raise RuntimeError("Telegram cursor is invalid")
+        return int(raw)
+
+    def _store_cursor(self, cursor: int) -> None:
+        if cursor < 0:
+            raise ValueError("Telegram cursor must not be negative")
+        if self._cursor is not None and cursor <= self._cursor:
+            return
+        write_text_atomic(
+            self._cursor_path,
+            f"{cursor}\n",
+            mode=0o600,
+        )
+        self._cursor = cursor
 
     def _is_interactive(
         self,
@@ -1095,27 +1134,48 @@ class TelegramProvider:
         *,
         timeout: int,
     ) -> PollResult:
+        effective_cursor = cursor if isinstance(cursor, int) else self._cursor
         payload: dict[str, Any] = {
             "timeout": timeout,
+            "limit": _POLL_LIMIT,
             "allowed_updates": ["message", "callback_query"],
         }
-        if isinstance(cursor, int):
-            payload["offset"] = cursor
+        if effective_cursor is not None:
+            payload["offset"] = effective_cursor
         updates = await tg_call("getUpdates", payload)
         events: list[ChatEvent] = []
-        next_cursor = cursor
+        next_cursor = effective_cursor
         for update in updates or []:
             if not isinstance(update, dict):
                 continue
             update_id = update.get("update_id")
             if isinstance(update_id, int):
+                if events:
+                    self._event_cursors[id(events[-1])] = update_id
                 next_cursor = update_id + 1
             if await self._delete_activity_topic_input(update):
+                self._record_ignored_update(events, next_cursor)
                 continue
             event = self.normalize_update(update)
             if event is not None:
                 events.append(event)
+                if isinstance(next_cursor, int):
+                    self._event_cursors[id(event)] = next_cursor
+            else:
+                self._record_ignored_update(events, next_cursor)
         return PollResult(tuple(events), next_cursor)
+
+    def _record_ignored_update(
+        self,
+        events: list[ChatEvent],
+        cursor: object | None,
+    ) -> None:
+        if not isinstance(cursor, int):
+            return
+        if events:
+            self._event_cursors[id(events[-1])] = cursor
+        else:
+            self._store_cursor(cursor)
 
     async def _delete_activity_topic_input(
         self,
@@ -1281,7 +1341,9 @@ class TelegramProvider:
         del conversation_id
 
     async def finish_event(self, event: ChatEvent) -> None:
-        del event
+        cursor = self._event_cursors.pop(id(event), None)
+        if cursor is not None:
+            self._store_cursor(cursor)
 
     @staticmethod
     def encode_conversation_id(conversation_id: ConversationId) -> str:

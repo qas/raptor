@@ -18,6 +18,7 @@ from application_control import (
     activate_application_exit,
     bind_application_task,
     current_exit_request,
+    discard_exit_request,
     unbind_application_task,
 )
 from agent import flush_pending_delivery, repair_interrupted_root_turn
@@ -70,8 +71,13 @@ async def dispatch_event(provider: ChatProvider, event: ChatEvent) -> None:
     finally:
         try:
             await provider.finish_event(event)
-        finally:
-            activate_application_exit()
+        except BaseException:
+            discard_exit_request()
+            raise
+        if activate_application_exit():
+            # Deliver cancellation before the dispatcher can admit another
+            # event from the same provider batch.
+            await asyncio.sleep(0)
 
 
 async def dispatch_events(

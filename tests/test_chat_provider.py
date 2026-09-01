@@ -1,6 +1,7 @@
 """Chat-provider contract and provider-neutral orchestration tests."""
 import asyncio
 import os
+import stat
 import sys
 import tempfile
 import types
@@ -1242,6 +1243,56 @@ class TelegramMultiChatTests(unittest.IsolatedAsyncioTestCase):
             ],
         )
 
+    async def test_poll_restores_only_finalized_telegram_updates(self) -> None:
+        import telegram
+
+        cursor_path = _HOME / "finalized-update.cursor"
+        cursor_path.unlink(missing_ok=True)
+        self.addCleanup(cursor_path.unlink, missing_ok=True)
+        updates = [
+            {
+                "update_id": update_id,
+                "message": {
+                    "message_id": update_id,
+                    "from": {"id": 1, "is_bot": False},
+                    "chat": {"id": 1, "type": "private"},
+                    "text": text,
+                },
+            }
+            for update_id, text in ((12, "/shutdown"), (13, "later"))
+        ]
+        provider = telegram.TelegramProvider(cursor_path=cursor_path)
+        with patch.object(
+            telegram,
+            "tg_call",
+            AsyncMock(return_value=updates),
+        ):
+            result = await provider.poll(None, timeout=30)
+
+        self.assertFalse(cursor_path.exists())
+        await provider.finish_event(result.events[0])
+        self.assertEqual(cursor_path.read_text(), "13\n")
+        self.assertEqual(stat.S_IMODE(cursor_path.stat().st_mode), 0o600)
+
+        restored = telegram.TelegramProvider(cursor_path=cursor_path)
+        call = AsyncMock(return_value=[])
+        with patch.object(telegram, "tg_call", call):
+            await restored.poll(None, timeout=30)
+
+        self.assertEqual(call.await_args.args[1]["offset"], 13)
+        await provider.finish_event(result.events[1])
+        self.assertEqual(cursor_path.read_text(), "14\n")
+
+    def test_invalid_telegram_cursor_fails_startup(self) -> None:
+        import telegram
+
+        cursor_path = _HOME / "invalid-update.cursor"
+        cursor_path.write_text("not-an-offset\n")
+        self.addCleanup(cursor_path.unlink, missing_ok=True)
+
+        with self.assertRaisesRegex(RuntimeError, "cursor is invalid"):
+            telegram.TelegramProvider(cursor_path=cursor_path)
+
     async def test_initialize_requires_read_only_topic_permissions(
         self,
     ) -> None:
@@ -1348,7 +1399,10 @@ class TelegramTransportTests(unittest.IsolatedAsyncioTestCase):
     ) -> None:
         import telegram
 
-        provider = telegram.TelegramProvider()
+        cursor_path = _HOME / "ignored-update.cursor"
+        cursor_path.unlink(missing_ok=True)
+        self.addCleanup(cursor_path.unlink, missing_ok=True)
+        provider = telegram.TelegramProvider(cursor_path=cursor_path)
         provider._chats[1].activity_topics[42] = (
             telegram._TelegramActivityTopic()
         )
@@ -1376,6 +1430,7 @@ class TelegramTransportTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result.events, ())
         self.assertEqual(result.cursor, 13)
+        self.assertEqual(cursor_path.read_text(), "13\n")
         self.assertEqual(
             [entry.args for entry in call.await_args_list],
             [
@@ -1383,6 +1438,7 @@ class TelegramTransportTests(unittest.IsolatedAsyncioTestCase):
                     "getUpdates",
                     {
                         "timeout": 30,
+                        "limit": telegram._POLL_LIMIT,
                         "allowed_updates": ["message", "callback_query"],
                     },
                 ),

@@ -141,6 +141,35 @@ class ApplicationLifecycleTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(order, ["handle", "finish", "activate"])
 
+    async def test_failed_finalization_discards_exit_request(self) -> None:
+        provider = Mock(authorized_user_id="operator")
+        provider.prepare_event = Mock()
+        provider.finish_event = AsyncMock(
+            side_effect=OSError("cursor unavailable")
+        )
+        event = IncomingMessage(
+            conversation_id="configured",
+            sender_id="operator",
+            message_id="1",
+            text="/shutdown",
+        )
+
+        with (
+            patch.object(
+                application.session,
+                "bound_chat",
+                return_value=nullcontext(),
+            ),
+            patch.object(application, "handle_event", AsyncMock()),
+            patch.object(application, "discard_exit_request") as discard,
+            patch.object(application, "activate_application_exit") as activate,
+            self.assertRaisesRegex(OSError, "cursor unavailable"),
+        ):
+            await application.dispatch_event(provider, event)
+
+        discard.assert_called_once_with()
+        activate.assert_not_called()
+
     async def test_failed_event_does_not_drop_later_batch_events(self) -> None:
         provider = Mock(name="provider", authorized_user_id="operator")
         provider.name = "provider"
@@ -271,6 +300,11 @@ class ApplicationLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 application.session,
                 "bound_runtime",
                 return_value=nullcontext(),
+            ),
+            patch.object(
+                application.session,
+                "current_model_target",
+                return_value=ModelTarget("local", "test"),
             ),
             patch.object(application, "rehydrate_pending_inputs", return_value=0),
             patch.object(

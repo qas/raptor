@@ -451,6 +451,8 @@ $AGENT_WORKDIR/.raptor/
   runtime.lock
   state.json
   raptor.log                 # daemon mode
+  providers/
+    telegram.cursor          # finalized Telegram update offset
   chats/
     <session-id>.jsonl
 ```
@@ -461,6 +463,10 @@ destination selected by the operator. Shell start events include the exact
 command that Raptor executed, including values that the operator deliberately
 included. Automatic transport and exception events redact recognized
 credentials.
+
+Telegram advances `providers/telegram.cursor` only after an update finishes
+core handling and transport finalization. After a restart, polling resumes from
+that durable offset, so a completed lifecycle command is not replayed.
 
 `/new` creates a transcript without deleting the previous one. The
 `chat_history` tool can search archived sessions, but only from their owning
