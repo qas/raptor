@@ -29,6 +29,7 @@ MIN_POLL_TIME_MS = 5_000
 DEFAULT_YIELD_TIME_MS = 10_000
 DEFAULT_POLL_TIME_MS = 5_000
 DEFAULT_WRITE_TIME_MS = 250
+SANDBOX_PREPARATION_TIMEOUT_SECONDS = 60
 # The supervisor gives its child group one second to exit before SIGKILL.
 # The owner must wait longer so it never kills the supervisor mid-cleanup.
 TERMINATION_GRACE_SECONDS = 2.0
@@ -235,20 +236,35 @@ async def _abort_unstarted_shell(
     }
 
 
+class _SandboxPreparationTimeout(RuntimeError):
+    pass
+
+
 async def _monitor(
     session: ShellSession,
     stdout_task: asyncio.Task[None],
     stderr_task: asyncio.Task[None],
+    ready_read_fd: int,
 ) -> None:
     try:
         try:
-            if session.timeout is None:
+            ready = await _await_sandbox_ready(ready_read_fd)
+            if not ready:
+                await session.process.wait()
+            elif session.timeout is None:
                 await session.process.wait()
             else:
                 await asyncio.wait_for(
                     session.process.wait(),
                     timeout=session.timeout,
                 )
+        except _SandboxPreparationTimeout:
+            session.status = "failed"
+            session.error = (
+                "sandbox preparation timed out after "
+                f"{SANDBOX_PREPARATION_TIMEOUT_SECONDS}s"
+            )
+            await _terminate(session)
         except asyncio.TimeoutError:
             session.status = "timed_out"
             session.error = f"command timed out after {session.timeout}s"
@@ -307,6 +323,34 @@ async def _monitor(
                 "exit_code": session.exit_code,
             },
         )
+
+async def _await_sandbox_ready(fd: int) -> bool:
+    """Wait for command launch without charging it to execution time."""
+    loop = asyncio.get_running_loop()
+    ready: asyncio.Future[bool] = loop.create_future()
+
+    def consume() -> None:
+        if ready.done():
+            return
+        try:
+            value = os.read(fd, 1)
+        except OSError as exc:
+            ready.set_exception(exc)
+        else:
+            ready.set_result(value == b"1")
+
+    loop.add_reader(fd, consume)
+    try:
+        try:
+            return await asyncio.wait_for(
+                ready,
+                timeout=SANDBOX_PREPARATION_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError as exc:
+            raise _SandboxPreparationTimeout from exc
+    finally:
+        loop.remove_reader(fd)
+        os.close(fd)
 
 
 def _drain_pending(session: ShellSession) -> tuple[str, str, bool]:
@@ -460,6 +504,8 @@ async def run_shell(
     liveness_write_fd: int | None = None
     start_read_fd: int | None = None
     start_write_fd: int | None = None
+    ready_read_fd: int | None = None
+    ready_write_fd: int | None = None
     policy_file = None
     try:
         policy_file = tempfile.TemporaryFile(mode="w+b")
@@ -471,6 +517,7 @@ async def run_shell(
         policy_fd = policy_file.fileno()
         liveness_read_fd, liveness_write_fd = os.pipe()
         start_read_fd, start_write_fd = os.pipe()
+        ready_read_fd, ready_write_fd = os.pipe()
         if tty:
             master_fd, slave_fd = pty.openpty()
             try:
@@ -480,13 +527,19 @@ async def run_shell(
                         str(liveness_read_fd),
                         str(start_read_fd),
                         str(policy_fd),
+                        str(ready_write_fd),
                         command,
                         cwd=str(AGENT_WORKDIR),
                         stdin=slave_fd,
                         stdout=slave_fd,
                         stderr=slave_fd,
                         start_new_session=True,
-                        pass_fds=(liveness_read_fd, start_read_fd, policy_fd),
+                        pass_fds=(
+                            liveness_read_fd,
+                            start_read_fd,
+                            policy_fd,
+                            ready_write_fd,
+                        ),
                     )
                 except BaseException:
                     os.close(master_fd)
@@ -516,13 +569,19 @@ async def run_shell(
                 str(liveness_read_fd),
                 str(start_read_fd),
                 str(policy_fd),
+                str(ready_write_fd),
                 command,
                 cwd=str(AGENT_WORKDIR),
                 stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 start_new_session=True,
-                pass_fds=(liveness_read_fd, start_read_fd, policy_fd),
+                pass_fds=(
+                    liveness_read_fd,
+                    start_read_fd,
+                    policy_fd,
+                    ready_write_fd,
+                ),
             )
             stdout_stream = process.stdout
             stderr_stream = process.stderr
@@ -531,12 +590,16 @@ async def run_shell(
             os.close(liveness_write_fd)
         if start_write_fd is not None:
             os.close(start_write_fd)
+        if ready_read_fd is not None:
+            os.close(ready_read_fd)
         raise
     finally:
         if liveness_read_fd is not None:
             os.close(liveness_read_fd)
         if start_read_fd is not None:
             os.close(start_read_fd)
+        if ready_write_fd is not None:
+            os.close(ready_write_fd)
         if policy_file is not None:
             policy_file.close()
         _spawning_sessions -= 1
@@ -559,9 +622,16 @@ async def run_shell(
     stderr_task = asyncio.create_task(
         _pump_stream(shell_session, stderr_stream, "stderr")
     )
+    assert ready_read_fd is not None
     shell_session.monitor_task = asyncio.create_task(
-        _monitor(shell_session, stdout_task, stderr_task)
+        _monitor(
+            shell_session,
+            stdout_task,
+            stderr_task,
+            ready_read_fd,
+        )
     )
+    ready_read_fd = None
     try:
         log_shell_start(
             session_id=shell_session.id,

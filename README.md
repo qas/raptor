@@ -187,8 +187,9 @@ can cancel it.
 
 `/console` uses the same authorized-user check as every other interactive
 command. It applies the configured filesystem policy, records the exact
-command in the shell audit log, bounds retained output, and stops after 20
-seconds. A console command never becomes background work.
+command in the shell audit log, and bounds retained output. Sandbox preparation
+has a 60-second limit. After the command starts, it has a 20-second execution
+limit. A console command never becomes background work.
 
 `/shutdown` pauses an active goal, cleans up owned turns, subagents, and shell
 processes, and then exits. A stopped process cannot receive chat commands. To
@@ -644,12 +645,12 @@ If permissions prevent enumeration or traversal reaches the depth limit,
 shell enforcement treats the directory as an opaque, denied subtree. It does
 not allow a possible match beneath that directory.
 
-Raptor traverses directory symlinks within the same scan limits and denies a
-matching physical target regardless of the symlink used to reach it. Traversal
-stops a cycle when it reaches the same physical directory with the same
-remaining glob-match state. An unresolvable symlink is a terminal entry and
-does not abort the scan. Patterns with the same fixed directory prefix share a
-single traversal.
+Recursive globs do not cross directory symlinks. A symlinked repository or
+environment is a separate scan boundary and does not make unrelated shell
+commands fail. If an exact pattern, a matching file entry, or a glob's fixed
+prefix itself goes through a symlink, enforcement fails closed because a
+writable logical symlink cannot be securely represented by a physical-target
+mount. Patterns with the same fixed directory prefix share one traversal.
 
 Raptor expands shell patterns immediately before each managed command.
 Filesystem tools evaluate paths at the time of each tool call. If you do not

@@ -472,6 +472,7 @@ finally:
                     "3",
                     "4",
                     "policy",
+                    "5",
                     "true",
                 ],
             ),
@@ -482,7 +483,7 @@ finally:
         self.assertEqual(result, 9)
         acquire.assert_not_called()
         supervisor.assert_called_once_with(
-            ["raptor", "3", "4", "policy", "true"]
+            ["raptor", "3", "4", "policy", "5", "true"]
         )
 
     @unittest.skipUnless(hasattr(os, "fork"), "requires fork")
@@ -490,6 +491,7 @@ finally:
         root = Path(__file__).resolve().parent.parent
         liveness_read, liveness_write = os.pipe()
         start_read, start_write = os.pipe()
+        ready_read, ready_write = os.pipe()
         policy_file = tempfile.TemporaryFile(mode="w+b")
         policy_file.write(
             json.dumps(
@@ -510,32 +512,43 @@ finally:
                     str(liveness_read),
                     str(start_read),
                     str(policy_file.fileno()),
+                    str(ready_write),
                     "printf ok",
                 ],
                 cwd=root,
                 env=os.environ.copy(),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                pass_fds=(liveness_read, start_read, policy_file.fileno()),
+                pass_fds=(
+                    liveness_read,
+                    start_read,
+                    policy_file.fileno(),
+                    ready_write,
+                ),
             )
         except BaseException:
             os.close(liveness_read)
             os.close(liveness_write)
             os.close(start_read)
             os.close(start_write)
+            os.close(ready_read)
+            os.close(ready_write)
             policy_file.close()
             raise
         os.close(liveness_read)
         os.close(start_read)
+        os.close(ready_write)
         try:
             os.write(start_write, b"1")
             os.close(start_write)
             start_write = -1
+            self.assertEqual(os.read(ready_read, 1), b"1")
             stdout, stderr = process.communicate(timeout=5)
         finally:
             os.close(liveness_write)
             if start_write >= 0:
                 os.close(start_write)
+            os.close(ready_read)
             if process.poll() is None:
                 process.kill()
                 process.wait(timeout=2)

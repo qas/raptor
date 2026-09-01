@@ -101,6 +101,16 @@ class OwnerCommandTests(unittest.IsolatedAsyncioTestCase):
                     }
                 ),
             ),
+            patch.object(
+                commands,
+                "poll_shell_session",
+                AsyncMock(
+                    return_value={
+                        "status": "running",
+                        "session_id": "shell-1",
+                    }
+                ),
+            ),
             patch.object(commands, "cancel_shell_session", cancel),
         ):
             handled = await commands.command(1, "/console sleep 60")
@@ -108,6 +118,47 @@ class OwnerCommandTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(handled)
         cancel.assert_awaited_once_with("shell-1")
         self.assertIn("time limit", send.await_args.args[1])
+
+    async def test_console_waits_for_sandbox_preparation(self) -> None:
+        send = AsyncMock()
+        poll = AsyncMock(
+            return_value={
+                "status": "completed",
+                "exit_code": 0,
+                "stdout": "operator\n",
+                "stderr": "",
+                "truncated": False,
+                "error": None,
+            }
+        )
+        with (
+            patch.object(commands, "send", send),
+            patch.object(
+                commands,
+                "run_shell",
+                AsyncMock(
+                    return_value={
+                        "status": "running",
+                        "session_id": "shell-1",
+                    }
+                ),
+            ),
+            patch.object(commands, "poll_shell_session", poll),
+        ):
+            handled = await commands.command(1, "/console whoami")
+
+        self.assertTrue(handled)
+        poll.assert_awaited_once_with(
+            {
+                "session_id": "shell-1",
+                "yield_time_ms": (
+                    commands.SANDBOX_PREPARATION_TIMEOUT_SECONDS
+                    + commands.CONSOLE_TIMEOUT_SECONDS
+                )
+                * 1000,
+            }
+        )
+        self.assertIn("operator", send.await_args.args[1])
 
     async def test_lifecycle_commands_acknowledge_then_request_exit(self) -> None:
         for name, expected in (

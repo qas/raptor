@@ -100,6 +100,7 @@ jobs:
           binary = os.path.abspath("dist/raptor/raptor")
           liveness_read, liveness_write = os.pipe()
           start_read, start_write = os.pipe()
+          ready_read, ready_write = os.pipe()
           policy_file = tempfile.TemporaryFile(mode="w+b")
           policy_file.write(json.dumps({
               "workspace": workdir,
@@ -109,17 +110,23 @@ jobs:
           policy_file.seek(0)
           process = subprocess.Popen(
               [binary, "_shell-supervisor", str(liveness_read),
-               str(start_read), str(policy_file.fileno()), "printf smoke"],
+               str(start_read), str(policy_file.fileno()), str(ready_write),
+               "printf smoke"],
               cwd=workdir,
               stdout=subprocess.PIPE,
               stderr=subprocess.PIPE,
-              pass_fds=(liveness_read, start_read, policy_file.fileno()),
+              pass_fds=(liveness_read, start_read, policy_file.fileno(),
+                        ready_write),
           )
           policy_file.close()
           os.close(liveness_read)
           os.close(start_read)
+          os.close(ready_write)
           os.write(start_write, b"1")
           os.close(start_write)
+          if os.read(ready_read, 1) != b"1":
+              raise SystemExit("shell supervisor did not signal readiness")
+          os.close(ready_read)
           stdout, stderr = process.communicate(timeout=10)
           os.close(liveness_write)
           if process.returncode != 0:

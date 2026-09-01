@@ -29,13 +29,13 @@ def _absolute_pattern(raw: str, workspace: Path) -> str:
     return os.path.abspath(expanded)
 
 
-def _has_symlink_component(path: Path) -> bool:
+def _symlink_component(path: Path) -> Path | None:
     current = Path(path.anchor)
     for part in path.parts[1:]:
         current /= part
         if current.is_symlink():
-            return True
-    return False
+            return current
+    return None
 
 
 @lru_cache(maxsize=4096)
@@ -175,7 +175,7 @@ class _DeniedPathResolver:
                 path = Path(pattern.absolute)
                 self._deny(
                     path,
-                    materialize_if_missing=not _has_symlink_component(path),
+                    materialize_if_missing=True,
                 )
         for root, patterns in scan_groups.items():
             self._scan(root, tuple(patterns))
@@ -197,11 +197,15 @@ class _DeniedPathResolver:
         *,
         materialize_if_missing: bool = False,
     ) -> None:
+        symlink = _symlink_component(path)
+        if symlink is not None:
+            raise RuntimeError(
+                "cannot securely enforce deny-read match through symlink: "
+                f"{symlink}"
+            )
         try:
             resolved = path.resolve(strict=False)
         except (OSError, RuntimeError):
-            if _has_symlink_component(path):
-                return
             raise
         self.prepared[resolved] = (
             self.prepared.get(resolved, False) or materialize_if_missing
@@ -217,6 +221,12 @@ class _DeniedPathResolver:
         root: Path,
         patterns: tuple[DenyReadPattern, ...],
     ) -> None:
+        symlink = _symlink_component(root)
+        if symlink is not None:
+            raise RuntimeError(
+                "cannot securely enforce deny-read glob through symlink: "
+                f"{symlink}"
+            )
         try:
             root_metadata = root.stat()
         except (FileNotFoundError, NotADirectoryError):
@@ -301,14 +311,11 @@ class _DeniedPathResolver:
 
     def _should_traverse(self, child: os.DirEntry[str], path: Path) -> bool:
         try:
-            return child.is_dir(follow_symlinks=True)
+            if child.is_symlink():
+                return False
+            return child.is_dir(follow_symlinks=False)
         except OSError:
-            try:
-                is_symlink = child.is_symlink()
-            except OSError:
-                is_symlink = False
-            if not is_symlink:
-                self._deny(path)
+            self._deny(path)
             return False
 
     @staticmethod

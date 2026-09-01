@@ -52,6 +52,7 @@ def _run(
     policy_fd: int,
     liveness_fd: int,
     start_fd: int,
+    ready_fd: int,
 ) -> int:
     if not _await_start(liveness_fd, start_fd):
         return 128 + signal.SIGTERM
@@ -82,6 +83,7 @@ def _run(
     if pid == 0:
         os.setpgid(0, 0)
         os.close(liveness_fd)
+        os.close(ready_fd)
         try:
             os.execv(launch.argv[0], launch.argv)
         except OSError as exc:
@@ -93,6 +95,12 @@ def _run(
         except OSError:
             pass
     launch.inherited_fds.clear()
+    try:
+        os.write(ready_fd, b"1")
+    except OSError:
+        status = _terminate_group(pid, lambda: child_exited)
+        launch.cleanup()
+        return os.waitstatus_to_exitcode(status)
 
     def forward_interrupt(_signum: int, _frame: object) -> None:
         _signal_group(pid, signal.SIGINT)
@@ -117,16 +125,18 @@ def _run(
 
 def main(argv: list[str] | None = None) -> int:
     args = sys.argv if argv is None else argv
-    if len(args) != 5:
+    if len(args) != 6:
         return 2
     liveness_fd = int(args[1])
     start_fd = int(args[2])
     policy_fd = int(args[3])
-    command = args[4]
+    ready_fd = int(args[4])
+    command = args[5]
     try:
-        return _run(command, policy_fd, liveness_fd, start_fd)
+        return _run(command, policy_fd, liveness_fd, start_fd, ready_fd)
     finally:
         os.close(liveness_fd)
+        os.close(ready_fd)
 
 
 if __name__ == "__main__":

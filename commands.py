@@ -95,11 +95,13 @@ from subagents import (
     subagent_summaries,
 )
 from shell_sessions import (
+    SANDBOX_PREPARATION_TIMEOUT_SECONDS,
     cancel_shell_session,
     cancel_shell_sessions,
     pending_shell_completions,
     run_shell,
     running_shell_sessions,
+    write_stdin as poll_shell_session,
 )
 from skills import skill_catalog_instructions
 from steering import cancel_pending_steers
@@ -161,6 +163,19 @@ async def _run_console_command(
             parent_session_id=str(state.get("current_session_id") or "")
             or None,
         )
+        if result.get("status") == "running":
+            session_id = str(result.get("session_id") or "")
+            if session_id:
+                result = await poll_shell_session(
+                    {
+                        "session_id": session_id,
+                        "yield_time_ms": (
+                            SANDBOX_PREPARATION_TIMEOUT_SECONDS
+                            + CONSOLE_TIMEOUT_SECONDS
+                        )
+                        * 1000,
+                    }
+                )
         if result.get("status") == "running":
             session_id = str(result.get("session_id") or "")
             if session_id:

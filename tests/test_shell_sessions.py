@@ -14,6 +14,7 @@ os.environ["AGENT_WORKDIR"] = str(_HOME)
 import session
 import shell_sessions
 from config import TOOLS
+from model_providers import ModelTarget
 from shell_sessions import (
     HeadTailBuffer,
     cancel_shell_session,
@@ -29,6 +30,7 @@ from tools import shell_tool
 
 class ShellSessionTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
+        session.set_default_model_target(ModelTarget("local", "test-model"))
         self.runtime_context = session.bound_chat("telegram:123")
         self.runtime_context.__enter__()
         self.addCleanup(
@@ -207,6 +209,51 @@ class ShellSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(completed["ok"])
         self.assertEqual(completed["status"], "timed_out")
         self.assertIn("timed out", completed["error"])
+
+    async def test_execution_timeout_starts_after_sandbox_is_ready(self) -> None:
+        command_done = asyncio.Event()
+
+        class Process:
+            returncode = None
+
+            async def wait(self):
+                await command_done.wait()
+                self.returncode = 0
+                return 0
+
+        process = Process()
+        shell_session = shell_sessions.ShellSession(
+            id="shell-1",
+            command="true",
+            chat_id="",
+            chat_key=session.current_runtime().key,
+            parent_session_id=None,
+            process=process,
+            timeout=0.05,
+        )
+        shell_session.initial_decided.set()
+        ready_read, ready_write = os.pipe()
+
+        async def launch_then_finish() -> None:
+            await asyncio.sleep(0.06)
+            os.write(ready_write, b"1")
+            os.close(ready_write)
+            await asyncio.sleep(0.01)
+            command_done.set()
+
+        signal_task = asyncio.create_task(launch_then_finish())
+        output_task = asyncio.create_task(asyncio.sleep(0))
+        error_task = asyncio.create_task(asyncio.sleep(0))
+        await shell_sessions._monitor(
+            shell_session,
+            output_task,
+            error_task,
+            ready_read,
+        )
+        await signal_task
+
+        self.assertEqual(shell_session.status, "completed")
+        self.assertIsNone(shell_session.error)
 
     async def test_default_timeout_is_unlimited(self) -> None:
         with patch.object(shell_sessions, "SHELL_TIMEOUT", 0):

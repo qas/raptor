@@ -78,15 +78,10 @@ class ShellSandboxTests(unittest.TestCase):
 
     def test_denies_secret_when_platform_helper_exists(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            base = Path(directory).resolve()
-            root = base / "workspace"
-            root.mkdir()
-            external = base / "external"
-            external.mkdir()
-            (external / ".env").write_text("TOP_SECRET")
-            (root / "linked").symlink_to(
-                external, target_is_directory=True
-            )
+            root = Path(directory).resolve()
+            nested = root / "nested"
+            nested.mkdir()
+            (nested / ".env").write_text("TOP_SECRET")
             (root / "looped-link").symlink_to("looped-link")
             (root / "visible.txt").write_text("VISIBLE")
             policy = FileAccessPolicy.create(root, ["**/.env"])
@@ -102,7 +97,7 @@ class ShellSandboxTests(unittest.TestCase):
                     shell_sandbox.build_shell_sandbox_launch("true", policy)
                 return
             launch = shell_sandbox.build_shell_sandbox_launch(
-                "cat linked/.env 2>/dev/null || printf DENIED; "
+                "cat nested/.env 2>/dev/null || printf DENIED; "
                 "cat visible.txt",
                 policy,
             )
@@ -120,6 +115,17 @@ class ShellSandboxTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr.decode())
             self.assertEqual(result.stdout, b"DENIEDVISIBLE")
             self.assertNotIn(b"TOP_SECRET", result.stdout + result.stderr)
+
+    def test_matching_symlink_fails_before_command_launch(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            target = root / "target"
+            target.write_text("secret")
+            (root / ".env").symlink_to(target)
+            policy = FileAccessPolicy.create(root, ["**/.env"])
+
+            with self.assertRaisesRegex(RuntimeError, "through symlink"):
+                shell_sandbox.build_shell_sandbox_launch("true", policy)
 
     def test_missing_exact_path_placeholder_is_removed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

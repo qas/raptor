@@ -187,14 +187,15 @@ class FileAccessPolicyTests(unittest.TestCase):
                 {secret, certificate},
             )
 
-    def test_glob_expansion_follows_directory_symlink(self) -> None:
+    def test_glob_expansion_ignores_irrelevant_directory_symlink(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory).resolve()
             root = base / "workspace"
             root.mkdir()
             target = base / "external"
             target.mkdir()
-            secret = target / ".env"
+            (target / "visible.txt").write_text("visible")
+            secret = root / ".env"
             secret.write_text("secret")
             (root / "linked").symlink_to(target, target_is_directory=True)
             policy = FileAccessPolicy.create(root, ["**/.env"])
@@ -206,7 +207,7 @@ class FileAccessPolicyTests(unittest.TestCase):
                 (filesystem_permissions.PreparedDeniedPath(secret, False),),
             )
 
-    def test_exact_pattern_resolves_directory_symlink_target(self) -> None:
+    def test_glob_does_not_cross_directory_symlink(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory).resolve()
             root = base / "workspace"
@@ -216,18 +217,11 @@ class FileAccessPolicyTests(unittest.TestCase):
             secret = target / "restricted.txt"
             secret.write_text("secret")
             (root / "linked").symlink_to(target, target_is_directory=True)
-            policy = FileAccessPolicy.create(
-                root, ["linked/restricted.txt"]
-            )
+            policy = FileAccessPolicy.create(root, ["**/restricted.txt"])
 
-            denied = policy.prepare_denied_paths()
+            self.assertEqual(policy.prepare_denied_paths(), ())
 
-            self.assertEqual(
-                denied,
-                (filesystem_permissions.PreparedDeniedPath(secret, False),),
-            )
-
-    def test_exact_pattern_does_not_materialize_through_symlink(self) -> None:
+    def test_exact_match_through_symlink_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory).resolve()
             root = base / "workspace"
@@ -236,20 +230,10 @@ class FileAccessPolicyTests(unittest.TestCase):
             (root / "linked").symlink_to(target)
             policy = FileAccessPolicy.create(root, ["linked"])
 
-            denied = policy.prepare_denied_paths()
+            with self.assertRaisesRegex(RuntimeError, "through symlink"):
+                policy.prepare_denied_paths()
 
-            self.assertEqual(
-                denied,
-                (
-                    filesystem_permissions.PreparedDeniedPath(
-                        target, False
-                    ),
-                ),
-            )
-
-    def test_glob_expansion_handles_symlink_cycle_with_new_match_state(
-        self,
-    ) -> None:
+    def test_glob_does_not_cross_directory_symlink_cycle(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory).resolve()
             secret = root / ".env"
@@ -257,12 +241,20 @@ class FileAccessPolicyTests(unittest.TestCase):
             (root / "loop").symlink_to(root, target_is_directory=True)
             policy = FileAccessPolicy.create(root, ["**/loop/.env"])
 
-            denied = policy.prepare_denied_paths()
+            self.assertEqual(policy.prepare_denied_paths(), ())
 
-            self.assertEqual(
-                denied,
-                (filesystem_permissions.PreparedDeniedPath(secret, False),),
-            )
+    def test_glob_with_explicit_symlink_prefix_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory).resolve()
+            root = base / "workspace"
+            root.mkdir()
+            target = base / "external"
+            target.mkdir()
+            (root / "linked").symlink_to(target, target_is_directory=True)
+            policy = FileAccessPolicy.create(root, ["linked/**/*.pem"])
+
+            with self.assertRaisesRegex(RuntimeError, "through symlink"):
+                policy.prepare_denied_paths()
 
     def test_glob_expansion_ignores_file_symlink(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
