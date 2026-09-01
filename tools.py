@@ -211,6 +211,8 @@ async def shell_tool(
     from shell_sessions import run_shell
 
     parent_session_id = None
+    process_output = None
+    tool_call_id = ""
     if execution_context is not None:
         value = (
             execution_context.get("root_session_id")
@@ -219,6 +221,10 @@ async def shell_tool(
         )
         if value is not None:
             parent_session_id = str(value)
+        callback = execution_context.get("process_output")
+        if callable(callback):
+            process_output = callback
+        tool_call_id = str(execution_context.get("tool_call_id") or "")
     return await run_shell(
         command,
         timeout=args.get("timeout"),
@@ -226,6 +232,8 @@ async def shell_tool(
         tty=bool(args.get("tty", False)),
         chat_id=chat_id,
         parent_session_id=parent_session_id,
+        tool_call_id=tool_call_id,
+        process_output=process_output,
     )
 
 

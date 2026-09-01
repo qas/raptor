@@ -1,10 +1,11 @@
 """Provider-neutral contracts for interactive chat frontends."""
 from dataclasses import dataclass
-from typing import Any, Protocol, TypeAlias, runtime_checkable
+from typing import Any, Literal, Protocol, TypeAlias, runtime_checkable
 
 ConversationId: TypeAlias = int | str
 MessageId: TypeAlias = int | str
 UserId: TypeAlias = int | str
+ProcessOutputStream: TypeAlias = Literal["stdout", "stderr"]
 
 
 @dataclass(frozen=True)
@@ -52,6 +53,28 @@ ChatEvent: TypeAlias = IncomingMessage | IncomingAction
 class PollResult:
     events: tuple[ChatEvent, ...]
     cursor: object | None
+
+
+@dataclass(frozen=True)
+class ProcessOutputChunk:
+    """One bounded decoded chunk from a tool-owned process."""
+
+    call_id: str
+    session_id: str
+    stream: ProcessOutputStream
+    text: str
+    truncated: bool = False
+
+
+@runtime_checkable
+class ProcessOutputProvider(Protocol):
+    """Optional provider extension for live process output."""
+
+    async def publish_process_output(
+        self,
+        conversation_id: ConversationId,
+        chunk: ProcessOutputChunk,
+    ) -> None: ...
 
 
 @runtime_checkable

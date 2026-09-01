@@ -535,6 +535,7 @@ class MatrixProvider:
         return ("persistent-message-id",)
     async def send_draft(self, conversation_id, draft_id, text): ...
     async def send_reasoning_summary(self, conversation_id, delta): ...
+    async def publish_process_output(self, conversation_id, chunk): ...
     async def create_message(self, conversation_id, text, controls=()): ...
     async def edit_message(
         self, conversation_id, message_id, text, controls=()
@@ -564,6 +565,12 @@ policy remains in the provider-neutral core. `send_text` returns every
 persistent message ID that it creates, including every part of a split
 response. It returns an empty tuple if the provider creates no deletable chat
 artifact.
+
+`publish_process_output` is optional. When implemented, it receives bounded,
+decoded stdout and stderr chunks with their shell-session and tool-call IDs.
+The adapter decides whether to stream, batch, render, or ignore them. Delivery
+backpressure is bounded by the subprocess pipe and a core timeout. Adapter
+failures do not change the command result.
 
 ## Configuration
 

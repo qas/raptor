@@ -28,6 +28,7 @@ from chat_provider import (
     IncomingAction,
     IncomingMessage,
     PollResult,
+    ProcessOutputChunk,
     ProviderCapabilities,
 )
 from chat_runtime import (
@@ -99,6 +100,13 @@ class FakeProvider:
         self.calls.append(
             ("send_reasoning_summary", conversation_id, delta)
         )
+
+    async def publish_process_output(
+        self,
+        conversation_id,
+        chunk: ProcessOutputChunk,
+    ) -> None:
+        self.calls.append(("process_output", conversation_id, chunk))
 
     async def create_message(
         self,
@@ -288,6 +296,26 @@ class ChatProviderContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(texts[2].startswith("Running\n\nTool: shell"))
         self.assertTrue(texts[3].startswith("Completed\n\nTool: shell"))
         self.assertIsNone(session.current_runtime().pinned_status_owner)
+
+    async def test_tool_activity_exposes_process_output_to_provider(
+        self,
+    ) -> None:
+        from tool_activity import ToolActivitySurface
+
+        surface = ToolActivitySurface("!room:example.org")
+        chunk = ProcessOutputChunk(
+            call_id="c1",
+            session_id="shell-1",
+            stream="stdout",
+            text="working\n",
+        )
+
+        await surface.publish_process_output(chunk)
+
+        self.assertEqual(
+            self.provider.calls,
+            [("process_output", "!room:example.org", chunk)],
+        )
 
     async def test_child_tool_activity_uses_same_unpinned_bubble(self) -> None:
         from tool_activity import ToolActivitySurface

@@ -140,10 +140,22 @@ async def execute_tool_with_approval(
 
         if tool_activity is not None:
             await tool_activity.running(call)
+        effective_context = execution_context
+        if tool_activity is not None:
+            effective_context = dict(
+                execution_context
+                or {"depth": 0, "subagents_allowed": True}
+            )
+            effective_context["process_output"] = (
+                tool_activity.publish_process_output
+            )
+            effective_context["tool_call_id"] = str(
+                call.get("call_id") or ""
+            )
         result = await execute_tool(
             call,
             chat_id=chat_id,
-            execution_context=execution_context,
+            execution_context=effective_context,
         )
     except asyncio.CancelledError:
         await finish_owned_activity(

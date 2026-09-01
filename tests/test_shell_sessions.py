@@ -13,6 +13,7 @@ os.environ["AGENT_WORKDIR"] = str(_HOME)
 
 import session
 import shell_sessions
+from chat_provider import ProcessOutputChunk
 from config import TOOLS
 from model_providers import ModelTarget
 from shell_sessions import (
@@ -68,6 +69,85 @@ class ShellSessionTests(unittest.IsolatedAsyncioTestCase):
             audit.call_args.kwargs["parent_session_id"],
             "main-1",
         )
+
+    async def test_process_output_is_published_with_tool_identity(self) -> None:
+        chunks: list[ProcessOutputChunk] = []
+
+        async def publish(chunk: ProcessOutputChunk) -> None:
+            chunks.append(chunk)
+
+        result = await run_shell(
+            "printf out; printf err >&2",
+            timeout=2,
+            yield_time_ms=1000,
+            tty=False,
+            chat_id="telegram:123",
+            parent_session_id="main-1",
+            tool_call_id="call-1",
+            process_output=publish,
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(
+            {chunk.stream for chunk in chunks},
+            {"stdout", "stderr"},
+        )
+        by_stream = {
+            stream: "".join(
+                chunk.text for chunk in chunks if chunk.stream == stream
+            )
+            for stream in ("stdout", "stderr")
+        }
+        self.assertEqual(by_stream, {"stdout": "out", "stderr": "err"})
+        self.assertTrue(all(chunk.call_id == "call-1" for chunk in chunks))
+        self.assertEqual(len({chunk.session_id for chunk in chunks}), 1)
+
+    async def test_process_output_publication_has_one_shared_budget(self) -> None:
+        chunks: list[ProcessOutputChunk] = []
+
+        async def publish(chunk: ProcessOutputChunk) -> None:
+            chunks.append(chunk)
+
+        item = types.SimpleNamespace(
+            id="shell-1",
+            tool_call_id="call-1",
+            process_output=publish,
+            published_output_chars=0,
+            output_truncation_published=False,
+        )
+        with patch.object(shell_sessions, "MAX_TOOL_OUTPUT", 10):
+            await shell_sessions._publish_output(item, "stdout", "123456")
+            await shell_sessions._publish_output(item, "stderr", "abcdef")
+            await shell_sessions._publish_output(item, "stdout", "ignored")
+        self.assertEqual("".join(chunk.text for chunk in chunks), "123456abcd")
+        self.assertTrue(chunks[-1].truncated)
+
+    async def test_process_output_timeout_does_not_change_command(self) -> None:
+        async def blocked(_chunk: ProcessOutputChunk) -> None:
+            await asyncio.Event().wait()
+
+        item = types.SimpleNamespace(
+            id="shell-1",
+            tool_call_id="call-1",
+            process_output=blocked,
+            published_output_chars=0,
+            output_truncation_published=False,
+        )
+        with (
+            patch.object(
+                shell_sessions,
+                "PROCESS_OUTPUT_DELIVERY_TIMEOUT_SECONDS",
+                0.01,
+            ),
+            patch.object(shell_sessions, "log_event") as logged,
+        ):
+            await shell_sessions._publish_output(item, "stdout", "output")
+
+        self.assertIsNone(item.process_output)
+        self.assertEqual(logged.call_args.args[:2], (
+            "shell",
+            "output_delivery_error",
+        ))
 
     async def test_audit_failure_prevents_command_start(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -560,6 +640,10 @@ class ShellSessionTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_subagent_shell_is_scoped_to_root_session(self) -> None:
         launched = AsyncMock(return_value={"ok": True})
+
+        async def publish(_chunk: ProcessOutputChunk) -> None:
+            pass
+
         with patch("shell_sessions.run_shell", launched):
             await shell_tool(
                 {"command": "true"},
@@ -567,6 +651,8 @@ class ShellSessionTests(unittest.IsolatedAsyncioTestCase):
                 execution_context={
                     "session_id": "subagent-session",
                     "parent_session_id": "root-session",
+                    "tool_call_id": "call-1",
+                    "process_output": publish,
                 },
             )
 
@@ -574,6 +660,8 @@ class ShellSessionTests(unittest.IsolatedAsyncioTestCase):
             launched.await_args.kwargs["parent_session_id"],
             "root-session",
         )
+        self.assertEqual(launched.await_args.kwargs["tool_call_id"], "call-1")
+        self.assertIs(launched.await_args.kwargs["process_output"], publish)
 
     def test_supervisor_argv_uses_source_script(self) -> None:
         argv = supervisor_argv()

@@ -11,12 +11,17 @@ import signal
 import sys
 import tempfile
 import time
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import session as runtime_session
-from chat_provider import ConversationId
+from chat_provider import (
+    ConversationId,
+    ProcessOutputChunk,
+    ProcessOutputStream,
+)
 from config import AGENT_WORKDIR, FILESYSTEM_POLICY, MAX_TOOL_OUTPUT, SHELL_TIMEOUT
 from observability import log_event, log_shell_start
 from shell_supervisor import SUPERVISOR_MODE
@@ -30,6 +35,7 @@ DEFAULT_YIELD_TIME_MS = 10_000
 DEFAULT_POLL_TIME_MS = 5_000
 DEFAULT_WRITE_TIME_MS = 250
 SANDBOX_PREPARATION_TIMEOUT_SECONDS = 60
+PROCESS_OUTPUT_DELIVERY_TIMEOUT_SECONDS = 5.0
 # The supervisor gives its child group one second to exit before SIGKILL.
 # The owner must wait longer so it never kills the supervisor mid-cleanup.
 TERMINATION_GRACE_SECONDS = 2.0
@@ -37,6 +43,7 @@ MAX_RETAINED_SESSIONS = 50
 MAX_LIVE_SESSIONS = 64
 _SUPERVISOR_PATH = Path(__file__).with_name("shell_supervisor.py")
 _SUPERVISOR_EXECUTABLE = os.path.realpath(sys.executable)
+ProcessOutputCallback = Callable[[ProcessOutputChunk], Awaitable[None]]
 
 
 def supervisor_argv() -> list[str]:
@@ -105,6 +112,10 @@ class ShellSession:
     detached: bool = False
     completion_pending: bool = False
     completion_attempts: int = 0
+    tool_call_id: str = ""
+    process_output: ProcessOutputCallback | None = None
+    published_output_chars: int = 0
+    output_truncation_published: bool = False
     stdout: HeadTailBuffer = field(default_factory=HeadTailBuffer)
     stderr: HeadTailBuffer = field(default_factory=HeadTailBuffer)
     pending_stdout: HeadTailBuffer = field(default_factory=HeadTailBuffer)
@@ -146,10 +157,57 @@ def _append_output(
     pending.append(text)
 
 
+async def _publish_output(
+    session: ShellSession,
+    stream_name: ProcessOutputStream,
+    text: str,
+) -> None:
+    callback = session.process_output
+    remaining = MAX_TOOL_OUTPUT - session.published_output_chars
+    if callback is None or not text:
+        return
+    truncated = len(text) > remaining
+    if remaining <= 0:
+        if session.output_truncation_published:
+            return
+        bounded = ""
+        truncated = True
+    else:
+        bounded = text[:remaining]
+    session.published_output_chars += len(bounded)
+    session.output_truncation_published = truncated
+    try:
+        await asyncio.wait_for(
+            callback(
+                ProcessOutputChunk(
+                    call_id=session.tool_call_id,
+                    session_id=session.id,
+                    stream=stream_name,
+                    text=bounded,
+                    truncated=truncated,
+                )
+            ),
+            timeout=PROCESS_OUTPUT_DELIVERY_TIMEOUT_SECONDS,
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        session.process_output = None
+        log_event(
+            "shell",
+            "output_delivery_error",
+            {
+                "session_id": session.id,
+                "type": type(exc).__name__,
+                "message": str(exc),
+            },
+        )
+
+
 async def _pump_stream(
     session: ShellSession,
     stream: asyncio.StreamReader | None,
-    stream_name: str,
+    stream_name: ProcessOutputStream,
 ) -> None:
     if stream is None:
         return
@@ -163,10 +221,13 @@ async def _pump_stream(
             raise
         if not chunk:
             break
-        _append_output(session, stream_name, decoder.decode(chunk))
+        text = decoder.decode(chunk)
+        _append_output(session, stream_name, text)
+        await _publish_output(session, stream_name, text)
     remainder = decoder.decode(b"", final=True)
     if remainder:
         _append_output(session, stream_name, remainder)
+        await _publish_output(session, stream_name, remainder)
 
 
 def _signal_process_group(
@@ -448,6 +509,8 @@ async def run_shell(
     tty: bool,
     chat_id: ConversationId | None,
     parent_session_id: str | None,
+    tool_call_id: str = "",
+    process_output: ProcessOutputCallback | None = None,
 ) -> dict[str, Any]:
     runtime = runtime_session.current_runtime()
     if (
@@ -614,6 +677,8 @@ async def run_shell(
         tty=tty,
         pty_write_fd=pty_write_fd,
         liveness_write_fd=liveness_write_fd,
+        tool_call_id=tool_call_id,
+        process_output=process_output,
     )
     _sessions[shell_session.id] = shell_session
     stdout_task = asyncio.create_task(

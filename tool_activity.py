@@ -5,7 +5,13 @@ import json
 from collections import deque
 from typing import Any
 
-from chat_provider import ConversationId, Controls, MessageId
+from chat_provider import (
+    ConversationId,
+    Controls,
+    MessageId,
+    ProcessOutputChunk,
+    ProcessOutputProvider,
+)
 from chat_runtime import get_chat_provider
 from config import CHAT_STREAM_INTERVAL
 from observability import log_exception
@@ -123,6 +129,15 @@ class ToolActivitySurface:
         if self.message_id is None:
             raise RuntimeError("Could not present tool approval")
         return self.message_id
+
+    async def publish_process_output(
+        self,
+        chunk: ProcessOutputChunk,
+    ) -> None:
+        provider = get_chat_provider()
+        if not isinstance(provider, ProcessOutputProvider):
+            return
+        await provider.publish_process_output(self.conversation_id, chunk)
 
     async def _delete_messages(
         self,

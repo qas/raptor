@@ -20,6 +20,7 @@ from chat_provider import (
     IncomingAction,
     IncomingMessage,
     PollResult,
+    ProcessOutputChunk,
     ProviderCapabilities,
 )
 from multi_provider import MultiProvider
@@ -77,6 +78,13 @@ class QueueProvider:
         self, conversation_id, delta: str,
     ) -> None:
         self.calls.append(("reasoning", conversation_id, delta))
+
+    async def publish_process_output(
+        self,
+        conversation_id,
+        chunk: ProcessOutputChunk,
+    ) -> None:
+        self.calls.append(("process_output", conversation_id, chunk))
 
     async def create_message(self, conversation_id, text, controls=()):
         self.calls.append(("create", conversation_id, text, controls))
@@ -297,6 +305,17 @@ class MultiProviderTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIn(
             ("reasoning", "api:default", "Safe summary"),
+            self.api.calls,
+        )
+        chunk = ProcessOutputChunk(
+            call_id="c1",
+            session_id="shell-1",
+            stream="stderr",
+            text="building\n",
+        )
+        await self.multi.publish_process_output(event.conversation_id, chunk)
+        self.assertIn(
+            ("process_output", "api:default", chunk),
             self.api.calls,
         )
         await self.multi.delete_messages(

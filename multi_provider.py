@@ -12,6 +12,8 @@ from chat_provider import (
     IncomingMessage,
     MessageId,
     PollResult,
+    ProcessOutputChunk,
+    ProcessOutputProvider,
     ProviderCapabilities,
 )
 from observability import log_exception
@@ -309,6 +311,15 @@ class MultiProvider:
         provider, raw_id = self._route_conversation(conversation_id)
         if provider.capabilities.reasoning_summaries:
             await provider.send_reasoning_summary(raw_id, delta)
+
+    async def publish_process_output(
+        self,
+        conversation_id: ConversationId,
+        chunk: ProcessOutputChunk,
+    ) -> None:
+        provider, raw_id = self._route_conversation(conversation_id)
+        if isinstance(provider, ProcessOutputProvider):
+            await provider.publish_process_output(raw_id, chunk)
 
     async def create_message(
         self,
