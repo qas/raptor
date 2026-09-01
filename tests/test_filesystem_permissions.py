@@ -62,8 +62,29 @@ class FileAccessPolicyTests(unittest.TestCase):
             (root / "linked").symlink_to(target, target_is_directory=True)
             policy = FileAccessPolicy.create(root, ["**/.env"])
 
-            with self.assertRaisesRegex(RuntimeError, "through symlink"):
+            with self.assertRaisesRegex(
+                RuntimeError, "through directory symlink"
+            ):
                 policy.prepare_denied_paths()
+
+    def test_glob_expansion_ignores_file_symlink(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            target = root / "raptor-real"
+            target.write_text("binary")
+            bin_dir = root / ".local" / "bin"
+            bin_dir.mkdir(parents=True)
+            (bin_dir / "raptor").symlink_to(target)
+            secret = root / ".env"
+            secret.write_text("secret")
+            policy = FileAccessPolicy.create(root, ["**/.env"])
+
+            denied = policy.prepare_denied_paths()
+
+            self.assertEqual(
+                denied,
+                (filesystem_permissions.PreparedDeniedPath(secret, False),),
+            )
 
     def test_non_recursive_glob_ignores_irrelevant_deep_directory(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

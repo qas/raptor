@@ -262,10 +262,20 @@ class FileAccessPolicy:
                             pattern.parts, child_path.parts
                         )
                         if child.is_symlink() and could_match_below:
-                            raise RuntimeError(
-                                "cannot enforce deny-read glob through "
-                                f"symlink: {child_path}"
-                            )
+                            try:
+                                symlink_is_directory = child.is_dir(
+                                    follow_symlinks=True
+                                )
+                            except OSError as exc:
+                                raise RuntimeError(
+                                    "cannot inspect deny-read glob symlink: "
+                                    f"{child_path}"
+                                ) from exc
+                            if symlink_is_directory:
+                                raise RuntimeError(
+                                    "cannot enforce deny-read glob through "
+                                    f"directory symlink: {child_path}"
+                                )
                         if child.is_dir(follow_symlinks=False):
                             if depth < self.glob_scan_max_depth:
                                 stack.append((child_path, depth + 1))
