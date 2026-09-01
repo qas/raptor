@@ -105,6 +105,12 @@ class ShellSessionTests(unittest.IsolatedAsyncioTestCase):
             tool_call_id="call-1",
             process_output=publish,
         )
+        session_id = result.get("session_id")
+        if session_id is not None:
+            await asyncio.wait_for(
+                shell_sessions.wait_shell_session(session_id),
+                timeout=5,
+            )
 
         self.assertTrue(result["ok"])
         self.assertEqual(
@@ -533,8 +539,11 @@ class ShellSessionTests(unittest.IsolatedAsyncioTestCase):
                 chat_id="telegram:123",
                 parent_session_id=None,
             )
-            self.assertIsNotNone(result["session_id"])
-            await asyncio.wait_for(_wait_until_called(delivered), timeout=1)
+            session_id = result["session_id"]
+            self.assertIsNotNone(session_id)
+            monitor = shell_sessions._sessions[session_id].monitor_task
+            self.assertIsNotNone(monitor)
+            await asyncio.wait_for(monitor, timeout=5)
 
         delivered.assert_called_once()
         self.assertEqual(delivered.call_args.args[0], "telegram:123")
@@ -557,7 +566,10 @@ class ShellSessionTests(unittest.IsolatedAsyncioTestCase):
                 parent_session_id=None,
             )
             session_id = result["session_id"]
-            await asyncio.wait_for(_wait_until_called(delivered), timeout=1)
+            self.assertIsNotNone(session_id)
+            monitor = shell_sessions._sessions[session_id].monitor_task
+            self.assertIsNotNone(monitor)
+            await asyncio.wait_for(monitor, timeout=5)
 
         item = shell_sessions._sessions[session_id]
         self.assertEqual(item.completion_attempts, 1)
@@ -766,11 +778,6 @@ class HeadTailBufferTests(unittest.TestCase):
         self.assertLessEqual(len(stdout) + len(stderr), 100)
         self.assertIn("truncated", stdout)
         self.assertIn("truncated", stderr)
-
-
-async def _wait_until_called(mock: Mock) -> None:
-    while not mock.called:
-        await asyncio.sleep(0.005)
 
 
 if __name__ == "__main__":
