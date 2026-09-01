@@ -602,7 +602,7 @@ misconfiguration cannot trigger an unbounded full-disk scan.
 Shell enforcement fails closed when configured. Linux requires a root-owned,
 non-group/world-writable `bwrap` (Bubblewrap) on `PATH`; macOS uses
 `/usr/bin/sandbox-exec`. Glob expansion is
-bounded to 8,192 matches and 250,000 scanned entries, and
+bounded to 1,024 matches and 250,000 scanned entries, and
 `glob_scan_max_depth` limits recursive traversal. Its default is `32`. Shell
 enforcement treats a directory as an opaque denied subtree when permissions
 prevent enumeration or the depth limit is reached, rather than allowing a
@@ -610,7 +610,8 @@ possible match beneath it.
 Directory symlinks are traversed within the same scan bounds, and matching
 physical targets are denied regardless of which symlink reaches them. Cycles
 stop when the same physical directory is reached with the same remaining glob
-match state. Patterns with the same fixed directory prefix share one traversal.
+match state. Unresolvable symlinks are terminal entries and do not abort the
+scan. Patterns with the same fixed directory prefix share one traversal.
 Shell patterns are expanded immediately before each managed command; direct
 filesystem-tool checks evaluate paths at the time of each tool call.
 Unconfigured `deny_read` defaults to an empty list and does not change shell

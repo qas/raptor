@@ -113,6 +113,45 @@ class FileAccessPolicyTests(unittest.TestCase):
                 ),
             )
 
+    def test_glob_expansion_masks_subtree_when_iteration_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            unstable = root / "unstable"
+            unstable.mkdir()
+            real_scandir = filesystem_permissions.os.scandir
+
+            class FailingScan:
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *_args: object) -> None:
+                    return None
+
+                def __next__(self):
+                    raise OSError("directory changed during scan")
+
+            def scandir(path: str | Path):
+                if Path(path) == unstable:
+                    return FailingScan()
+                return real_scandir(path)
+
+            policy = FileAccessPolicy.create(root, ["**/.env"])
+            with patch.object(
+                filesystem_permissions.os,
+                "scandir",
+                side_effect=scandir,
+            ):
+                denied = policy.prepare_denied_paths()
+
+            self.assertEqual(
+                denied,
+                (
+                    filesystem_permissions.PreparedDeniedPath(
+                        unstable, False
+                    ),
+                ),
+            )
+
     def test_patterns_with_shared_scan_root_use_one_traversal(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory).resolve()
@@ -185,7 +224,27 @@ class FileAccessPolicyTests(unittest.TestCase):
 
             self.assertEqual(
                 denied,
-                (filesystem_permissions.PreparedDeniedPath(secret, True),),
+                (filesystem_permissions.PreparedDeniedPath(secret, False),),
+            )
+
+    def test_exact_pattern_does_not_materialize_through_symlink(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory).resolve()
+            root = base / "workspace"
+            root.mkdir()
+            target = base / "missing-target"
+            (root / "linked").symlink_to(target)
+            policy = FileAccessPolicy.create(root, ["linked"])
+
+            denied = policy.prepare_denied_paths()
+
+            self.assertEqual(
+                denied,
+                (
+                    filesystem_permissions.PreparedDeniedPath(
+                        target, False
+                    ),
+                ),
             )
 
     def test_glob_expansion_handles_symlink_cycle_with_new_match_state(
@@ -211,6 +270,21 @@ class FileAccessPolicyTests(unittest.TestCase):
             target = root / "target-file"
             target.write_text("binary")
             (root / "linked-file").symlink_to(target)
+            secret = root / ".env"
+            secret.write_text("secret")
+            policy = FileAccessPolicy.create(root, ["**/.env"])
+
+            denied = policy.prepare_denied_paths()
+
+            self.assertEqual(
+                denied,
+                (filesystem_permissions.PreparedDeniedPath(secret, False),),
+            )
+
+    def test_glob_expansion_ignores_unresolvable_file_symlink(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            (root / "looped-link").symlink_to("looped-link")
             secret = root / ".env"
             secret.write_text("secret")
             policy = FileAccessPolicy.create(root, ["**/.env"])

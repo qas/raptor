@@ -29,6 +29,15 @@ def _absolute_pattern(raw: str, workspace: Path) -> str:
     return os.path.abspath(expanded)
 
 
+def _has_symlink_component(path: Path) -> bool:
+    current = Path(path.anchor)
+    for part in path.parts[1:]:
+        current /= part
+        if current.is_symlink():
+            return True
+    return False
+
+
 @lru_cache(maxsize=4096)
 def _glob_closure(
     pattern: tuple[str, ...],
@@ -163,9 +172,10 @@ class _DeniedPathResolver:
             if pattern.has_glob:
                 scan_groups.setdefault(pattern.scan_root, []).append(pattern)
             else:
+                path = Path(pattern.absolute)
                 self._deny(
-                    Path(pattern.absolute),
-                    materialize_if_missing=True,
+                    path,
+                    materialize_if_missing=not _has_symlink_component(path),
                 )
         for root, patterns in scan_groups.items():
             self._scan(root, tuple(patterns))
@@ -187,7 +197,12 @@ class _DeniedPathResolver:
         *,
         materialize_if_missing: bool = False,
     ) -> None:
-        resolved = path.resolve(strict=False)
+        try:
+            resolved = path.resolve(strict=False)
+        except (OSError, RuntimeError):
+            if _has_symlink_component(path):
+                return
+            raise
         self.prepared[resolved] = (
             self.prepared.get(resolved, False) or materialize_if_missing
         )
@@ -235,11 +250,18 @@ class _DeniedPathResolver:
                 children = os.scandir(directory)
             except (NotADirectoryError, FileNotFoundError):
                 continue
-            except PermissionError:
+            except OSError:
                 self._deny(directory)
                 continue
             with children:
-                for child in children:
+                while True:
+                    try:
+                        child = next(children)
+                    except StopIteration:
+                        break
+                    except OSError:
+                        self._deny(directory)
+                        break
                     self.scanned_entries += 1
                     if self.scanned_entries > MAX_DENY_READ_SCAN_ENTRIES:
                         raise RuntimeError(
@@ -252,32 +274,17 @@ class _DeniedPathResolver:
                         child.name,
                     )
                     if matched:
-                        self._deny(
-                            child_path,
-                            materialize_if_missing=child.is_symlink(),
-                        )
+                        self._deny(child_path)
                         continue
                     if not child_states:
                         continue
-                    try:
-                        is_directory = child.is_dir(follow_symlinks=True)
-                    except OSError as exc:
-                        raise RuntimeError(
-                            "cannot inspect deny-read glob path: "
-                            f"{child_path}"
-                        ) from exc
-                    if not is_directory:
+                    if not self._should_traverse(child, child_path):
                         continue
                     try:
                         child_metadata = child.stat(follow_symlinks=True)
-                    except PermissionError:
+                    except OSError:
                         self._deny(child_path)
                         continue
-                    except OSError as exc:
-                        raise RuntimeError(
-                            "cannot inspect deny-read glob directory: "
-                            f"{child_path}"
-                        ) from exc
                     child_identity = (
                         child_metadata.st_dev,
                         child_metadata.st_ino,
@@ -291,6 +298,18 @@ class _DeniedPathResolver:
                         continue
                     visited.add(visit_key)
                     stack.append((child_path, depth + 1, child_states))
+
+    def _should_traverse(self, child: os.DirEntry[str], path: Path) -> bool:
+        try:
+            return child.is_dir(follow_symlinks=True)
+        except OSError:
+            try:
+                is_symlink = child.is_symlink()
+            except OSError:
+                is_symlink = False
+            if not is_symlink:
+                self._deny(path)
+            return False
 
     @staticmethod
     def _advance_patterns(

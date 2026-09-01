@@ -87,6 +87,7 @@ class ShellSandboxTests(unittest.TestCase):
             (root / "linked").symlink_to(
                 external, target_is_directory=True
             )
+            (root / "looped-link").symlink_to("looped-link")
             (root / "visible.txt").write_text("VISIBLE")
             policy = FileAccessPolicy.create(root, ["**/.env"])
             helper_available = (
