@@ -56,6 +56,13 @@ Nightly builds use their commit SHA as the build identifier and are intended
 for early testing. To change the installation locations, set
 `RAPTOR_INSTALL_ROOT` and `RAPTOR_BIN_DIR`.
 
+On Linux, the installer probes Bubblewrap and reports whether restricted shell
+commands can start. It does not silently install packages, add AppArmor
+exceptions, or weaken kernel policy. If Bubblewrap is missing, the installer
+prints the package-manager command. On Ubuntu 24.04 and later, it identifies
+the AppArmor user-namespace restriction separately so a system administrator
+can make an explicit policy decision.
+
 Remove the installed binary without touching workspace data:
 
 ```bash
@@ -643,7 +650,38 @@ misconfiguration cannot trigger an unbounded full-disk scan.
 
 When you configure shell enforcement, it fails closed. Linux requires a
 root-owned `bwrap` (Bubblewrap) executable on `PATH` that is not writable by
-the group or other users. macOS uses `/usr/bin/sandbox-exec`.
+the group or other users. Bubblewrap also requires access to unprivileged user
+namespaces. Ubuntu 24.04 and later restrict that access with AppArmor by
+default. Raptor's installer probes the complete requirement and reports the
+host-policy failure without disabling the protection globally. macOS uses
+`/usr/bin/sandbox-exec`.
+
+#### Ubuntu AppArmor
+
+Ubuntu 24.04 and later can deny Bubblewrap's user-namespace setup even when
+`kernel.unprivileged_userns_clone` is enabled. To authorize installed Raptor
+versions without disabling the restriction globally, create a named AppArmor
+profile:
+
+```bash
+RAPTOR_BIN="$(readlink -f "$(command -v raptor)")"
+RAPTOR_VERSIONS="$(dirname "$(dirname "$RAPTOR_BIN")")"
+
+sudo tee /etc/apparmor.d/raptor >/dev/null <<EOF
+abi <abi/4.0>,
+include <tunables/global>
+
+profile raptor ${RAPTOR_VERSIONS}/*/raptor flags=(unconfined) {
+  userns,
+}
+EOF
+
+sudo apparmor_parser -r /etc/apparmor.d/raptor
+```
+
+This is an explicit host-security decision. The installer detects the denial
+and links to these commands, but does not write system policy or disable
+AppArmor itself. Restart Raptor after loading the profile.
 
 Raptor limits glob expansion to 1,024 matches and 250,000 scanned entries. The
 `glob_scan_max_depth` setting limits recursive traversal and defaults to `32`.

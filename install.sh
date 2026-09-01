@@ -5,6 +5,8 @@ REPO="${RAPTOR_REPO:-qas/raptor}"
 INSTALL_ROOT="${RAPTOR_INSTALL_ROOT:-${XDG_DATA_HOME:-$HOME/.local/share}/raptor}"
 BIN_DIR="${RAPTOR_BIN_DIR:-$HOME/.local/bin}"
 VERSION="${RAPTOR_VERSION:-}"
+SANDBOX_PROBE_TIMEOUT_SECONDS=5
+SANDBOX_ERROR_LIMIT_BYTES=4096
 
 die() {
     printf '%s\n' "$1" >&2
@@ -76,6 +78,102 @@ is_under() {
 
 require_cmd() {
     command -v "$1" >/dev/null 2>&1 || die "Raptor install requires $1"
+}
+
+linux_sandbox_install_command() {
+    case "$1" in
+        ubuntu|debian) printf '%s\n' "sudo apt-get install bubblewrap" ;;
+        fedora|rhel|centos) printf '%s\n' "sudo dnf install bubblewrap" ;;
+        arch) printf '%s\n' "sudo pacman -S bubblewrap" ;;
+        *) printf '%s\n' "Install bubblewrap with your system package manager" ;;
+    esac
+}
+
+linux_distribution_id() {
+    os_release=${1:-/etc/os-release}
+    [ -r "$os_release" ] || return 1
+    awk -F= '$1 == "ID" {
+        value = $2
+        gsub(/^"|"$/, "", value)
+        print value
+        exit
+    }' "$os_release"
+}
+
+ubuntu_userns_restriction_enabled() {
+    os_release=${1:-/etc/os-release}
+    restriction=${2:-/proc/sys/kernel/apparmor_restrict_unprivileged_userns}
+    [ "$(linux_distribution_id "$os_release")" = "ubuntu" ] || return 1
+    [ -r "$restriction" ] || return 1
+    [ "$(tr -d '[:space:]' < "$restriction")" = "1" ]
+}
+
+trusted_linux_bwrap() {
+    metadata=$(stat -Lc '%u %a' -- "$1" 2>/dev/null) || return 1
+    set -- $metadata
+    [ "$#" -eq 2 ] || return 1
+    owner=$1
+    mode=$2
+    case "$owner" in
+        ""|*[!0-9]*) return 1 ;;
+    esac
+    case "$mode" in
+        ""|*[!0-7]*) return 1 ;;
+    esac
+    [ "$owner" -eq 0 ] || return 1
+    [ $((mode / 10 % 10 & 2)) -eq 0 ] || return 1
+    [ $((mode % 10 & 2)) -eq 0 ]
+}
+
+report_linux_sandbox() {
+    temporary_directory=$1
+    os_release=${2:-/etc/os-release}
+    restriction=${3:-/proc/sys/kernel/apparmor_restrict_unprivileged_userns}
+    probe_timeout=${SANDBOX_PROBE_TIMEOUT_SECONDS:-5}
+    error_limit=${SANDBOX_ERROR_LIMIT_BYTES:-4096}
+    if ! bwrap_path=$(command -v bwrap 2>/dev/null); then
+        distribution=$(linux_distribution_id "$os_release" || true)
+        printf '%s\n' \
+            "Linux shell sandbox: unavailable (Bubblewrap is not installed)" \
+            "Run: $(linux_sandbox_install_command "$distribution")" \
+            "Raptor will fail closed if permissions.filesystem.deny_read is configured."
+        return
+    fi
+    for utility in stat timeout head grep tr; do
+        if ! command -v "$utility" >/dev/null 2>&1; then
+            printf '%s\n' \
+                "Linux shell sandbox: not verified (${utility} is unavailable)" \
+                "Raptor will verify Bubblewrap before each restricted shell command."
+            return
+        fi
+    done
+    if ! trusted_linux_bwrap "$bwrap_path"; then
+        printf '%s\n' \
+            "Linux shell sandbox: unavailable (Bubblewrap is not trusted)" \
+            "Bubblewrap must be root-owned and not group/world writable." \
+            "Raptor will fail closed if permissions.filesystem.deny_read is configured."
+        return
+    fi
+    sandbox_error="${temporary_directory}/bubblewrap-probe-error"
+    if timeout "$probe_timeout" "$bwrap_path" \
+        --ro-bind / / /bin/true 2>"$sandbox_error"; then
+        printf '%s\n' "Linux shell sandbox: ready"
+        return
+    fi
+    error=$(head -c "$error_limit" "$sandbox_error")
+    printf '%s\n' "Linux shell sandbox: unavailable"
+    if ubuntu_userns_restriction_enabled "$os_release" "$restriction" && \
+        printf '%s' "$error" | grep -q \
+            'setting up uid map: Permission denied'; then
+        printf '%s\n' \
+            "Ubuntu AppArmor denied Bubblewrap access to user namespaces." \
+            "Setup: https://github.com/${REPO}#ubuntu-apparmor" \
+            "Raptor did not weaken the host policy automatically."
+    else
+        printf '%s\n' "Bubblewrap probe failed: ${error:-no error output}"
+    fi
+    printf '%s\n' \
+        "Raptor will fail closed if permissions.filesystem.deny_read is configured."
 }
 
 sha256_file() {
@@ -176,6 +274,7 @@ install_release() {
     require_cmd curl
     require_cmd tar
     require_cmd mktemp
+    require_cmd awk
     if ! command -v sha256sum >/dev/null 2>&1 && \
         ! command -v shasum >/dev/null 2>&1; then
         die "Raptor install requires sha256sum or shasum"
@@ -212,6 +311,9 @@ install_release() {
     mv -f "$link_tmp" "${BIN_DIR}/raptor"
     printf 'Installed Raptor %s to %s\n' "$VERSION" "$dest"
     printf 'Command: %s\n' "${BIN_DIR}/raptor"
+    if [ "$platform_os" = linux ]; then
+        report_linux_sandbox "$tmp"
+    fi
     case ":$PATH:" in
         *":${BIN_DIR}:"*) ;;
         *)

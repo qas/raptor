@@ -34,6 +34,27 @@ def _run_helper(
     )
 
 
+def _run_helpers(
+    names: tuple[str, ...],
+    invocation: str,
+    *,
+    arguments: tuple[str, ...],
+    cwd: Path,
+    env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
+    source = "\n".join(_helper_source(name) for name in names)
+    script = source + f"\n{invocation}\n"
+    return subprocess.run(
+        ["sh", "-s", *arguments],
+        input=script,
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        check=False,
+        env=env,
+    )
+
+
 def _run_uninstall(
     install_root: Path,
     bin_dir: Path,
@@ -159,6 +180,127 @@ class InstallScriptTests(unittest.TestCase):
             cwd=_ROOT,
         )
         self.assertNotEqual(completed.returncode, 0)
+
+    def test_linux_sandbox_install_command_is_distribution_specific(
+        self,
+    ) -> None:
+        for distribution, expected in (
+            ("ubuntu", "sudo apt-get install bubblewrap"),
+            ("fedora", "sudo dnf install bubblewrap"),
+            ("arch", "sudo pacman -S bubblewrap"),
+            ("unknown", "Install bubblewrap with your system package manager"),
+        ):
+            with self.subTest(distribution=distribution):
+                completed = _run_helper(
+                    "linux_sandbox_install_command",
+                    distribution,
+                    cwd=_ROOT,
+                )
+                self.assertEqual(completed.returncode, 0, completed.stderr)
+                self.assertEqual(completed.stdout.strip(), expected)
+
+    def test_linux_distribution_id_reads_data_without_sourcing_it(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            marker = root / "executed"
+            os_release = root / "os-release"
+            os_release.write_text(
+                f'ID="ubuntu"\nNAME=$(touch {marker})\n',
+                encoding="utf-8",
+            )
+
+            completed = _run_helper(
+                "linux_distribution_id",
+                str(os_release),
+                cwd=_ROOT,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertEqual(completed.stdout.strip(), "ubuntu")
+            self.assertFalse(marker.exists())
+
+    def test_linux_sandbox_rejects_untrusted_bubblewrap_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            stat = root / "stat"
+            stat.write_text(
+                "#!/bin/sh\nprintf '%s\\n' \"$FAKE_STAT_METADATA\"\n",
+                encoding="utf-8",
+            )
+            stat.chmod(0o755)
+            base_env = os.environ.copy()
+            base_env["PATH"] = f"{root}:{base_env['PATH']}"
+
+            for metadata in ("1000 755", "0 775", "0 757", "root 755"):
+                with self.subTest(metadata=metadata):
+                    env = base_env | {"FAKE_STAT_METADATA": metadata}
+                    completed = _run_helpers(
+                        ("trusted_linux_bwrap",),
+                        'trusted_linux_bwrap "$1"',
+                        arguments=("/usr/bin/bwrap",),
+                        cwd=_ROOT,
+                        env=env,
+                    )
+                    self.assertNotEqual(completed.returncode, 0)
+
+            env = base_env | {"FAKE_STAT_METADATA": "0 755"}
+            completed = _run_helpers(
+                ("trusted_linux_bwrap",),
+                'trusted_linux_bwrap "$1"',
+                arguments=("/usr/bin/bwrap",),
+                cwd=_ROOT,
+                env=env,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+
+    def test_installer_identifies_ubuntu_user_namespace_denial(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            bwrap = bin_dir / "bwrap"
+            bwrap.write_text(
+                "#!/bin/sh\n"
+                "printf '%s\\n' "
+                "'bwrap: setting up uid map: Permission denied' >&2\n"
+                "exit 1\n",
+                encoding="utf-8",
+            )
+            bwrap.chmod(0o755)
+            stat = bin_dir / "stat"
+            stat.write_text(
+                "#!/bin/sh\nprintf '%s\\n' '0 755'\n",
+                encoding="utf-8",
+            )
+            stat.chmod(0o755)
+            os_release = root / "os-release"
+            os_release.write_text("ID=ubuntu\n", encoding="utf-8")
+            restriction = root / "restriction"
+            restriction.write_text("1\n", encoding="utf-8")
+            env = os.environ.copy()
+            env["PATH"] = f"{bin_dir}:{env['PATH']}"
+
+            completed = _run_helpers(
+                (
+                    "linux_sandbox_install_command",
+                    "linux_distribution_id",
+                    "ubuntu_userns_restriction_enabled",
+                    "trusted_linux_bwrap",
+                    "report_linux_sandbox",
+                ),
+                'report_linux_sandbox "$1" "$2" "$3"',
+                arguments=(
+                    str(root),
+                    str(os_release),
+                    str(restriction),
+                ),
+                cwd=_ROOT,
+                env=env,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertIn("Ubuntu AppArmor denied", completed.stdout)
+            self.assertIn("#ubuntu-apparmor", completed.stdout)
 
     def test_unknown_argument_is_rejected(self) -> None:
         completed = subprocess.run(
