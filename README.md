@@ -99,6 +99,15 @@ export TG_BOT_TOKEN=your-telegram-token
 raptor
 ```
 
+To run Raptor in the background, use daemon mode:
+
+```bash
+raptor -d
+```
+
+`-d` is the short form of `--daemon`. By default, Raptor writes daemon output
+to `$RAPTOR_HOME/raptor.log`.
+
 The inbound Responses API listens on `127.0.0.1:8787` by default:
 
 ```bash
