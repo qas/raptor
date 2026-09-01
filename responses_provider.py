@@ -558,6 +558,25 @@ class ResponsesApiProvider:
             "message_id": key,
         })
 
+    async def delete_messages(self, conversation_id, message_ids) -> None:
+        self._conversation_pending(conversation_id)
+        keys = tuple(str(message_id) for message_id in message_ids)
+        for key in keys:
+            message = self.messages.get(key)
+            if (
+                message is not None
+                and message["conversation_id"] != str(conversation_id)
+            ):
+                raise ValueError("message belongs to another conversation")
+        for key in keys:
+            self.messages.pop(key, None)
+            self._emit({
+                "type": "raptor.status",
+                "operation": "deleted",
+                "conversation_id": str(conversation_id),
+                "message_id": key,
+            })
+
     async def pin_message(self, conversation_id, message_id) -> None:
         self._conversation_pending(conversation_id)
         message = self.messages.get(str(message_id))

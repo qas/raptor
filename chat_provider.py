@@ -127,6 +127,14 @@ class ChatProvider(Protocol):
         message_id: MessageId,
     ) -> None: ...
 
+    async def delete_messages(
+        self,
+        conversation_id: ConversationId,
+        message_ids: tuple[MessageId, ...],
+    ) -> None:
+        """Delete a bounded group of messages from one conversation."""
+        ...
+
     async def pin_message(
         self,
         conversation_id: ConversationId,

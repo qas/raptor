@@ -503,6 +503,19 @@ class ResponsesApiProviderTests(unittest.IsolatedAsyncioTestCase):
             "alpha",
         )
 
+    async def test_bulk_status_delete_validates_before_mutating(self) -> None:
+        alpha = await self.provider.create_message("alpha", "Alpha")
+        beta = await self.provider.create_message("beta", "Beta")
+
+        with self.assertRaisesRegex(ValueError, "another conversation"):
+            await self.provider.delete_messages("alpha", (alpha, beta))
+
+        self.assertIn(alpha, self.provider.messages)
+        self.assertIn(beta, self.provider.messages)
+        await self.provider.delete_messages("alpha", (alpha,))
+        self.assertNotIn(alpha, self.provider.messages)
+        self.assertIn(beta, self.provider.messages)
+
     async def test_busy_noncommand_waits_for_steered_response(self) -> None:
         turns.start(
             asyncio.Event().wait(),

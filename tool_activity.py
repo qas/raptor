@@ -124,11 +124,16 @@ class ToolActivitySurface:
             raise RuntimeError("Could not present tool approval")
         return self.message_id
 
-    async def _delete_message(self, message_id: MessageId) -> None:
+    async def _delete_messages(
+        self,
+        message_ids: tuple[MessageId, ...],
+    ) -> None:
+        if not message_ids:
+            return
         try:
-            await get_chat_provider().delete_message(
+            await get_chat_provider().delete_messages(
                 self.conversation_id,
-                message_id,
+                message_ids,
             )
         except asyncio.CancelledError:
             raise
@@ -153,7 +158,7 @@ class ToolActivitySurface:
         if message_id is not None:
             if len(self._completed_message_ids) >= MAX_RETAINED_TOOL_BUBBLES:
                 oldest = self._completed_message_ids[0]
-                await self._delete_message(oldest)
+                await self._delete_messages((oldest,))
                 self._completed_message_ids.popleft()
             self._completed_message_ids.append(message_id)
             self.message_id = None
@@ -165,10 +170,10 @@ class ToolActivitySurface:
         if task is not None and not task.done():
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
+        message_ids: list[MessageId] = []
         if self.message_id is not None:
-            await self._delete_message(self.message_id)
-            self.message_id = None
-        while self._completed_message_ids:
-            message_id = self._completed_message_ids[-1]
-            await self._delete_message(message_id)
-            self._completed_message_ids.pop()
+            message_ids.append(self.message_id)
+        message_ids.extend(reversed(self._completed_message_ids))
+        await self._delete_messages(tuple(message_ids))
+        self.message_id = None
+        self._completed_message_ids.clear()

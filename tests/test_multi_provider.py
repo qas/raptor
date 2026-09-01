@@ -92,6 +92,9 @@ class QueueProvider:
     async def delete_message(self, conversation_id, message_id) -> None:
         self.calls.append(("delete", conversation_id, message_id))
 
+    async def delete_messages(self, conversation_id, message_ids) -> None:
+        self.calls.append(("delete_many", conversation_id, tuple(message_ids)))
+
     async def pin_message(self, conversation_id, message_id) -> None:
         self.calls.append(("pin", conversation_id, message_id))
 
@@ -294,6 +297,18 @@ class MultiProviderTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIn(
             ("reasoning", "api:default", "Safe summary"),
+            self.api.calls,
+        )
+        await self.multi.delete_messages(
+            event.conversation_id,
+            ("status-1", "status-2"),
+        )
+        self.assertIn(
+            (
+                "delete_many",
+                "api:default",
+                ("status-1", "status-2"),
+            ),
             self.api.calls,
         )
 

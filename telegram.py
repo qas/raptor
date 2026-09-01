@@ -34,9 +34,11 @@ _client: httpx.AsyncClient | None = None
 _CHAT_REQUEST_INTERVAL = 1.1
 _GLOBAL_REQUEST_INTERVAL = 1.0 / 28.0
 _MESSAGE_PREVIEW_LIMIT = 3900
+_DELETE_MESSAGES_LIMIT = 100
 _PACED_CHAT_METHODS = frozenset(
     {
         "deletemessage",
+        "deletemessages",
         "closeforumtopic",
         "createforumtopic",
         "deleteforumtopic",
@@ -1228,6 +1230,20 @@ class TelegramProvider:
             "deleteMessage",
             {"chat_id": chat_id, "message_id": message_id},
         )
+
+    async def delete_messages(self, conversation_id, message_ids) -> None:
+        chat_id, _thread_id = _telegram_destination(conversation_id)
+        ids = tuple(message_ids)
+        for start in range(0, len(ids), _DELETE_MESSAGES_LIMIT):
+            await tg_call(
+                "deleteMessages",
+                {
+                    "chat_id": chat_id,
+                    "message_ids": list(
+                        ids[start:start + _DELETE_MESSAGES_LIMIT]
+                    ),
+                },
+            )
 
     async def pin_message(self, conversation_id, message_id) -> None:
         chat_id, _thread_id = _telegram_destination(conversation_id)

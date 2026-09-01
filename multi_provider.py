@@ -337,6 +337,14 @@ class MultiProvider:
         provider, raw_id = self._route_conversation(conversation_id)
         await provider.delete_message(raw_id, message_id)
 
+    async def delete_messages(
+        self,
+        conversation_id: ConversationId,
+        message_ids: tuple[MessageId, ...],
+    ) -> None:
+        provider, raw_id = self._route_conversation(conversation_id)
+        await provider.delete_messages(raw_id, message_ids)
+
     async def pin_message(
         self,
         conversation_id: ConversationId,

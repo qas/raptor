@@ -2089,7 +2089,7 @@ class PinnedStatusSlotTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(methods.count("pinChatMessage"), 1)
         self.assertEqual(methods.count("editMessageText"), 2)
         self.assertEqual(methods.count("unpinChatMessage"), 0)
-        self.assertEqual(methods.count("deleteMessage"), 1)
+        self.assertEqual(methods.count("deleteMessages"), 1)
         approval_payload = [
             payload
             for method, payload in self.calls
@@ -2185,7 +2185,10 @@ class PinnedStatusSlotTests(unittest.IsolatedAsyncioTestCase):
             any(method == "unpinChatMessage" for method, _ in self.calls)
         )
         self.assertIn(
-            ("deleteMessage", {"chat_id": 1, "message_id": 321}),
+            (
+                "deleteMessages",
+                {"chat_id": 1, "message_ids": [321]},
+            ),
             self.calls,
         )
 

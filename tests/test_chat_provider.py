@@ -126,6 +126,9 @@ class FakeProvider:
     async def delete_message(self, conversation_id, message_id) -> None:
         self.calls.append(("delete", conversation_id, message_id))
 
+    async def delete_messages(self, conversation_id, message_ids) -> None:
+        self.calls.append(("delete_many", conversation_id, tuple(message_ids)))
+
     async def pin_message(self, conversation_id, message_id) -> None:
         self.calls.append(("pin", conversation_id, message_id))
 
@@ -272,7 +275,7 @@ class ChatProviderContractTests(unittest.IsolatedAsyncioTestCase):
         methods = [call[0] for call in self.provider.calls]
         self.assertEqual(
             methods,
-            ["create", "edit", "edit", "edit", "delete"],
+            ["create", "edit", "edit", "edit", "delete_many"],
         )
         texts = [
             call[3]
@@ -303,7 +306,7 @@ class ChatProviderContractTests(unittest.IsolatedAsyncioTestCase):
         methods = [call[0] for call in self.provider.calls]
         self.assertEqual(
             methods,
-            ["create", "edit", "delete"],
+            ["create", "edit", "delete_many"],
         )
         texts = [
             call[3]
@@ -338,9 +341,9 @@ class ChatProviderContractTests(unittest.IsolatedAsyncioTestCase):
             "thread:existing",
         )
         deletes = [
-            call for call in self.provider.calls if call[0] == "delete"
+            call for call in self.provider.calls if call[0] == "delete_many"
         ]
-        self.assertEqual(deletes[0][2], "$event-2")
+        self.assertEqual(deletes[0][2], ("$event-2",))
         self.assertEqual(
             session.current_runtime().pinned_status_message_id,
             "$event-1",
@@ -381,9 +384,9 @@ class ChatProviderContractTests(unittest.IsolatedAsyncioTestCase):
         deletes = [
             call[2]
             for call in self.provider.calls
-            if call[0] == "delete"
+            if call[0] == "delete_many"
         ]
-        self.assertEqual(deletes, ["$event-2", "$event-1"])
+        self.assertEqual(deletes, [("$event-2", "$event-1")])
 
     async def test_tool_activity_bounds_bubbles_retained_until_clear(
         self,
@@ -411,18 +414,18 @@ class ChatProviderContractTests(unittest.IsolatedAsyncioTestCase):
             deletes = [
                 call[2]
                 for call in self.provider.calls
-                if call[0] == "delete"
+                if call[0] == "delete_many"
             ]
-            self.assertEqual(deletes, ["$event-1"])
+            self.assertEqual(deletes, [("$event-1",)])
 
             await surface.clear()
 
         deletes = [
             call[2]
             for call in self.provider.calls
-            if call[0] == "delete"
+            if call[0] == "delete_many"
         ]
-        self.assertEqual(deletes, ["$event-1", "$event-2"])
+        self.assertEqual(deletes, [("$event-1",), ("$event-2",)])
 
     async def test_tool_bubble_delete_failure_does_not_block_restoration(
         self,
@@ -441,7 +444,7 @@ class ChatProviderContractTests(unittest.IsolatedAsyncioTestCase):
         with (
             patch.object(
                 self.provider,
-                "delete_message",
+                "delete_messages",
                 AsyncMock(side_effect=RuntimeError("unavailable")),
             ),
             patch("tool_activity.log_exception") as logged,
@@ -467,7 +470,7 @@ class ChatProviderContractTests(unittest.IsolatedAsyncioTestCase):
         with (
             patch.object(
                 self.provider,
-                "delete_message",
+                "delete_messages",
                 AsyncMock(side_effect=RuntimeError("unavailable")),
             ),
             patch("tool_activity.log_exception") as logged,
@@ -1314,6 +1317,32 @@ class TelegramMultiChatTests(unittest.IsolatedAsyncioTestCase):
 
 
 class TelegramTransportTests(unittest.IsolatedAsyncioTestCase):
+    async def test_bulk_delete_chunks_telegram_requests(self) -> None:
+        import telegram
+
+        provider = telegram.TelegramProvider()
+        message_ids = tuple(range(1, 206))
+        call = AsyncMock(return_value=True)
+
+        with patch.object(telegram, "tg_call", call):
+            await provider.delete_messages("1/42", message_ids)
+
+        self.assertEqual(call.await_count, 3)
+        payloads = [entry.args[1] for entry in call.await_args_list]
+        self.assertEqual(
+            [len(payload["message_ids"]) for payload in payloads],
+            [100, 100, 5],
+        )
+        self.assertTrue(
+            all(payload["chat_id"] == 1 for payload in payloads)
+        )
+        self.assertTrue(
+            all(
+                entry.args[0] == "deleteMessages"
+                for entry in call.await_args_list
+            )
+        )
+
     async def test_poll_deletes_and_discards_activity_topic_input(
         self,
     ) -> None:
