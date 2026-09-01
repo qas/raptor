@@ -6,6 +6,7 @@ from typing import Any
 from chat_provider import (
     ChatEvent,
     ChatProvider,
+    ConversationControlsProvider,
     ConversationId,
     Controls,
     IncomingAction,
@@ -331,6 +332,15 @@ class MultiProvider:
             isinstance(provider, ToolConsoleProvider)
             and provider.supports_tool_console(raw_id)
         )
+
+    def supports_controls(
+        self,
+        conversation_id: ConversationId,
+    ) -> bool:
+        provider, raw_id = self._route_conversation(conversation_id)
+        if isinstance(provider, ConversationControlsProvider):
+            return provider.supports_controls(raw_id)
+        return provider.capabilities.controls
 
     async def create_message(
         self,

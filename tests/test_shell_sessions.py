@@ -131,6 +131,7 @@ class ShellSessionTests(unittest.IsolatedAsyncioTestCase):
             id="shell-1",
             tool_call_id="call-1",
             process_output=publish,
+            max_published_output_chars=10,
             published_output_chars=0,
             output_truncation_published=False,
         )
@@ -149,6 +150,7 @@ class ShellSessionTests(unittest.IsolatedAsyncioTestCase):
             id="shell-1",
             tool_call_id="call-1",
             process_output=blocked,
+            max_published_output_chars=shell_sessions.MAX_TOOL_OUTPUT,
             published_output_chars=0,
             output_truncation_published=False,
         )
@@ -167,6 +169,29 @@ class ShellSessionTests(unittest.IsolatedAsyncioTestCase):
             "shell",
             "output_delivery_error",
         ))
+
+    async def test_unbounded_process_projection_does_not_retain_output(
+        self,
+    ) -> None:
+        chunks: list[ProcessOutputChunk] = []
+
+        async def publish(chunk: ProcessOutputChunk) -> None:
+            chunks.append(chunk)
+
+        item = types.SimpleNamespace(
+            id="shell-1",
+            tool_call_id="",
+            process_output=publish,
+            max_published_output_chars=None,
+            published_output_chars=0,
+            output_truncation_published=False,
+        )
+        await shell_sessions._publish_output(item, "stdout", "first")
+        await shell_sessions._publish_output(item, "stdout", "second")
+
+        self.assertEqual("".join(chunk.text for chunk in chunks), "firstsecond")
+        self.assertFalse(any(chunk.truncated for chunk in chunks))
+        self.assertEqual(item.published_output_chars, 0)
 
     async def test_audit_failure_prevents_command_start(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -656,6 +681,19 @@ class ShellSessionTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(completed["status"], "completed")
         self.assertIn("tty:hello", completed["stdout"])
+
+    async def test_tty_session_has_stable_terminal_dimensions(self) -> None:
+        result = await run_shell(
+            "printf '%s ' \"$TERM\"; stty size",
+            timeout=2,
+            yield_time_ms=2_000,
+            tty=True,
+            chat_id="telegram:123",
+            parent_session_id="main-1",
+        )
+
+        self.assertEqual(result["status"], "completed")
+        self.assertIn("xterm-256color 24 80", result["stdout"])
 
     async def test_subagent_shell_is_scoped_to_root_session(self) -> None:
         launched = AsyncMock(return_value={"ok": True})

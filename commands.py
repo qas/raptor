@@ -13,6 +13,7 @@ from application_control import (
 )
 from chat_format import bash_console_block
 from chat_provider import ConversationId
+from console_follow import start_follow_console
 from chat_store import (
     TruncationCleanupError,
     append_meta,
@@ -453,6 +454,7 @@ async def command(
                 "/todos - show todo list\n"
                 "/subagents - show subagent status\n"
                 "/console <command> - run a bounded managed shell command\n"
+                "/console -f <command> - follow output until exit or Stop\n"
                 "/shutdown - stop Raptor after cleanup\n"
                 "/restart - restart Raptor after cleanup\n"
                 "/goal - show persistent goal\n"
@@ -465,7 +467,28 @@ async def command(
 
     if cmd == "/console":
         if not arg:
-            await send(chat_id, "Usage: /console <command>")
+            await send(
+                chat_id,
+                "Usage: /console [-f|--follow] <command>",
+            )
+            return True
+        follow = False
+        for option in ("-f", "--follow"):
+            if arg == option:
+                await send(
+                    chat_id,
+                    "Usage: /console [-f|--follow] <command>",
+                )
+                return True
+            prefix = option + " "
+            if arg.startswith(prefix):
+                follow = True
+                arg = arg[len(prefix):].lstrip()
+                break
+        if follow:
+            error = await start_follow_console(chat_id, arg)
+            if error:
+                await send(chat_id, error)
             return True
         await _run_console_command(chat_id, arg)
         return True

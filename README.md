@@ -179,6 +179,7 @@ the daemon (the launch workspace's `.raptor` directory by default).
 | `/todos` | Show the active execution plan |
 | `/subagents` | Show subagent status, model provider, and model |
 | `/console <command>` | Run one bounded command in the managed shell sandbox |
+| `/console -f <command>` | Follow live output until exit or Stop |
 | `/shutdown` | Clean up owned work and stop the Raptor process |
 | `/restart` | Clean up owned work and replace the Raptor process |
 | `/goal` | Inspect or manage the persistent goal |
@@ -197,7 +198,10 @@ command. It applies the configured filesystem policy, records the exact
 command in the shell audit log, and bounds retained output. Sandbox preparation
 has a 60-second limit. After the command starts, it has a 20-second execution
 limit. Results use a fenced Bash block containing the command and its output.
-A console command never becomes background work.
+`/console -f` (or `--follow`) instead edits one live terminal message until the
+command exits or the operator presses Stop. Raptor owns at most one followed
+console, bounds its retained screen, and stops it during shutdown. Neither mode
+bypasses the configured sandbox or filesystem policy.
 
 `/shutdown` pauses an active goal, cleans up owned turns, subagents, and shell
 processes, and then exits. A stopped process cannot receive chat commands. To

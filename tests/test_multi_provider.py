@@ -270,6 +270,17 @@ class MultiProviderTests(unittest.IsolatedAsyncioTestCase):
             multi.supports_tool_console("responses_api:api:default")
         )
 
+    def test_control_support_routes_to_native_provider(self) -> None:
+        without_controls = QueueProvider("plain", "room")
+        without_controls.capabilities = ProviderCapabilities()
+        multi = MultiProvider((without_controls, self.api))
+        self.addAsyncCleanup(multi.close)
+
+        self.assertFalse(multi.supports_controls("plain:room"))
+        self.assertTrue(
+            multi.supports_controls("responses_api:api:default")
+        )
+
     async def test_close_logs_each_provider_failure(self) -> None:
         with (
             patch.object(

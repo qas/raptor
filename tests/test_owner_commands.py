@@ -169,6 +169,28 @@ class OwnerCommandTests(unittest.IsolatedAsyncioTestCase):
             "```bash\n$ whoami\noperator\n```",
         )
 
+    async def test_console_follow_starts_without_blocking_dispatch(self) -> None:
+        follow = AsyncMock(return_value=None)
+        with patch.object(commands, "start_follow_console", follow):
+            handled = await commands.command(
+                1,
+                "/console --follow watch -n 2 whoami",
+            )
+
+        self.assertTrue(handled)
+        follow.assert_awaited_once_with(1, "watch -n 2 whoami")
+
+    async def test_console_follow_requires_a_command(self) -> None:
+        send = AsyncMock()
+        with patch.object(commands, "send", send):
+            handled = await commands.command(1, "/console -f")
+
+        self.assertTrue(handled)
+        send.assert_awaited_once_with(
+            1,
+            "Usage: /console [-f|--follow] <command>",
+        )
+
     def test_console_result_preserves_failure_details(self) -> None:
         rendered = commands._format_console_result(
             "false",

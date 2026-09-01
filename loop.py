@@ -12,6 +12,7 @@ from chat_runtime import capture_delivery_context, get_chat_provider
 from chat_store import append_meta
 from commands import command
 from config import MAX_PENDING_STEERS
+from console_follow import handle_follow_console_action
 from controller import start_root_session
 from presentation import clear_steering_indicator, steering_indicator
 from session import StateCapacityError, state, steer_queue
@@ -62,6 +63,8 @@ async def handle_event(event: ChatEvent) -> None:
         return
 
     if isinstance(event, IncomingAction):
+        if await handle_follow_console_action(event):
+            return
         if await handle_tool_activity_action(event):
             return
         if await handle_thread_action(event):

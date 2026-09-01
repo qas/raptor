@@ -37,6 +37,7 @@ from config import (
     model_context_input_budget,
 )
 from controller import ensure_root_session, interrupt_root_turn
+from console_follow import close_follow_console
 from goals import goal_is_active, pause_goal, prepare_goal_on_startup
 from loop import COMMANDS, accepts_event, handle_event
 from network import outbound_http_client
@@ -274,6 +275,7 @@ async def main(on_ready: Callable[[], None] | None = None) -> None:
                 await asyncio.sleep(2)
 
     finally:
+        await _cleanup("close followed console", close_follow_console())
         for runtime in session.all_chat_runtimes():
             with session.bound_runtime(runtime):
                 try:

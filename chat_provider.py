@@ -88,6 +88,16 @@ class ToolConsoleProvider(Protocol):
 
 
 @runtime_checkable
+class ConversationControlsProvider(Protocol):
+    """Optional per-conversation interactive-control capability."""
+
+    def supports_controls(
+        self,
+        conversation_id: ConversationId,
+    ) -> bool: ...
+
+
+@runtime_checkable
 class ChatProvider(Protocol):
     """Capabilities required by the agent framework from a chat backend."""
 

@@ -3,13 +3,16 @@
 import asyncio
 import codecs
 import errno
+import fcntl
 import json
 import os
 import pty
 import secrets
 import signal
+import struct
 import sys
 import tempfile
+import termios
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -41,6 +44,9 @@ PROCESS_OUTPUT_DELIVERY_TIMEOUT_SECONDS = 5.0
 TERMINATION_GRACE_SECONDS = 2.0
 MAX_RETAINED_SESSIONS = 50
 MAX_LIVE_SESSIONS = 64
+PTY_ROWS = 24
+PTY_COLUMNS = 80
+PTY_TERM = "xterm-256color"
 _SUPERVISOR_PATH = Path(__file__).with_name("shell_supervisor.py")
 _SUPERVISOR_EXECUTABLE = os.path.realpath(sys.executable)
 ProcessOutputCallback = Callable[[ProcessOutputChunk], Awaitable[None]]
@@ -127,6 +133,8 @@ class ShellSession:
     completion_attempts: int = 0
     tool_call_id: str = ""
     process_output: ProcessOutputCallback | None = None
+    max_published_output_chars: int | None = MAX_TOOL_OUTPUT
+    queue_completion_event: bool = True
     published_output_chars: int = 0
     output_truncation_published: bool = False
     stdout: HeadTailBuffer = field(default_factory=HeadTailBuffer)
@@ -176,19 +184,25 @@ async def _publish_output(
     text: str,
 ) -> None:
     callback = session.process_output
-    remaining = MAX_TOOL_OUTPUT - session.published_output_chars
     if callback is None or not text:
         return
-    truncated = len(text) > remaining
-    if remaining <= 0:
-        if session.output_truncation_published:
-            return
-        bounded = ""
-        truncated = True
+    limit = session.max_published_output_chars
+    if limit is None:
+        bounded = text
+        truncated = False
     else:
-        bounded = text[:remaining]
-    session.published_output_chars += len(bounded)
-    session.output_truncation_published = truncated
+        remaining = limit - session.published_output_chars
+        truncated = len(text) > remaining
+        if remaining <= 0:
+            if session.output_truncation_published:
+                return
+            bounded = ""
+            truncated = True
+        else:
+            bounded = text[:remaining]
+    if limit is not None:
+        session.published_output_chars += len(bounded)
+        session.output_truncation_published = truncated
     try:
         await asyncio.wait_for(
             callback(
@@ -385,6 +399,7 @@ async def _monitor(
             session.detached
             and session.chat_id != ""
             and session.status != "cancelled"
+            and session.queue_completion_event
         ):
             session.completion_pending = True
             _queue_shell_completion(session.id)
@@ -524,6 +539,8 @@ async def run_shell(
     parent_session_id: str | None,
     tool_call_id: str = "",
     process_output: ProcessOutputCallback | None = None,
+    max_published_output_chars: int | None = MAX_TOOL_OUTPUT,
+    queue_completion_event: bool = True,
 ) -> dict[str, Any]:
     runtime = runtime_session.current_runtime()
     if (
@@ -596,6 +613,11 @@ async def run_shell(
         ready_read_fd, ready_write_fd = os.pipe()
         if tty:
             master_fd, slave_fd = pty.openpty()
+            fcntl.ioctl(
+                slave_fd,
+                termios.TIOCSWINSZ,
+                struct.pack("HHHH", PTY_ROWS, PTY_COLUMNS, 0, 0),
+            )
             try:
                 try:
                     process = await asyncio.create_subprocess_exec(
@@ -609,6 +631,7 @@ async def run_shell(
                         stdin=slave_fd,
                         stdout=slave_fd,
                         stderr=slave_fd,
+                        env={**os.environ, "TERM": PTY_TERM},
                         start_new_session=True,
                         pass_fds=(
                             liveness_read_fd,
@@ -692,6 +715,8 @@ async def run_shell(
         liveness_write_fd=liveness_write_fd,
         tool_call_id=tool_call_id,
         process_output=process_output,
+        max_published_output_chars=max_published_output_chars,
+        queue_completion_event=queue_completion_event,
     )
     _sessions[shell_session.id] = shell_session
     stdout_task = asyncio.create_task(
@@ -754,6 +779,21 @@ async def run_shell(
     if not shell_session.detached:
         result["session_id"] = None
     return result
+
+
+async def wait_shell_session(session_id: str) -> dict[str, Any]:
+    """Wait for one owned shell session without blocking cancellation."""
+    shell_session = _require_owned_session(session_id)
+    if shell_session is None:
+        return {"ok": False, "error": f"unknown shell session: {session_id}"}
+    await shell_session.done.wait()
+    if shell_session.monitor_task is not None:
+        await asyncio.gather(
+            shell_session.monitor_task,
+            return_exceptions=True,
+        )
+    shell_session.completion_pending = False
+    return _result(shell_session, drain=False)
 
 
 async def write_stdin(args: dict[str, Any]) -> dict[str, Any]:
