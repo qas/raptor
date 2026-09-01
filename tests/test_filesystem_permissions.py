@@ -37,7 +37,7 @@ class FileAccessPolicyTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "unique"):
                 FileAccessPolicy.create(Path(directory), [".env", " .env "])
 
-    def test_glob_expansion_fails_closed_at_depth_limit(self) -> None:
+    def test_glob_expansion_masks_subtree_at_depth_limit(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory).resolve()
             (root / ".env").write_text("root")
@@ -50,8 +50,48 @@ class FileAccessPolicyTests(unittest.TestCase):
                 glob_scan_max_depth=1,
             )
 
-            with self.assertRaisesRegex(RuntimeError, "exceeded depth"):
-                policy.prepare_denied_paths()
+            denied = policy.prepare_denied_paths()
+
+            self.assertEqual(
+                denied,
+                (
+                    filesystem_permissions.PreparedDeniedPath(
+                        root / ".env", False
+                    ),
+                    filesystem_permissions.PreparedDeniedPath(
+                        root / "one" / "two", False
+                    ),
+                ),
+            )
+
+    def test_glob_expansion_masks_unreadable_subtree(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            restricted = root / "restricted"
+            restricted.mkdir()
+            real_scandir = filesystem_permissions.os.scandir
+
+            def scandir(path: str | Path):
+                if Path(path) == restricted:
+                    raise PermissionError("restricted")
+                return real_scandir(path)
+
+            policy = FileAccessPolicy.create(root, ["**/.env"])
+            with patch.object(
+                filesystem_permissions.os,
+                "scandir",
+                side_effect=scandir,
+            ):
+                denied = policy.prepare_denied_paths()
+
+            self.assertEqual(
+                denied,
+                (
+                    filesystem_permissions.PreparedDeniedPath(
+                        restricted, False
+                    ),
+                ),
+            )
 
     def test_glob_expansion_follows_directory_symlink(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

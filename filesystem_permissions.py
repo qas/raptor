@@ -254,23 +254,35 @@ class FileAccessPolicy:
     def prepare_denied_paths(self) -> tuple[PreparedDeniedPath, ...]:
         prepared: dict[Path, bool] = {}
         scanned = 0
+
+        def deny_path(path: Path, *, exact: bool = False) -> None:
+            resolved = path.resolve(strict=False)
+            prepared[resolved] = prepared.get(resolved, False) or exact
+            if len(prepared) > MAX_DENY_READ_MATCHES:
+                raise RuntimeError(
+                    "deny-read patterns matched more than "
+                    f"{MAX_DENY_READ_MATCHES} paths"
+                )
+
         for pattern in self.patterns:
             if not pattern.has_glob:
-                prepared[Path(pattern.absolute).resolve(strict=False)] = True
+                deny_path(Path(pattern.absolute), exact=True)
                 continue
             root = pattern.scan_root
-            if not root.exists():
-                continue
-            if pattern.matches(root):
-                resolved_root = root.resolve(strict=False)
-                prepared[resolved_root] = prepared.get(resolved_root, False)
-                continue
             try:
                 root_metadata = root.stat()
+            except (FileNotFoundError, NotADirectoryError):
+                continue
+            except PermissionError:
+                deny_path(root)
+                continue
             except OSError as exc:
                 raise RuntimeError(
                     f"cannot inspect deny-read glob root: {root}"
                 ) from exc
+            if pattern.matches(root):
+                deny_path(root)
+                continue
             root_identity = (root_metadata.st_dev, root_metadata.st_ino)
             root_states = _prefix_match_states(pattern.parts, root.parts)
             visited = {(root_identity, root_states)}
@@ -281,10 +293,9 @@ class FileAccessPolicy:
                     children = os.scandir(directory)
                 except (NotADirectoryError, FileNotFoundError):
                     continue
-                except PermissionError as exc:
-                    raise RuntimeError(
-                        f"cannot scan deny-read glob directory: {directory}"
-                    ) from exc
+                except PermissionError:
+                    deny_path(directory)
+                    continue
                 with children:
                     for child in children:
                         scanned += 1
@@ -295,15 +306,10 @@ class FileAccessPolicy:
                             )
                         child_path = Path(child.path)
                         if pattern.matches(child_path):
-                            resolved_child = child_path.resolve(strict=False)
-                            prepared[resolved_child] = prepared.get(
-                                resolved_child, False
-                            ) or child.is_symlink()
-                            if len(prepared) > MAX_DENY_READ_MATCHES:
-                                raise RuntimeError(
-                                    "deny-read patterns matched more than "
-                                    f"{MAX_DENY_READ_MATCHES} paths"
-                                )
+                            deny_path(
+                                child_path,
+                                exact=child.is_symlink(),
+                            )
                             continue
                         could_match_below = _could_match_descendant(
                             pattern.parts, child_path.parts
@@ -323,6 +329,9 @@ class FileAccessPolicy:
                             continue
                         try:
                             child_metadata = child.stat(follow_symlinks=True)
+                        except PermissionError:
+                            deny_path(child_path)
+                            continue
                         except OSError as exc:
                             raise RuntimeError(
                                 "cannot inspect deny-read glob directory: "
@@ -339,10 +348,8 @@ class FileAccessPolicy:
                         if visit_key in visited:
                             continue
                         if depth >= self.glob_scan_max_depth:
-                            raise RuntimeError(
-                                "deny-read glob scan exceeded depth "
-                                f"{self.glob_scan_max_depth}"
-                            )
+                            deny_path(child_path)
+                            continue
                         visited.add(visit_key)
                         stack.append((child_path, depth + 1))
         selected: list[PreparedDeniedPath] = []
