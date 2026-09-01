@@ -1,4 +1,4 @@
-"""Tests for the transcript-free ``/ask`` side channel."""
+"""Tests for transcript-free isolated tasks."""
 import copy
 import contextlib
 import asyncio
@@ -10,7 +10,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 _ROOT = Path(__file__).resolve().parent.parent
-_HOME = Path(tempfile.mkdtemp(prefix="raptor-ask-tests-"))
+_HOME = Path(tempfile.mkdtemp(prefix="raptor-task-tests-"))
 os.environ["TG_BOT_TOKEN"] = "test-token"
 os.environ["TG_USER_ID"] = "1"
 os.environ["RAPTOR_HOME"] = str(_HOME)
@@ -44,10 +44,10 @@ class _Client:
         return _Response()
 
 
-class StatelessAskTests(unittest.IsolatedAsyncioTestCase):
+class StatelessTaskTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         session.set_default_model_target(ModelTarget("local", "model-a"))
-        session.set_default_chat("ask-tests")
+        session.set_default_chat("task-tests")
         self._chat_dir = Path(tempfile.mkdtemp(prefix="chats-"))
         self._chat_patch = patch.object(
             chat_store,
@@ -148,7 +148,7 @@ class StatelessAskTests(unittest.IsolatedAsyncioTestCase):
                 side_effect=lambda *_args: contextlib.nullcontext(),
             ),
         ):
-            handled = await commands.command(1, "/ask side question")
+            handled = await commands.command(1, "/task side question")
             task = session.current_runtime().turns.task
             self.assertIsNotNone(task)
             await task
@@ -200,7 +200,7 @@ class StatelessAskTests(unittest.IsolatedAsyncioTestCase):
                 side_effect=lambda *_args: contextlib.nullcontext(),
             ),
         ):
-            handled = await commands.command(1, "/ask inspect the readme")
+            handled = await commands.command(1, "/task inspect the readme")
             task = session.current_runtime().turns.task
             self.assertIsNotNone(task)
             await task
@@ -249,7 +249,7 @@ class StatelessAskTests(unittest.IsolatedAsyncioTestCase):
             ),
         ):
             handled = await asyncio.wait_for(
-                commands.command(1, "/ask side question"), timeout=0.1
+                commands.command(1, "/task side question"), timeout=0.1
             )
             await started.wait()
             task = session.current_runtime().turns.task

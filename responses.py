@@ -534,7 +534,7 @@ def build_stateless_response_payload(
     extra_instructions: str = "",
     reasoning_effort: str | None = None,
 ) -> dict[str, Any]:
-    """Build an identity-aware request for the in-memory ``/ask`` loop."""
+    """Build an identity-aware request for an isolated in-memory task."""
     validate_chronological_input(input_items)
     payload: dict[str, Any] = {
         "model": model,

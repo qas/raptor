@@ -200,7 +200,7 @@ async def _run_console_command(
         )
 
 
-async def _run_stateless_ask(
+async def _run_stateless_task(
     chat_id: ConversationId,
     prompt: str,
     delivery_context: object,
@@ -211,14 +211,14 @@ async def _run_stateless_ask(
             tool_activity = ToolActivitySurface(chat_id)
             try:
                 target = session.current_model_target()
-                ask_instructions = await skill_catalog_instructions()
+                task_instructions = await skill_catalog_instructions()
                 work: list[dict] = [{"role": "user", "content": prompt}]
                 tool_rounds = 0
                 while True:
                     response = await stateless_response(
                         target,
                         work,
-                        extra_instructions=ask_instructions,
+                        extra_instructions=task_instructions,
                     )
                     output = response_output(response)
                     calls = response_calls(response)
@@ -441,7 +441,7 @@ async def command(
                 "/stop all - also stop background agents and shells\n"
                 "/compact - compact context\n"
                 "/truncate <n> - remove the last n user turns\n"
-                "/ask <message> - isolated tool-capable query\n"
+                "/task <message> - run an isolated tool-capable task\n"
                 "/thread - fork into a temporary conversation\n"
                 "/thread <message> - fork or continue, then send\n"
                 "/thread status|clear|merge\n"
@@ -514,17 +514,17 @@ async def command(
         request_application_exit(request)
         return True
 
-    if cmd == "/ask":
+    if cmd == "/task":
         if not arg:
-            await send(chat_id, "Usage: /ask <message>")
+            await send(chat_id, "Usage: /task <message>")
             return True
         if turns.is_running():
             await send(chat_id, "The agent is already running. Use /stop first.")
             return True
         delivery_context = capture_delivery_context(chat_id)
         turns.start(
-            _run_stateless_ask(chat_id, arg, delivery_context),
-            kind=TurnKind.STATELESS_ASK,
+            _run_stateless_task(chat_id, arg, delivery_context),
+            kind=TurnKind.STATELESS_TASK,
         )
         return True
 

@@ -27,7 +27,7 @@ COMMANDS: tuple[tuple[str, str], ...] = (
     ("new", "New session"),
     ("chats", "List or search sessions"),
     ("resume", "Resume a prior session"),
-    ("ask", "Ask without session context"),
+    ("task", "Run an isolated task"),
     ("thread", "Temporary conversation branch"),
     ("status", "Show status"),
     ("stop", "Abort current run"),

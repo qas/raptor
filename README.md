@@ -164,7 +164,7 @@ the daemon (the launch workspace's `.raptor` directory by default).
 | `/new` | Archive the current session and create a clean one |
 | `/chats [term]` | List recent chats, or find chats containing a term |
 | `/resume <session-id>` | Resume a prior main chat by its full ID |
-| `/ask <message>` | Run a stateless side query without changing conversation history |
+| `/task <message>` | Run isolated tool-capable work outside conversation history |
 | `/thread` | Fork a temporary conversation branch |
 | `/thread clear` | Discard the branch and return to its parent |
 | `/thread merge` | Merge branch-native conversation items into its parent |
@@ -186,11 +186,11 @@ the daemon (the launch workspace's `.raptor` directory by default).
 | `/goal` | Inspect or manage the persistent goal |
 | `/help` | Show available commands |
 
-`/ask` runs without prior conversation or active-goal context. It uses the same
+`/task` runs without prior conversation or active-goal context. It uses the same
 base instructions, workspace `AGENTS.md` and `MEMORY.md` files, and discovered
-skill catalog as a normal agent turn. The query can use standard tools for
+skill catalog as a normal agent turn. The task can use standard tools for
 multiple in-memory rounds, but Raptor does not add its model exchange or answer
-to the canonical transcript. Tool side effects still apply. The query runs as
+to the canonical transcript. Tool side effects still apply. The task runs as
 the chat's owned turn, so chat-provider polling remains responsive and `/stop`
 can cancel it.
 
@@ -337,7 +337,7 @@ bubble streams arguments while Raptor prepares the call, then changes to
 When approval is enabled, Raptor adds Approve and Deny controls before
 execution. Terminal bubbles remain visible during the turn. Raptor removes
 them before it sends the final answer. Tool activity never replaces an active
-thread or goal pin. `/ask` uses the same lifecycle after its non-streaming model
+thread or goal pin. `/task` uses the same lifecycle after its non-streaming model
 response produces a tool call. On Telegram, shell bubbles open in `Console`,
 which streams the latest seven output lines; one button toggles between that
 view and `Info`. Empty `write_stdin` polls edit one waiting bubble every five

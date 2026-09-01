@@ -17,7 +17,7 @@ INTERRUPT_GRACE_SECONDS = 3.0
 class TurnKind(StrEnum):
     REGULAR = "regular"
     MANUAL_COMPACTION = "manual_compaction"
-    STATELESS_ASK = "stateless_ask"
+    STATELESS_TASK = "stateless_task"
 
 
 @dataclass(frozen=True)

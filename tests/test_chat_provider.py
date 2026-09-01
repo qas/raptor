@@ -1439,14 +1439,14 @@ class ChatProviderContractTests(unittest.IsolatedAsyncioTestCase):
             turns.finish(blocker)
             session.pending_steers.clear()
 
-    async def test_ask_prompt_is_not_copied_into_event_log(self) -> None:
+    async def test_task_prompt_is_not_copied_into_event_log(self) -> None:
         from loop import handle_event
 
         event = IncomingMessage(
             conversation_id="!room:example.org",
             sender_id="@operator:example.org",
             message_id="$message",
-            text="/ask private side question",
+            text="/task private side question",
         )
         with (
             patch("loop.command", AsyncMock(return_value=True)),
@@ -1455,7 +1455,7 @@ class ChatProviderContractTests(unittest.IsolatedAsyncioTestCase):
             await handle_event(event)
 
         received = logged.call_args.args[2]
-        self.assertEqual(received["command"], "/ask")
+        self.assertEqual(received["command"], "/task")
         self.assertNotIn("text", received)
 
     async def test_unknown_normalized_action_is_acknowledged(self) -> None:
