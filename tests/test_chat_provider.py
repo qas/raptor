@@ -345,9 +345,13 @@ class ChatProviderContractTests(unittest.IsolatedAsyncioTestCase):
             controls = created[4]
             self.assertEqual(
                 [button.label for button in controls[0]],
-                ["Info", "Console"],
+                ["Info"],
             )
-            console_action = controls[0][1].action
+            self.assertEqual(
+                created[3],
+                "```bash\n$ python -m unittest\n```",
+            )
+            info_action_data = controls[0][0].action
             await surface.publish_process_output(
                 ProcessOutputChunk(
                     call_id="c1",
@@ -356,18 +360,9 @@ class ChatProviderContractTests(unittest.IsolatedAsyncioTestCase):
                     text="".join(f"line {line}\n" for line in range(1, 10)),
                 )
             )
-            self.assertFalse(
-                any(call[0] == "edit" for call in self.provider.calls)
-            )
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
 
-            action = IncomingAction(
-                action_id="callback-1",
-                conversation_id="!room:example.org",
-                sender_id="@operator:example.org",
-                message_id="$event-1",
-                data=console_action,
-            )
-            self.assertTrue(await handle_tool_activity_action(action))
             console_text = next(
                 call[3]
                 for call in reversed(self.provider.calls)
@@ -380,6 +375,29 @@ class ChatProviderContractTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("line 2\n", console_text)
             self.assertTrue(console_text.endswith("line 9\n```"))
 
+            info_action = IncomingAction(
+                action_id="callback-1",
+                conversation_id="!room:example.org",
+                sender_id="@operator:example.org",
+                message_id="$event-1",
+                data=info_action_data,
+            )
+            self.assertTrue(await handle_tool_activity_action(info_action))
+            info_edit = next(
+                call
+                for call in reversed(self.provider.calls)
+                if call[0] == "edit"
+            )
+            self.assertTrue(info_edit[3].startswith("Running\n\nTool: shell"))
+            self.assertEqual(
+                [button.label for button in info_edit[4][0]],
+                ["Console"],
+            )
+            console_action_data = info_edit[4][0][0].action
+
+            edits_before_output = sum(
+                call[0] == "edit" for call in self.provider.calls
+            )
             await surface.publish_process_output(
                 ProcessOutputChunk(
                     call_id="c1",
@@ -390,6 +408,19 @@ class ChatProviderContractTests(unittest.IsolatedAsyncioTestCase):
             )
             await asyncio.sleep(0)
             await asyncio.sleep(0)
+            self.assertEqual(
+                sum(call[0] == "edit" for call in self.provider.calls),
+                edits_before_output,
+            )
+
+            console_action = IncomingAction(
+                action_id="callback-2",
+                conversation_id="!room:example.org",
+                sender_id="@operator:example.org",
+                message_id="$event-1",
+                data=console_action_data,
+            )
+            self.assertTrue(await handle_tool_activity_action(console_action))
             streamed_text = next(
                 call[3]
                 for call in reversed(self.provider.calls)
@@ -398,21 +429,6 @@ class ChatProviderContractTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("line 4", streamed_text)
             self.assertNotIn("line 3\n", streamed_text)
             self.assertTrue(streamed_text.endswith("line 10\n```"))
-
-            info_action = IncomingAction(
-                action_id="callback-2",
-                conversation_id="!room:example.org",
-                sender_id="@operator:example.org",
-                message_id="$event-1",
-                data=controls[0][0].action,
-            )
-            self.assertTrue(await handle_tool_activity_action(info_action))
-            info_text = next(
-                call[3]
-                for call in reversed(self.provider.calls)
-                if call[0] == "edit"
-            )
-            self.assertTrue(info_text.startswith("Running\n\nTool: shell"))
 
             await surface.finished(call, {"ok": True})
             await surface.clear()
@@ -427,7 +443,7 @@ class ChatProviderContractTests(unittest.IsolatedAsyncioTestCase):
             edits_before_stale_action = sum(
                 call[0] == "edit" for call in self.provider.calls
             )
-            await handle_tool_activity_action(action)
+            await handle_tool_activity_action(info_action)
 
         self.assertIn(
             ("delete_many", "!room:example.org", ("$event-1",)),
@@ -450,10 +466,7 @@ class ChatProviderContractTests(unittest.IsolatedAsyncioTestCase):
     async def test_completed_tool_consoles_keep_independent_output(
         self,
     ) -> None:
-        from tool_activity import (
-            ToolActivitySurface,
-            handle_tool_activity_action,
-        )
+        from tool_activity import ToolActivitySurface
 
         self.provider = ConsoleFakeProvider()
         set_chat_provider(self.provider)
@@ -471,7 +484,6 @@ class ChatProviderContractTests(unittest.IsolatedAsyncioTestCase):
             },
         )
         commands = ("first", "second")
-
         for index, call in enumerate(calls, start=1):
             await surface.running(call)
             await surface.publish_process_output(
@@ -484,18 +496,7 @@ class ChatProviderContractTests(unittest.IsolatedAsyncioTestCase):
             )
             await surface.finished(call, {"ok": True})
 
-        created = [
-            call for call in self.provider.calls if call[0] == "create"
-        ]
-        for index, create in enumerate(created, start=1):
-            action = IncomingAction(
-                action_id=f"callback-{index}",
-                conversation_id="!room:example.org",
-                sender_id="@operator:example.org",
-                message_id=f"$event-{index}",
-                data=create[4][0][1].action,
-            )
-            await handle_tool_activity_action(action)
+        for index in range(1, 3):
             projected = next(
                 call[3]
                 for call in reversed(self.provider.calls)
@@ -503,6 +504,7 @@ class ChatProviderContractTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertIn(f"$ {commands[index - 1]}", projected)
             self.assertIn(f"output {index}", projected)
+            self.assertNotIn(f"output {3 - index}", projected)
 
         await surface.clear()
 
@@ -521,6 +523,166 @@ class ChatProviderContractTests(unittest.IsolatedAsyncioTestCase):
         await surface.clear()
 
         self.assertEqual(self.provider.calls[0][4], ())
+
+    async def test_denied_shell_stays_on_info_without_running(self) -> None:
+        from tool_activity import ToolActivitySurface
+
+        self.provider = ConsoleFakeProvider()
+        set_chat_provider(self.provider)
+        surface = ToolActivitySurface("!room:example.org")
+        call = {
+            "name": "shell",
+            "call_id": "c1",
+            "arguments": '{"command":"rm protected"}',
+        }
+
+        await surface.approval(
+            call,
+            ((
+                ActionButton("Approve", "approve"),
+                ActionButton("Deny", "deny"),
+            ),),
+        )
+        await surface.finished(
+            call,
+            {"ok": False, "approval": "denied"},
+        )
+        await surface.clear()
+
+        terminal = next(
+            item
+            for item in reversed(self.provider.calls)
+            if item[0] == "edit"
+        )
+        self.assertEqual(
+            terminal[3],
+            "Failed\n\nTool: shell\n\nCommand denied",
+        )
+        self.assertEqual(terminal[4], ())
+
+    async def test_telegram_poll_wait_edits_one_bubble_to_zero(self) -> None:
+        from tool_activity import ToolActivitySurface, _wait_duration
+
+        self.assertEqual(_wait_duration(300), "5m")
+        self.assertEqual(_wait_duration(295), "4m 55s")
+        self.provider = ConsoleFakeProvider()
+        set_chat_provider(self.provider)
+        surface = ToolActivitySurface("!room:example.org")
+        call = {
+            "name": "write_stdin",
+            "call_id": "c1",
+            "arguments": (
+                '{"session_id":"shell-1","yield_time_ms":300000}'
+            ),
+        }
+
+        with (
+            patch(
+                "shell_sessions.write_stdin_wait_ms",
+                return_value=20,
+            ),
+            patch("tool_activity.WAIT_UPDATE_INTERVAL_SECONDS", 0.01),
+            patch("tool_activity.CHAT_STREAM_INTERVAL", 0),
+        ):
+            await surface.running(call)
+            self.assertEqual(self.provider.calls[0][3], "Waiting 1s")
+            await asyncio.sleep(0.04)
+            await surface.finished(call, {"ok": True, "status": "running"})
+            await surface.clear()
+
+        projections = [
+            item
+            for item in self.provider.calls
+            if item[0] in {"create", "edit"}
+        ]
+        self.assertTrue(any(item[3] == "Waiting 0s" for item in projections))
+        self.assertTrue(all(item[2] == "$event-1" for item in projections))
+        self.assertEqual(projections[0][4], ())
+        self.assertIn(
+            ("delete_many", "!room:example.org", ("$event-1",)),
+            self.provider.calls,
+        )
+
+    async def test_telegram_poll_wait_stops_on_early_completion(self) -> None:
+        from tool_activity import ToolActivitySurface
+
+        self.provider = ConsoleFakeProvider()
+        set_chat_provider(self.provider)
+        surface = ToolActivitySurface("!room:example.org")
+        call = {
+            "name": "write_stdin",
+            "call_id": "c1",
+            "arguments": '{"session_id":"shell-1"}',
+        }
+
+        with (
+            patch(
+                "shell_sessions.write_stdin_wait_ms",
+                return_value=100,
+            ),
+            patch("tool_activity.WAIT_UPDATE_INTERVAL_SECONDS", 0.01),
+        ):
+            await surface.running(call)
+            await surface.finished(
+                call,
+                {"ok": True, "status": "completed"},
+            )
+            edit_count = sum(
+                item[0] == "edit" for item in self.provider.calls
+            )
+            await asyncio.sleep(0.12)
+            self.assertEqual(
+                sum(item[0] == "edit" for item in self.provider.calls),
+                edit_count,
+            )
+            await surface.clear()
+
+        terminal = next(
+            item[3]
+            for item in reversed(self.provider.calls)
+            if item[0] == "edit"
+        )
+        self.assertEqual(terminal, "Command completed")
+
+    async def test_write_stdin_input_keeps_normal_tool_activity(self) -> None:
+        from tool_activity import ToolActivitySurface
+
+        self.provider = ConsoleFakeProvider()
+        set_chat_provider(self.provider)
+        surface = ToolActivitySurface("!room:example.org")
+        call = {
+            "name": "write_stdin",
+            "call_id": "c1",
+            "arguments": '{"session_id":"shell-1","chars":"yes\\n"}',
+        }
+
+        await surface.running(call)
+        await surface.clear()
+
+        self.assertTrue(
+            self.provider.calls[0][3].startswith(
+                "Running\n\nTool: write_stdin"
+            )
+        )
+
+    async def test_poll_wait_presentation_is_provider_opt_in(self) -> None:
+        from tool_activity import ToolActivitySurface
+
+        surface = ToolActivitySurface("!room:example.org")
+        call = {
+            "name": "write_stdin",
+            "call_id": "c1",
+            "arguments": '{"session_id":"shell-1"}',
+        }
+
+        await surface.running(call)
+        await surface.clear()
+
+        self.assertTrue(
+            self.provider.calls[0][3].startswith(
+                "Running\n\nTool: write_stdin"
+            )
+        )
 
     async def test_child_tool_activity_uses_same_unpinned_bubble(self) -> None:
         from tool_activity import ToolActivitySurface

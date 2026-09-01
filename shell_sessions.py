@@ -46,6 +46,19 @@ _SUPERVISOR_EXECUTABLE = os.path.realpath(sys.executable)
 ProcessOutputCallback = Callable[[ProcessOutputChunk], Awaitable[None]]
 
 
+def write_stdin_wait_ms(args: dict[str, Any]) -> int:
+    """Return the bounded wait used by one shell-session interaction."""
+    chars = str(args.get("chars") or "")
+    requested = int(
+        args.get("yield_time_ms")
+        if args.get("yield_time_ms") is not None
+        else DEFAULT_WRITE_TIME_MS if chars else DEFAULT_POLL_TIME_MS
+    )
+    if chars:
+        return min(MAX_WRITE_TIME_MS, max(MIN_YIELD_TIME_MS, requested))
+    return min(MAX_POLL_TIME_MS, max(MIN_POLL_TIME_MS, requested))
+
+
 def supervisor_argv() -> list[str]:
     """Launch the supervisor through this process's original executable."""
     if getattr(sys, "frozen", False):
@@ -754,20 +767,7 @@ async def write_stdin(args: dict[str, Any]) -> dict[str, Any]:
             "ok": False,
             "error": f"shell input exceeds {MAX_TOOL_OUTPUT} characters",
         }
-    requested_yield = int(
-        args.get("yield_time_ms")
-        if args.get("yield_time_ms") is not None
-        else (
-            DEFAULT_WRITE_TIME_MS
-            if chars
-            else DEFAULT_POLL_TIME_MS
-        )
-    )
-    yield_ms = (
-        min(MAX_WRITE_TIME_MS, max(MIN_YIELD_TIME_MS, requested_yield))
-        if chars
-        else min(MAX_POLL_TIME_MS, max(MIN_POLL_TIME_MS, requested_yield))
-    )
+    yield_ms = write_stdin_wait_ms(args)
     async with shell_session.interaction_lock:
         if chars and not shell_session.done.is_set():
             if chars == "\x03":

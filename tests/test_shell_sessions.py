@@ -25,11 +25,30 @@ from shell_sessions import (
     running_shell_sessions,
     supervisor_argv,
     write_stdin,
+    write_stdin_wait_ms,
 )
 from tools import shell_tool
 
 
 class ShellSessionTests(unittest.IsolatedAsyncioTestCase):
+    def test_write_stdin_wait_uses_runtime_defaults_and_limits(self) -> None:
+        self.assertEqual(write_stdin_wait_ms({}), 5_000)
+        self.assertEqual(
+            write_stdin_wait_ms({"yield_time_ms": 999_999}),
+            300_000,
+        )
+        self.assertEqual(
+            write_stdin_wait_ms({"chars": "yes\n"}),
+            250,
+        )
+        self.assertEqual(
+            write_stdin_wait_ms({
+                "chars": "yes\n",
+                "yield_time_ms": 999_999,
+            }),
+            30_000,
+        )
+
     async def asyncSetUp(self) -> None:
         session.set_default_model_target(ModelTarget("local", "test-model"))
         self.runtime_context = session.bound_chat("telegram:123")

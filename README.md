@@ -333,9 +333,11 @@ When approval is enabled, Raptor adds Approve and Deny controls before
 execution. Terminal bubbles remain visible during the turn. Raptor removes
 them before it sends the final answer. Tool activity never replaces an active
 thread or goal pin. `/ask` uses the same lifecycle after its non-streaming model
-response produces a tool call. On Telegram, shell bubbles include `Info` and
-`Console` views; `Console` streams the latest seven output lines. Steering is
-transient and is never pinned.
+response produces a tool call. On Telegram, shell bubbles open in `Console`,
+which streams the latest seven output lines; one button toggles between that
+view and `Info`. Empty `write_stdin` polls edit one waiting bubble every five
+seconds instead of exposing polling arguments. Steering is transient and is
+never pinned.
 
 ### Context and compaction
 
@@ -663,8 +665,9 @@ root-owned `bwrap` (Bubblewrap) executable on `PATH` that is not writable by
 the group or other users. Bubblewrap also requires access to unprivileged user
 namespaces. Ubuntu 24.04 and later restrict that access with AppArmor by
 default. Raptor's installer probes the complete requirement and reports the
-host-policy failure without disabling the protection globally. macOS uses
-`/usr/bin/sandbox-exec`.
+host-policy failure without disabling the protection globally. The installer
+runs that probe through the installed Raptor executable so application-specific
+AppArmor policy is applied. macOS uses `/usr/bin/sandbox-exec`.
 
 #### Ubuntu AppArmor
 
@@ -687,6 +690,7 @@ profile raptor ${RAPTOR_VERSIONS}/*/raptor flags=(unconfined) {
 EOF
 
 sudo apparmor_parser -r /etc/apparmor.d/raptor
+raptor --check-sandbox
 ```
 
 This is an explicit host-security decision. The installer detects the denial

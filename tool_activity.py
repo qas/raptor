@@ -2,11 +2,13 @@
 
 import asyncio
 import json
+import math
 import secrets
 from collections import deque
 from dataclasses import dataclass
 from typing import Any
 
+from chat_format import bash_console_block
 from chat_provider import (
     ActionButton,
     ConversationId,
@@ -18,7 +20,6 @@ from chat_provider import (
     ToolConsoleProvider,
 )
 from chat_runtime import get_chat_provider
-from chat_format import bash_console_block
 from config import CHAT_STREAM_INTERVAL, MAX_TOOL_OUTPUT
 from observability import log_exception
 
@@ -27,6 +28,7 @@ MAX_RETAINED_TOOL_BUBBLES = 64
 MAX_CONSOLE_LINES = 7
 MAX_CONSOLE_COMMAND_CHARS = 900
 MAX_CONSOLE_LINE_CHARS = 300
+WAIT_UPDATE_INTERVAL_SECONDS = 5
 _TOOL_VIEW_PREFIX = "toolview"
 
 
@@ -64,6 +66,32 @@ def _shell_command(call: dict[str, Any]) -> str:
     return str(arguments.get("command") or "")
 
 
+def _poll_wait_ms(call: dict[str, Any]) -> int | None:
+    if call.get("name") != "write_stdin":
+        return None
+    try:
+        arguments = json.loads(str(call.get("arguments") or "{}"))
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(arguments, dict) or str(arguments.get("chars") or ""):
+        return None
+    try:
+        from shell_sessions import write_stdin_wait_ms
+
+        return write_stdin_wait_ms(arguments)
+    except (TypeError, ValueError):
+        return None
+
+
+def _wait_duration(seconds: int) -> str:
+    minutes, remaining = divmod(max(0, seconds), 60)
+    if minutes and remaining:
+        return f"{minutes}m {remaining}s"
+    if minutes:
+        return f"{minutes}m"
+    return f"{remaining}s"
+
+
 @dataclass
 class _ToolBubble:
     token: str
@@ -72,10 +100,16 @@ class _ToolBubble:
     status: str
     controls: Controls = ()
     message_id: MessageId | None = None
-    view: str = "info"
+    view: str = "console"
     output: str = ""
     pending: bool = False
     projection_task: asyncio.Task[None] | None = None
+    wait_seconds: int | None = None
+    wait_deadline: float | None = None
+    wait_task: asyncio.Task[None] | None = None
+    wait_terminal: str | None = None
+    console_available: bool = True
+    terminal_info: str | None = None
 
 
 _tool_views: dict[str, tuple["ToolActivitySurface", _ToolBubble]] = {}
@@ -147,16 +181,12 @@ class ToolActivitySurface:
 
     @staticmethod
     def _console_controls(bubble: _ToolBubble) -> Controls:
-        return ((
-            ActionButton(
-                "Info",
-                f"{_TOOL_VIEW_PREFIX}:{bubble.token}:info",
-            ),
-            ActionButton(
-                "Console",
-                f"{_TOOL_VIEW_PREFIX}:{bubble.token}:console",
-            ),
-        ),)
+        view = "info" if bubble.view == "console" else "console"
+        button = ActionButton(
+            view.title(),
+            f"{_TOOL_VIEW_PREFIX}:{bubble.token}:{view}",
+        )
+        return ((button,),)
 
     @staticmethod
     def _console_text(bubble: _ToolBubble) -> str:
@@ -174,6 +204,7 @@ class ToolActivitySurface:
     def _render(self, bubble: _ToolBubble) -> tuple[str, Controls]:
         supports_console = (
             bubble.call.get("name") == "shell"
+            and bubble.console_available
             and self._supports_console()
         )
         if supports_console:
@@ -181,9 +212,50 @@ class ToolActivitySurface:
         controls = bubble.controls
         if not controls and supports_console:
             controls = self._console_controls(bubble)
-        if supports_console and bubble.view == "console":
+        if (
+            supports_console
+            and not bubble.controls
+            and bubble.view == "console"
+        ):
             return self._console_text(bubble), controls
+        if bubble.terminal_info is not None:
+            return bubble.terminal_info, controls
+        if bubble.wait_terminal is not None:
+            return bubble.wait_terminal, controls
+        if bubble.wait_seconds is not None:
+            return "Waiting " + _wait_duration(bubble.wait_seconds), controls
         return bubble.status + "\n\n" + tool_preview(bubble.call), controls
+
+    async def _animate_wait(self, bubble: _ToolBubble) -> None:
+        deadline = bubble.wait_deadline
+        if deadline is None:
+            return
+        loop = asyncio.get_running_loop()
+        while not self._closed:
+            delay = min(
+                WAIT_UPDATE_INTERVAL_SECONDS,
+                max(0.0, deadline - loop.time()),
+            )
+            if delay:
+                await asyncio.sleep(delay)
+            remaining = max(0, math.ceil(deadline - loop.time()))
+            if remaining == bubble.wait_seconds:
+                if not remaining:
+                    return
+                continue
+            bubble.wait_seconds = remaining
+            self._queue(bubble)
+            if not remaining:
+                await self._flush(bubble)
+                return
+
+    async def _stop_wait(self, bubble: _ToolBubble) -> None:
+        task = bubble.wait_task
+        bubble.wait_task = None
+        if task is None or task.done():
+            return
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
 
     async def _project(self, bubble: _ToolBubble) -> None:
         try:
@@ -246,8 +318,17 @@ class ToolActivitySurface:
 
     async def running(self, call: dict[str, Any]) -> None:
         bubble = self._update_active("Running", call)
+        wait_ms = _poll_wait_ms(call)
+        if wait_ms is not None and self._supports_console():
+            bubble.wait_seconds = math.ceil(wait_ms / 1000)
         self._queue(bubble)
         await self._flush(bubble)
+        if bubble.wait_seconds is not None and wait_ms is not None:
+            loop = asyncio.get_running_loop()
+            bubble.wait_deadline = loop.time() + wait_ms / 1000
+            bubble.wait_task = asyncio.create_task(
+                self._animate_wait(bubble)
+            )
 
     async def approval(
         self,
@@ -294,6 +375,7 @@ class ToolActivitySurface:
             or conversation_id != self.conversation_id
             or message_id != bubble.message_id
             or view not in {"info", "console"}
+            or (view == "console" and not bubble.console_available)
         ):
             return False
         bubble.view = view
@@ -332,10 +414,37 @@ class ToolActivitySurface:
         if result.get("status") == "interrupted":
             status = "Interrupted"
         if result.get("approval") == "denied":
-            status = "Denied"
+            status = "Failed"
         elif result.get("approval") == "superseded":
             status = "Interrupted"
         bubble = self._update_active(status, call)
+        if result.get("approval") in {"denied", "superseded"}:
+            bubble.view = "info"
+            bubble.console_available = False
+            outcome = (
+                "Command denied"
+                if result.get("approval") == "denied"
+                else "Command superseded"
+            )
+            bubble.terminal_info = (
+                status + "\n\nTool: "
+                + str(call.get("name") or "unknown")
+                + "\n\n"
+                + outcome
+            )
+        await self._stop_wait(bubble)
+        if bubble.wait_seconds is not None:
+            result_status = str(result.get("status") or "")
+            if result_status == "running":
+                bubble.wait_terminal = "Waiting 0s"
+            elif result_status == "completed":
+                bubble.wait_terminal = "Command completed"
+            elif result_status == "cancelled":
+                bubble.wait_terminal = "Command cancelled"
+            elif result_status == "timed_out":
+                bubble.wait_terminal = "Command timed out"
+            else:
+                bubble.wait_terminal = status
         self._queue(bubble)
         await self._flush(bubble)
         if bubble.message_id is not None:
@@ -354,10 +463,10 @@ class ToolActivitySurface:
         if self._active is not None:
             bubbles.append(self._active)
         tasks = [
-            bubble.projection_task
+            task
             for bubble in bubbles
-            if bubble.projection_task is not None
-            and not bubble.projection_task.done()
+            for task in (bubble.projection_task, bubble.wait_task)
+            if task is not None and not task.done()
         ]
         for bubble in bubbles:
             bubble.pending = False

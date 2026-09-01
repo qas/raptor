@@ -2055,7 +2055,7 @@ class PinnedStatusSlotTests(unittest.IsolatedAsyncioTestCase):
         )
 
         session.state["approval_mode"] = "on"
-        call = {"name": "shell", "arguments": '{"cmd":"pwd"}'}
+        call = {"name": "shell", "arguments": '{"command":"pwd"}'}
         with patch(
             "approval.execute_tool",
             AsyncMock(return_value={"ok": True}),
@@ -2101,14 +2101,14 @@ class PinnedStatusSlotTests(unittest.IsolatedAsyncioTestCase):
             for method, payload in self.calls
             if method == "editMessageText"
         ]
-        self.assertTrue(edits[0]["text"].startswith("Running"))
-        self.assertTrue(edits[1]["text"].startswith("Completed"))
+        self.assertIn("$ pwd", edits[0]["text"])
+        self.assertIn("$ pwd", edits[1]["text"])
         self.assertEqual(
             [
                 button["text"]
                 for button in edits[0]["reply_markup"]["inline_keyboard"][0]
             ],
-            ["Info", "Console"],
+            ["Info"],
         )
 
     async def test_subagent_approval_uses_same_bubble_in_child_topic(
@@ -2135,7 +2135,7 @@ class PinnedStatusSlotTests(unittest.IsolatedAsyncioTestCase):
         )
 
         session.state["approval_mode"] = "on"
-        call = {"name": "shell", "arguments": '{"cmd":"pwd"}'}
+        call = {"name": "shell", "arguments": '{"command":"pwd"}'}
         execute = patch(
             "approval.execute_tool",
             AsyncMock(return_value={"ok": True}),
@@ -2185,8 +2185,15 @@ class PinnedStatusSlotTests(unittest.IsolatedAsyncioTestCase):
             for method, payload in self.calls
             if method == "editMessageText"
         ]
-        self.assertTrue(edits[0]["text"].startswith("Running"))
-        self.assertTrue(edits[1]["text"].startswith("Completed"))
+        self.assertIn("$ pwd", edits[0]["text"])
+        self.assertIn("$ pwd", edits[1]["text"])
+        self.assertEqual(
+            [
+                button["text"]
+                for button in edits[0]["reply_markup"]["inline_keyboard"][0]
+            ],
+            ["Info"],
+        )
         self.assertFalse(
             any(method == "unpinChatMessage" for method, _ in self.calls)
         )
