@@ -312,31 +312,6 @@ def goal_pin_text(goal: dict[str, Any]) -> str:
     return f"Goal {status}: {objective}"
 
 
-def _higher_priority_pin_active(
-    chat_id: ConversationId,
-    *,
-    ignore_owner: str | None = None,
-) -> bool:
-    """True when transient tool UI owns the pinned status slot."""
-    runtime = session.current_runtime()
-    pinned_owner = runtime.pinned_status_owner
-    if (
-        runtime.pinned_status_conversation_id == chat_id
-        and pinned_owner != ignore_owner
-        and isinstance(pinned_owner, str)
-        and pinned_owner.startswith(("approval:", "tool:"))
-    ):
-        return True
-    for entry in session.pending_approvals.values():
-        if entry.get("chat_id") != chat_id:
-            continue
-        if entry.get("ui_finalized"):
-            continue
-        if entry.get("message_id") is not None:
-            return True
-    return False
-
-
 async def remove_goal_pin(chat_id: ConversationId) -> None:
     """Clear goal tracking, then remove its persistent chat status."""
     runtime = session.current_runtime()
@@ -355,23 +330,11 @@ async def remove_goal_pin(chat_id: ConversationId) -> None:
             log_exception("goal", "goal_pin_remove_error", exc)
 
 
-async def suspend_goal_pin(chat_id: ConversationId) -> None:
-    """Release goal ownership without changing durable goal state."""
-    await remove_goal_pin(chat_id)
-
-
 async def ensure_goal_pin(
     chat_id: ConversationId,
-    *,
-    replace_owner: str | None = None,
 ) -> None:
     """Ensure exactly one pinned status exists for the active goal."""
     if thread_active():
-        return
-    if _higher_priority_pin_active(
-        chat_id,
-        ignore_owner=replace_owner,
-    ):
         return
     goal = current_goal()
     if not goal or goal.get("status") != GOAL_ACTIVE:
@@ -408,10 +371,6 @@ async def ensure_goal_pin(
         not current
         or str(current.get("id") or "") != goal_id
         or current.get("status") != GOAL_ACTIVE
-        or _higher_priority_pin_active(
-            chat_id,
-            ignore_owner=replace_owner,
-        )
     ):
         try:
             await presentation.clear_goal_pin(
@@ -432,24 +391,12 @@ async def sync_goal_pin(
     released_owner: str | None = None,
 ) -> None:
     """Re-project the pin from durable goal state and slot priority."""
-    if _higher_priority_pin_active(
-        chat_id,
-        ignore_owner=released_owner,
-    ):
-        await suspend_goal_pin(chat_id)
-        return
     if thread_active():
-        await ensure_thread_status(
-            chat_id,
-            replace_owner=released_owner,
-        )
+        await ensure_thread_status(chat_id)
         return
     goal = current_goal()
     if goal and goal.get("status") == GOAL_ACTIVE:
-        await ensure_goal_pin(
-            chat_id,
-            replace_owner=released_owner,
-        )
+        await ensure_goal_pin(chat_id)
     elif released_owner:
         await presentation.clear_pinned_status(
             chat_id,

@@ -2,22 +2,13 @@
 
 import asyncio
 import json
-import os
 from collections import deque
 from typing import Any
 
 from chat_provider import ConversationId, Controls, MessageId
 from chat_runtime import get_chat_provider
 from config import CHAT_STREAM_INTERVAL
-from goals import suspend_goal_pin, sync_goal_pin
 from observability import log_exception
-from presentation import (
-    clear_pinned_status,
-    create_pinned_status,
-    delete_pinned_status,
-    release_pinned_status,
-)
-import session
 
 
 MAX_RETAINED_TOOL_BUBBLES = 64
@@ -47,15 +38,10 @@ class ToolActivitySurface:
     def __init__(
         self,
         conversation_id: ConversationId,
-        *,
-        manage_root_status: bool = True,
     ) -> None:
         self.conversation_id = conversation_id
-        self.manage_root_status = manage_root_status
-        self.owner = "tool:" + os.urandom(6).hex()
-        self.message_id: int | str | None = None
+        self.message_id: MessageId | None = None
         self._completed_message_ids: deque[MessageId] = deque()
-        self._root_status_suspended = False
         self._pending: tuple[str, dict[str, Any], Controls] | None = None
         self._projection_task: asyncio.Task[None] | None = None
 
@@ -66,30 +52,23 @@ class ToolActivitySurface:
         controls: Controls = (),
     ) -> None:
         try:
+            provider = get_chat_provider()
+            effective_controls = (
+                controls if provider.capabilities.controls else ()
+            )
             text = status + "\n\n" + tool_preview(call)
             if self.message_id is not None:
-                await get_chat_provider().edit_message(
+                await provider.edit_message(
                     self.conversation_id,
                     self.message_id,
                     text,
-                    controls,
+                    effective_controls,
                 )
             else:
-                if (
-                    self.manage_root_status
-                    and not self._root_status_suspended
-                ):
-                    await suspend_goal_pin(self.conversation_id)
-                    await clear_pinned_status(self.conversation_id)
-                    runtime = session.current_runtime()
-                    runtime.pinned_status_conversation_id = self.conversation_id
-                    runtime.pinned_status_message_id = None
-                    runtime.pinned_status_owner = self.owner
-                    self._root_status_suspended = True
-                self.message_id = await create_pinned_status(
+                self.message_id = await provider.create_message(
                     self.conversation_id,
                     text,
-                    controls,
+                    effective_controls,
                 )
         except asyncio.CancelledError:
             raise
@@ -145,20 +124,9 @@ class ToolActivitySurface:
             raise RuntimeError("Could not present tool approval")
         return self.message_id
 
-    async def _delete_completed_message(self, message_id: MessageId) -> None:
+    async def _delete_message(self, message_id: MessageId) -> None:
         try:
             await get_chat_provider().delete_message(
-                self.conversation_id,
-                message_id,
-            )
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            log_exception("tool_activity", "bubble_cleanup_error", exc)
-
-    async def _delete_active_message(self, message_id: MessageId) -> None:
-        try:
-            await delete_pinned_status(
                 self.conversation_id,
                 message_id,
             )
@@ -183,10 +151,9 @@ class ToolActivitySurface:
         await self._flush()
         message_id = self.message_id
         if message_id is not None:
-            await release_pinned_status(self.conversation_id, message_id)
             if len(self._completed_message_ids) >= MAX_RETAINED_TOOL_BUBBLES:
                 oldest = self._completed_message_ids[0]
-                await self._delete_completed_message(oldest)
+                await self._delete_message(oldest)
                 self._completed_message_ids.popleft()
             self._completed_message_ids.append(message_id)
             self.message_id = None
@@ -199,27 +166,9 @@ class ToolActivitySurface:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
         if self.message_id is not None:
-            await self._delete_active_message(self.message_id)
+            await self._delete_message(self.message_id)
             self.message_id = None
         while self._completed_message_ids:
             message_id = self._completed_message_ids[-1]
-            await self._delete_completed_message(message_id)
+            await self._delete_message(message_id)
             self._completed_message_ids.pop()
-        try:
-            if self.manage_root_status and self._root_status_suspended:
-                runtime = session.current_runtime()
-                if (
-                    runtime.pinned_status_conversation_id
-                    == self.conversation_id
-                    and runtime.pinned_status_owner == self.owner
-                ):
-                    runtime.pinned_status_conversation_id = None
-                    runtime.pinned_status_message_id = None
-                    runtime.pinned_status_owner = None
-                await sync_goal_pin(self.conversation_id)
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            log_exception("tool_activity", "cleanup_error", exc)
-            return
-        self._root_status_suspended = False

@@ -47,7 +47,6 @@ from goals import (
     replace_goal,
     resume_goal,
     set_goal_tool,
-    suspend_goal_pin,
     sync_goal_pin,
     todo_store_for_display,
     todo_store_for_execution,
@@ -1981,40 +1980,9 @@ class GoalPinTests(unittest.IsolatedAsyncioTestCase):
             GOAL_ACTIVE,
         )
 
-    async def test_approval_suppresses_goal_pin(self) -> None:
-        replace_goal("approval suppress")
-        await ensure_goal_pin(1)
-        await suspend_goal_pin(1)
-        session.pending_approvals["a1"] = {
-            "chat_id": 1,
-            "message_id": 42,
-            "ui_finalized": False,
-        }
-        await sync_goal_pin(1)
-        self.assertIsNone(session.current_runtime().goal_pin_message_id)
-        self.assertEqual(
-            current_goal()["status"],
-            GOAL_ACTIVE,
-        )
-
-    async def test_tool_activity_suppresses_goal_pin(self) -> None:
-        replace_goal("tool activity suppress")
-        await ensure_goal_pin(1)
-        await suspend_goal_pin(1)
-        runtime = session.current_runtime()
-        runtime.pinned_status_conversation_id = 1
-        runtime.pinned_status_message_id = 42
-        runtime.pinned_status_owner = "tool:t1"
-        await sync_goal_pin(1)
-
-        self.assertIsNone(session.current_runtime().goal_pin_message_id)
-        self.assertEqual(session.current_runtime().pinned_status_owner, "tool:t1")
-        self.assertEqual(current_goal()["status"], GOAL_ACTIVE)
-
     async def test_force_does_not_suppress_goal_pin(self) -> None:
         replace_goal("force alongside goal")
         await ensure_goal_pin(1)
-        await suspend_goal_pin(1)
         session.pending_steers["f1"] = {
             "chat_id": 1,
             "message_id": 77,
@@ -2023,44 +1991,23 @@ class GoalPinTests(unittest.IsolatedAsyncioTestCase):
         await sync_goal_pin(1)
         self.assertIsNotNone(session.current_runtime().goal_pin_message_id)
 
-    async def test_goal_pin_restored_after_action_pin_clears(
-        self,
-    ) -> None:
-        replace_goal("restore me")
-        await ensure_goal_pin(1)
-        await suspend_goal_pin(1)
-        self.assertIsNone(session.current_runtime().goal_pin_message_id)
-        await sync_goal_pin(1)
-        self.assertIsNotNone(session.current_runtime().goal_pin_message_id)
-
-    async def test_completed_goal_not_restored_after_action_pin_clears(
+    async def test_sync_removes_completed_goal_pin(
         self,
     ) -> None:
         replace_goal("done")
         await ensure_goal_pin(1)
-        await suspend_goal_pin(1)
         complete_goal(current_goal()["id"])
         await sync_goal_pin(1)
         self.assertIsNone(session.current_runtime().goal_pin_message_id)
 
-    async def test_paused_goal_not_restored_after_action_pin_clears(
+    async def test_sync_removes_paused_goal_pin(
         self,
     ) -> None:
         replace_goal("paused")
         await ensure_goal_pin(1)
-        await suspend_goal_pin(1)
         pause_goal()
         await sync_goal_pin(1)
         self.assertIsNone(session.current_runtime().goal_pin_message_id)
-
-    async def test_pin_suppression_does_not_change_goal_state(
-        self,
-    ) -> None:
-        replace_goal("unchanged")
-        before = copy.deepcopy(current_goal())
-        await ensure_goal_pin(1)
-        await suspend_goal_pin(1)
-        self.assertEqual(current_goal(), before)
 
 
 class PinnedStatusSlotTests(unittest.IsolatedAsyncioTestCase):
@@ -2092,7 +2039,7 @@ class PinnedStatusSlotTests(unittest.IsolatedAsyncioTestCase):
         self._tg_patch.start()
         self.addCleanup(self._tg_patch.stop)
 
-    async def test_approval_uses_fresh_bubble_then_restores_goal(
+    async def test_approval_uses_unpinned_bubble_and_preserves_goal(
         self,
     ) -> None:
         from approval import execute_tool_with_approval, handle_approval_action
@@ -2138,11 +2085,11 @@ class PinnedStatusSlotTests(unittest.IsolatedAsyncioTestCase):
             f"goal:{goal['id']}",
         )
         methods = [method for method, _payload in self.calls]
-        self.assertEqual(methods.count("sendMessage"), 3)
-        self.assertEqual(methods.count("pinChatMessage"), 3)
+        self.assertEqual(methods.count("sendMessage"), 2)
+        self.assertEqual(methods.count("pinChatMessage"), 1)
         self.assertEqual(methods.count("editMessageText"), 2)
-        self.assertEqual(methods.count("unpinChatMessage"), 2)
-        self.assertEqual(methods.count("deleteMessage"), 2)
+        self.assertEqual(methods.count("unpinChatMessage"), 0)
+        self.assertEqual(methods.count("deleteMessage"), 1)
         approval_payload = [
             payload
             for method, payload in self.calls
@@ -2234,9 +2181,8 @@ class PinnedStatusSlotTests(unittest.IsolatedAsyncioTestCase):
         ]
         self.assertTrue(edits[0]["text"].startswith("Running"))
         self.assertTrue(edits[1]["text"].startswith("Completed"))
-        self.assertIn(
-            ("unpinChatMessage", {"chat_id": 1, "message_id": 321}),
-            self.calls,
+        self.assertFalse(
+            any(method == "unpinChatMessage" for method, _ in self.calls)
         )
         self.assertIn(
             ("deleteMessage", {"chat_id": 1, "message_id": 321}),

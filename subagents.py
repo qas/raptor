@@ -512,7 +512,7 @@ async def run_subagent(
         fallback=chat_id,
     )
     tool_activity = (
-        ToolActivitySurface(presentation_chat_id, manage_root_status=False)
+        ToolActivitySurface(presentation_chat_id)
         if record.get("activity_surface_id")
         else None
     )

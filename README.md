@@ -285,17 +285,17 @@ Telegram replies remain in their originating topic.
 The persistent status slot has this priority:
 
 ```text
-approval/tool activity > thread > goal > empty
+thread > goal > empty
 ```
 
-Each root-agent tool call gets a fresh bounded status bubble. Its arguments
-stream while the call is prepared; the same bubble changes to `Running`, then
-`Completed`, `Failed`, `Denied`, or `Interrupted`. Approval adds Approve/Deny
-controls to that bubble before execution. Terminal bubbles remain visible and
-unpinned during the turn. Before the final answer, Raptor removes the turn's
-tool bubbles and restores active thread or goal status. `/ask` uses the same
-lifecycle once its non-streaming model response yields a tool call. Steering
-is transient and is never pinned.
+Each root-agent tool call gets a fresh bounded, unpinned status bubble. Its
+arguments stream while the call is prepared; the same bubble changes to
+`Running`, then `Completed`, `Failed`, `Denied`, or `Interrupted`. Approval
+adds Approve/Deny controls to that bubble before execution. Terminal bubbles
+remain visible during the turn, then Raptor removes them before the final
+answer. Tool activity never replaces an active thread or goal pin. `/ask` uses
+the same lifecycle once its non-streaming model response yields a tool call.
+Steering is transient and is never pinned.
 
 ### Context and compaction
 

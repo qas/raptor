@@ -109,10 +109,6 @@ async def execute_tool_with_approval(
             if tool_activity is None:
                 tool_activity = ToolActivitySurface(
                     presentation_chat_id or chat_id,
-                    manage_root_status=(
-                        presentation_chat_id is None
-                        or presentation_chat_id == chat_id
-                    ),
                 )
                 owned_activity = True
             decision = await request_tool_approval(

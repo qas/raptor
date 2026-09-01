@@ -304,7 +304,7 @@ class ThreadTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("branch prompt", parent_text)
         self.assertNotIn("branch response", parent_text)
 
-    async def test_thread_pin_sits_between_approval_and_goal(self) -> None:
+    async def test_thread_pin_takes_priority_over_goal(self) -> None:
         goal = replace_goal("main objective")
         await ensure_goal_pin("!room:example.org")
         self.assertEqual(
@@ -321,21 +321,6 @@ class ThreadTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(session.current_runtime().goal_pin_message_id)
         self.assertIsNone(session.current_runtime().goal_pin_goal_id)
         self.assertEqual(goal_instructions(), "")
-
-        from presentation import show_pinned_status
-        await show_pinned_status(
-            "!room:example.org",
-            "approval:abc",
-            "Approval required",
-        )
-        await sync_goal_pin(
-            "!room:example.org",
-            released_owner="approval:abc",
-        )
-        self.assertEqual(
-            session.current_runtime().pinned_status_owner,
-            f"thread:{thread_id}",
-        )
 
         await finish_thread("!room:example.org", merge=False)
         self.assertEqual(

@@ -272,7 +272,7 @@ class ChatProviderContractTests(unittest.IsolatedAsyncioTestCase):
         methods = [call[0] for call in self.provider.calls]
         self.assertEqual(
             methods,
-            ["create", "pin", "edit", "edit", "edit", "unpin", "delete"],
+            ["create", "edit", "edit", "edit", "delete"],
         )
         texts = [
             call[3]
@@ -285,13 +285,10 @@ class ChatProviderContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(texts[3].startswith("Completed\n\nTool: shell"))
         self.assertIsNone(session.current_runtime().pinned_status_owner)
 
-    async def test_child_tool_activity_uses_same_pinned_bubble(self) -> None:
+    async def test_child_tool_activity_uses_same_unpinned_bubble(self) -> None:
         from tool_activity import ToolActivitySurface
 
-        surface = ToolActivitySurface(
-            "!room:example.org/child",
-            manage_root_status=False,
-        )
+        surface = ToolActivitySurface("!room:example.org/child")
         call = {
             "type": "function_call",
             "name": "shell",
@@ -306,7 +303,7 @@ class ChatProviderContractTests(unittest.IsolatedAsyncioTestCase):
         methods = [call[0] for call in self.provider.calls]
         self.assertEqual(
             methods,
-            ["create", "pin", "edit", "unpin", "delete"],
+            ["create", "edit", "delete"],
         )
         texts = [
             call[3]
@@ -317,10 +314,15 @@ class ChatProviderContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(texts[1].startswith("Completed\n\nTool: shell"))
         self.assertIsNone(session.current_runtime().pinned_status_owner)
 
-    async def test_tool_activity_clear_preserves_newer_status_owner(self) -> None:
+    async def test_tool_activity_preserves_existing_status_owner(self) -> None:
         from presentation import show_pinned_status
         from tool_activity import ToolActivitySurface
 
+        await show_pinned_status(
+            "!room:example.org",
+            "thread:existing",
+            "Thread active",
+        )
         surface = ToolActivitySurface("!room:example.org")
         call = {
             "type": "function_call",
@@ -329,33 +331,25 @@ class ChatProviderContractTests(unittest.IsolatedAsyncioTestCase):
             "arguments": "{}",
         }
         await surface.running(call)
-        await show_pinned_status(
-            "!room:example.org",
-            "approval:newer",
-            "Approval required",
-        )
         await surface.clear()
 
         self.assertEqual(
             session.current_runtime().pinned_status_owner,
-            "approval:newer",
+            "thread:existing",
         )
         deletes = [
             call for call in self.provider.calls if call[0] == "delete"
         ]
-        self.assertEqual(deletes[0][2], "$event-1")
+        self.assertEqual(deletes[0][2], "$event-2")
         self.assertEqual(
             session.current_runtime().pinned_status_message_id,
-            "$event-2",
+            "$event-1",
         )
 
     async def test_next_tool_gets_a_fresh_terminal_bubble(self) -> None:
         from tool_activity import ToolActivitySurface
 
-        surface = ToolActivitySurface(
-            "!room:example.org/child",
-            manage_root_status=False,
-        )
+        surface = ToolActivitySurface("!room:example.org/child")
         first = {
             "name": "shell",
             "call_id": "c1",
@@ -396,10 +390,7 @@ class ChatProviderContractTests(unittest.IsolatedAsyncioTestCase):
     ) -> None:
         from tool_activity import ToolActivitySurface
 
-        surface = ToolActivitySurface(
-            "!room:example.org/child",
-            manage_root_status=False,
-        )
+        surface = ToolActivitySurface("!room:example.org/child")
         first = {
             "name": "shell",
             "call_id": "c1",
@@ -479,14 +470,14 @@ class ChatProviderContractTests(unittest.IsolatedAsyncioTestCase):
                 "delete_message",
                 AsyncMock(side_effect=RuntimeError("unavailable")),
             ),
-            patch("presentation.log_exception") as logged,
+            patch("tool_activity.log_exception") as logged,
         ):
             await surface.clear()
 
         logged.assert_called_once()
         self.assertIsNone(session.current_runtime().pinned_status_owner)
 
-    async def test_tool_replaces_then_restores_thread_status(self) -> None:
+    async def test_tool_preserves_thread_status(self) -> None:
         from thread_status import ensure_thread_status
         from tool_activity import ToolActivitySurface
 
@@ -514,10 +505,9 @@ class ChatProviderContractTests(unittest.IsolatedAsyncioTestCase):
         ]
         self.assertEqual(
             [call[2] for call in creates],
-            ["$event-1", "$event-2", "$event-3"],
+            ["$event-1", "$event-2"],
         )
         self.assertTrue(creates[1][3].startswith("Running"))
-        self.assertTrue(creates[2][3].startswith("Thread active"))
         terminal_edits = [
             call
             for call in self.provider.calls
@@ -525,6 +515,17 @@ class ChatProviderContractTests(unittest.IsolatedAsyncioTestCase):
         ]
         self.assertEqual(len(terminal_edits), 1)
         self.assertTrue(terminal_edits[0][3].startswith("Completed"))
+        self.assertEqual(
+            session.current_runtime().pinned_status_message_id,
+            "$event-1",
+        )
+        self.assertEqual(
+            [call[0] for call in self.provider.calls].count("pin"),
+            1,
+        )
+        self.assertFalse(
+            any(call[0] == "unpin" for call in self.provider.calls)
+        )
 
     async def test_tool_activity_stream_does_not_wait_for_transport(self) -> None:
         from tool_activity import ToolActivitySurface
@@ -547,7 +548,7 @@ class ChatProviderContractTests(unittest.IsolatedAsyncioTestCase):
             "call_id": "c1",
             "arguments": "",
         }
-        with patch("tool_activity.create_pinned_status", blocked_status):
+        with patch.object(self.provider, "create_message", blocked_status):
             await asyncio.wait_for(surface.stream(call, False), timeout=0.1)
             await asyncio.wait_for(started.wait(), timeout=0.1)
             await surface.clear()
