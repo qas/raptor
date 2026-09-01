@@ -12,7 +12,7 @@ from filesystem_permissions import FileAccessPolicy
 class FileAccessPolicyTests(unittest.TestCase):
     def test_recursive_glob_matches_root_and_nested_paths(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             policy = FileAccessPolicy.create(root, ["**/.env"])
 
             self.assertTrue(policy.denies(root / ".env"))
@@ -21,7 +21,7 @@ class FileAccessPolicyTests(unittest.TestCase):
 
     def test_denied_directory_blocks_descendants(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             policy = FileAccessPolicy.create(root, ["private"])
 
             self.assertTrue(policy.denies(root / "private" / "token.txt"))
@@ -39,7 +39,7 @@ class FileAccessPolicyTests(unittest.TestCase):
 
     def test_glob_expansion_fails_closed_at_depth_limit(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             (root / ".env").write_text("root")
             nested = root / "one" / "two"
             nested.mkdir(parents=True)
@@ -55,7 +55,7 @@ class FileAccessPolicyTests(unittest.TestCase):
 
     def test_glob_expansion_fails_closed_at_directory_symlink(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             target = root / "target"
             target.mkdir()
             (target / ".env").write_text("secret")
@@ -67,7 +67,7 @@ class FileAccessPolicyTests(unittest.TestCase):
 
     def test_non_recursive_glob_ignores_irrelevant_deep_directory(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             (root / "nested" / "deep").mkdir(parents=True)
             secret = root / "secret.pem"
             secret.write_text("secret")
@@ -86,7 +86,7 @@ class FileAccessPolicyTests(unittest.TestCase):
 
     def test_overlapping_matches_collapse_to_the_denied_parent(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             private = root / "private"
             private.mkdir()
             (private / "token.env").write_text("secret")
@@ -115,7 +115,7 @@ class FileAccessPolicyTests(unittest.TestCase):
 
     def test_bubblewrap_launch_masks_denied_file_with_no_permissions(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             secret = root / ".env"
             secret.write_text("secret")
             policy = FileAccessPolicy.create(root, [".env"])
@@ -169,7 +169,7 @@ class FileAccessPolicyTests(unittest.TestCase):
 
     def test_shell_sandbox_denies_secret_when_platform_helper_exists(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             (root / ".env").write_text("TOP_SECRET")
             (root / "visible.txt").write_text("VISIBLE")
             policy = FileAccessPolicy.create(root, [".env"])
@@ -207,7 +207,7 @@ class FileAccessPolicyTests(unittest.TestCase):
 
     def test_missing_exact_path_placeholder_is_removed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             policy = FileAccessPolicy.create(root, ["private/secret.env"])
             with (
                 patch.object(filesystem_permissions.sys, "platform", "linux"),
