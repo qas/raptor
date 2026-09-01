@@ -528,6 +528,11 @@ tokens, API keys, and credential-bearing proxy URLs remain environment-only.
 Unspecified values use the defaults shown below.
 
 ```toml
+[permissions.filesystem]
+# Paths are relative to AGENT_WORKDIR unless absolute.
+deny_read = [".env", "**/.env", "**/*.pem"]
+glob_scan_max_depth = 32
+
 [network]
 proxy = "http://proxy.example:8080"
 no_proxy = ["models.internal", "*.example.net"]
@@ -586,6 +591,23 @@ max_record_chars = 12000
 context_ratio = 0.82
 context_safety_tokens = 4096
 ```
+
+`permissions.filesystem.deny_read` makes matching files and directories
+inaccessible to Raptor's filesystem tools and managed shell commands. Exact
+paths protect the whole subtree when they name a directory. `*`, `?`, `[]`,
+and recursive `**` glob segments are supported. Relative patterns resolve
+from `AGENT_WORKDIR`; root-wide globs such as `/**/*.pem` are rejected so a
+misconfiguration cannot trigger an unbounded full-disk scan.
+
+Shell enforcement fails closed when configured. Linux requires a root-owned,
+non-group/world-writable `bwrap` (Bubblewrap) on `PATH`; macOS uses
+`/usr/bin/sandbox-exec`. Glob expansion is
+bounded to 8,192 matches and 250,000 scanned entries, and
+`glob_scan_max_depth` limits recursive traversal. Its default is `32`. Shell
+launch fails closed when a potentially matching subtree cannot be scanned,
+including at the depth limit or through a directory symlink.
+Unconfigured `deny_read` defaults to an empty list and does not change shell
+behavior.
 
 `compaction.model_provider` and `compaction.model` optionally route checkpoint
 summarization through a cheaper configured model target. With neither set,

@@ -13,6 +13,7 @@ os.environ.setdefault("TG_USER_ID", "1")
 
 import tools
 from config import TOOLS
+from filesystem_permissions import FileAccessPolicy
 
 
 class FileToolTests(unittest.TestCase):
@@ -156,6 +157,42 @@ class FileToolTests(unittest.TestCase):
             with patch.object(tools, "AGENT_WORKDIR", root):
                 with self.assertRaises(ValueError):
                     tools.workspace_path("../outside")
+
+    def test_deny_read_blocks_reads_and_mutations(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            secret = root / ".env"
+            secret.write_text("secret")
+            policy = FileAccessPolicy.create(root, ["**/.env"])
+            with (
+                patch.object(tools, "AGENT_WORKDIR", root),
+                patch.object(tools, "FILESYSTEM_POLICY", policy),
+            ):
+                with self.assertRaisesRegex(PermissionError, "deny_read"):
+                    tools.read_file_tool({"path": ".env"})
+                with self.assertRaisesRegex(PermissionError, "deny_read"):
+                    tools.write_file_tool(
+                        {"path": ".env", "content": "replacement"}
+                    )
+
+            self.assertEqual(secret.read_text(), "secret")
+
+    def test_directory_listing_omits_denied_entries(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / ".env").write_text("secret")
+            (root / "visible.txt").write_text("ok")
+            policy = FileAccessPolicy.create(root, [".env"])
+            with (
+                patch.object(tools, "AGENT_WORKDIR", root),
+                patch.object(tools, "FILESYSTEM_POLICY", policy),
+            ):
+                result = tools.list_dir_tool({"path": "."})
+
+            self.assertEqual(
+                [entry["name"] for entry in result["entries"]],
+                ["visible.txt"],
+            )
 
 
 if __name__ == "__main__":

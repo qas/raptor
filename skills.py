@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from config import AGENT_WORKDIR, MAX_TOOL_OUTPUT
+from config import AGENT_WORKDIR, FILESYSTEM_POLICY, MAX_TOOL_OUTPUT
 from storage import (
     FileTooLargeError,
     read_bytes_bounded,
@@ -140,6 +140,8 @@ def _advertised_skills(
             if not root.is_dir():
                 continue
             for path in configured_root.rglob("SKILL.md"):
+                if FILESYSTEM_POLICY.denies(path):
+                    continue
                 yield root_index, path, root
         except OSError as exc:
             errors.append(f"{configured_root}: {exc}")
@@ -311,6 +313,8 @@ async def read_skill_tool(args: dict[str, Any]) -> dict[str, Any]:
             "error": f"unknown skill: {name}",
             "available": [skill.name for skill in snapshot.skills],
         }
+    if FILESYSTEM_POLICY.denies(match.path):
+        return {"ok": False, "error": f"unknown skill: {name}"}
     try:
         contents = await asyncio.to_thread(
             read_text_bounded,

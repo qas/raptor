@@ -10,6 +10,7 @@ os.environ["RAPTOR_HOME"] = str(_HOME)
 os.environ["AGENT_WORKDIR"] = str(_HOME)
 
 import skills
+from filesystem_permissions import FileAccessPolicy
 from config import TOOLS
 from tools import execute_tool
 
@@ -142,6 +143,36 @@ class SkillsTests(unittest.IsolatedAsyncioTestCase):
                 result = await skills.read_skill_tool({"name": "missing"})
             self.assertFalse(result["ok"])
             self.assertEqual(result["available"], ["known"])
+
+    async def test_denied_skill_is_not_advertised_or_readable(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            root = base / ".raptor" / "skills"
+            for name in ("private", "public"):
+                skill_dir = root / name
+                skill_dir.mkdir(parents=True)
+                (skill_dir / "SKILL.md").write_text(
+                    f"---\nname: {name}\ndescription: {name} workflow\n"
+                    "---\nSECRET BODY\n"
+                )
+            policy = FileAccessPolicy.create(
+                base, [".raptor/skills/private"]
+            )
+            with (
+                patch.object(skills, "SKILLS_ROOTS", (root,)),
+                patch.object(skills, "AGENT_WORKDIR", base),
+                patch.object(skills, "FILESYSTEM_POLICY", policy),
+            ):
+                snapshot = await skills.refresh_skills()
+                catalog = await skills.skill_catalog_instructions()
+                result = await skills.read_skill_tool({"name": "private"})
+
+            self.assertEqual(
+                [item.name for item in snapshot.skills], ["public"]
+            )
+            self.assertNotIn("private workflow", catalog)
+            self.assertFalse(result["ok"])
+            self.assertNotIn("SECRET BODY", str(result))
 
     async def test_read_skill_is_exposed_through_agent_tools(self) -> None:
         schema = next(tool for tool in TOOLS if tool.get("name") == "read_skill")

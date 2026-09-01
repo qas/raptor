@@ -1,5 +1,6 @@
 import copy
 import io
+import json
 import os
 import signal
 import subprocess
@@ -387,7 +388,14 @@ finally:
             patch.object(
                 sys,
                 "argv",
-                ["raptor", "_shell-supervisor", "3", "4", "true"],
+                [
+                    "raptor",
+                    "_shell-supervisor",
+                    "3",
+                    "4",
+                    "policy",
+                    "true",
+                ],
             ),
             patch.object(raptor, "acquire_runtime_lock") as acquire,
             patch("shell_supervisor.main", return_value=9) as supervisor,
@@ -395,13 +403,26 @@ finally:
             result = raptor.run()
         self.assertEqual(result, 9)
         acquire.assert_not_called()
-        supervisor.assert_called_once_with(["raptor", "3", "4", "true"])
+        supervisor.assert_called_once_with(
+            ["raptor", "3", "4", "policy", "true"]
+        )
 
     @unittest.skipUnless(hasattr(os, "fork"), "requires fork")
     def test_entrypoint_supervisor_mode_runs_command(self) -> None:
         root = Path(__file__).resolve().parent.parent
         liveness_read, liveness_write = os.pipe()
         start_read, start_write = os.pipe()
+        policy_file = tempfile.TemporaryFile(mode="w+b")
+        policy_file.write(
+            json.dumps(
+                {
+                    "workspace": str(root),
+                    "patterns": [],
+                    "glob_scan_max_depth": 32,
+                }
+            ).encode("utf-8")
+        )
+        policy_file.seek(0)
         try:
             process = subprocess.Popen(
                 [
@@ -410,19 +431,21 @@ finally:
                     "_shell-supervisor",
                     str(liveness_read),
                     str(start_read),
+                    str(policy_file.fileno()),
                     "printf ok",
                 ],
                 cwd=root,
                 env=os.environ.copy(),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                pass_fds=(liveness_read, start_read),
+                pass_fds=(liveness_read, start_read, policy_file.fileno()),
             )
         except BaseException:
             os.close(liveness_read)
             os.close(liveness_write)
             os.close(start_read)
             os.close(start_write)
+            policy_file.close()
             raise
         os.close(liveness_read)
         os.close(start_read)
@@ -438,6 +461,7 @@ finally:
             if process.poll() is None:
                 process.kill()
                 process.wait(timeout=2)
+            policy_file.close()
         self.assertEqual(process.returncode, 0, stderr.decode())
         self.assertEqual(stdout, b"ok")
 

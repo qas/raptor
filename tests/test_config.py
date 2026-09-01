@@ -84,6 +84,12 @@ class TomlConfigurationTests(unittest.TestCase):
                     "proxy": "http://proxy.example:8080",
                     "no_proxy": ["models.example"],
                 },
+                "permissions": {
+                    "filesystem": {
+                        "deny_read": [".env", "**/*.pem"],
+                        "glob_scan_max_depth": 12,
+                    },
+                },
                 "chat": {
                     "providers": ["telegram"],
                     "streaming": False,
@@ -134,6 +140,11 @@ class TomlConfigurationTests(unittest.TestCase):
         expected = {
             "RAPTOR_PROXY": "http://proxy.example:8080",
             "RAPTOR_NO_PROXY": ("models.example",),
+            "FILESYSTEM_POLICY": config.FileAccessPolicy.create(
+                config.AGENT_WORKDIR,
+                [".env", "**/*.pem"],
+                12,
+            ),
             "CHAT_PROVIDERS": ("telegram",),
             "CHAT_STREAMING": False,
             "CHAT_STREAM_INTERVAL": 0.2,
@@ -198,6 +209,7 @@ class TomlConfigurationTests(unittest.TestCase):
         for document in (
             {"telegram": {"bot_token": "secret"}},
             {"chat": {"streamng": True}},
+            {"permissions": {"filesystem": {"deny_reads": []}}},
         ):
             with self.subTest(document=document), self.assertRaisesRegex(
                 ValueError,

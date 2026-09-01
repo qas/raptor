@@ -19,6 +19,7 @@ ROOT_FIELDS = {
     "model",
     "model_providers",
     "network",
+    "permissions",
     "chat",
     "telegram",
     "responses_server",

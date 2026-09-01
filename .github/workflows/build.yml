@@ -95,19 +95,27 @@ jobs:
           set -e
           test "$status" -eq 1
           python3 - "$AGENT_WORKDIR" <<'PY'
-          import os, subprocess, sys
+          import json, os, subprocess, sys, tempfile
           workdir = sys.argv[1]
           binary = os.path.abspath("dist/raptor/raptor")
           liveness_read, liveness_write = os.pipe()
           start_read, start_write = os.pipe()
+          policy_file = tempfile.TemporaryFile(mode="w+b")
+          policy_file.write(json.dumps({
+              "workspace": workdir,
+              "patterns": [],
+              "glob_scan_max_depth": 32,
+          }).encode("utf-8"))
+          policy_file.seek(0)
           process = subprocess.Popen(
               [binary, "_shell-supervisor", str(liveness_read),
-               str(start_read), "printf smoke"],
+               str(start_read), str(policy_file.fileno()), "printf smoke"],
               cwd=workdir,
               stdout=subprocess.PIPE,
               stderr=subprocess.PIPE,
-              pass_fds=(liveness_read, start_read),
+              pass_fds=(liveness_read, start_read, policy_file.fileno()),
           )
+          policy_file.close()
           os.close(liveness_read)
           os.close(start_read)
           os.write(start_write, b"1")

@@ -6,6 +6,10 @@ import re
 from urllib.parse import urlsplit
 
 from config_document import config_section, load_config_document
+from filesystem_permissions import (
+    DEFAULT_GLOB_SCAN_MAX_DEPTH,
+    FileAccessPolicy,
+)
 from runtime_paths import AGENT_WORKDIR, CHAT_DIR, LOG_PATH, RAPTOR_HOME, STATE_PATH
 
 from todos import (
@@ -268,6 +272,12 @@ def _env_string_tuple(
 
 _CONFIG = load_config_document()
 _NETWORK = config_section(_CONFIG, "network", {"proxy", "no_proxy"})
+_PERMISSIONS = config_section(_CONFIG, "permissions", {"filesystem"})
+_FILESYSTEM = config_section(
+    _PERMISSIONS,
+    "filesystem",
+    {"deny_read", "glob_scan_max_depth"},
+)
 _CHAT = config_section(
     _CONFIG,
     "chat",
@@ -502,6 +512,12 @@ SHELL_TIMEOUT = _env_int(
     minimum=0,
 )
 
+FILESYSTEM_POLICY = FileAccessPolicy.create(
+    AGENT_WORKDIR,
+    _FILESYSTEM.get("deny_read", []),
+    _FILESYSTEM.get("glob_scan_max_depth", DEFAULT_GLOB_SCAN_MAX_DEPTH),
+)
+
 MAX_TOOL_OUTPUT = _env_int(
     "MAX_TOOL_OUTPUT",
     30_000,
@@ -714,6 +730,7 @@ and do not ask "what are we working on?". Just greet and wait.
 
 Filesystem tools are restricted to: {AGENT_WORKDIR}
 Shell commands start in that directory.
+Configured deny-read paths are inaccessible to filesystem and shell tools.
 """.strip()
 
 

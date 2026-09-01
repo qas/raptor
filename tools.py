@@ -16,7 +16,7 @@ from chat_store import (
     session_summary,
     validate_session_id,
 )
-from config import AGENT_WORKDIR, MAX_TOOL_OUTPUT, TOOLS
+from config import AGENT_WORKDIR, FILESYSTEM_POLICY, MAX_TOOL_OUTPUT, TOOLS
 import session
 from session import save_state, state
 from storage import FileTooLargeError, read_bytes_bounded, write_text_atomic
@@ -131,17 +131,18 @@ def workspace_path(
     raw = raw.strip() or "."
     requested = Path(raw)
     root = workspace_root()
-    path = (
-        requested.resolve()
-        if requested.is_absolute()
-        else (root / requested).resolve()
-    )
+    logical_path = requested if requested.is_absolute() else root / requested
+    path = logical_path.resolve()
     try:
         path.relative_to(root)
     except ValueError:
         raise ValueError(
             f"path escapes AGENT_WORKDIR: {raw}"
         ) from None
+    if FILESYSTEM_POLICY.denies(path, logical_path=logical_path):
+        raise PermissionError(
+            "path is denied by permissions.filesystem.deny_read"
+        )
     return path
 
 
@@ -523,9 +524,14 @@ def list_dir_tool(
         dict[str, Any]
     ] = []
 
+    visible_children = (
+        child
+        for child in path.iterdir()
+        if not FILESYSTEM_POLICY.denies(child)
+    )
     children = heapq.nsmallest(
         limit + 1,
-        path.iterdir(),
+        visible_children,
         key=lambda item: (
             not item.is_dir(),
             item.name.lower(),

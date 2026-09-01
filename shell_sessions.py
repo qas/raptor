@@ -9,6 +9,7 @@ import pty
 import secrets
 import signal
 import sys
+import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -16,7 +17,7 @@ from typing import Any
 
 import session as runtime_session
 from chat_provider import ConversationId
-from config import AGENT_WORKDIR, MAX_TOOL_OUTPUT, SHELL_TIMEOUT
+from config import AGENT_WORKDIR, FILESYSTEM_POLICY, MAX_TOOL_OUTPUT, SHELL_TIMEOUT
 from observability import log_event, log_shell_start
 from shell_supervisor import SUPERVISOR_MODE
 
@@ -459,7 +460,13 @@ async def run_shell(
     liveness_write_fd: int | None = None
     start_read_fd: int | None = None
     start_write_fd: int | None = None
+    policy_file = None
     try:
+        policy_file = tempfile.TemporaryFile(mode="w+b")
+        policy_file.write(FILESYSTEM_POLICY.shell_payload().encode("utf-8"))
+        policy_file.flush()
+        policy_file.seek(0)
+        policy_fd = policy_file.fileno()
         liveness_read_fd, liveness_write_fd = os.pipe()
         start_read_fd, start_write_fd = os.pipe()
         if tty:
@@ -470,13 +477,14 @@ async def run_shell(
                         *supervisor_argv(),
                         str(liveness_read_fd),
                         str(start_read_fd),
+                        str(policy_fd),
                         command,
                         cwd=str(AGENT_WORKDIR),
                         stdin=slave_fd,
                         stdout=slave_fd,
                         stderr=slave_fd,
                         start_new_session=True,
-                        pass_fds=(liveness_read_fd, start_read_fd),
+                        pass_fds=(liveness_read_fd, start_read_fd, policy_fd),
                     )
                 except BaseException:
                     os.close(master_fd)
@@ -505,13 +513,14 @@ async def run_shell(
                 *supervisor_argv(),
                 str(liveness_read_fd),
                 str(start_read_fd),
+                str(policy_fd),
                 command,
                 cwd=str(AGENT_WORKDIR),
                 stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 start_new_session=True,
-                pass_fds=(liveness_read_fd, start_read_fd),
+                pass_fds=(liveness_read_fd, start_read_fd, policy_fd),
             )
             stdout_stream = process.stdout
             stderr_stream = process.stderr
@@ -526,6 +535,8 @@ async def run_shell(
             os.close(liveness_read_fd)
         if start_read_fd is not None:
             os.close(start_read_fd)
+        if policy_file is not None:
+            policy_file.close()
         _spawning_sessions -= 1
     shell_session = ShellSession(
         id=_new_session_id(),
