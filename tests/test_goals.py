@@ -2103,7 +2103,13 @@ class PinnedStatusSlotTests(unittest.IsolatedAsyncioTestCase):
         ]
         self.assertTrue(edits[0]["text"].startswith("Running"))
         self.assertTrue(edits[1]["text"].startswith("Completed"))
-        self.assertEqual(edits[0]["reply_markup"], {"inline_keyboard": []})
+        self.assertEqual(
+            [
+                button["text"]
+                for button in edits[0]["reply_markup"]["inline_keyboard"][0]
+            ],
+            ["Info", "Console"],
+        )
 
     async def test_subagent_approval_uses_same_bubble_in_child_topic(
         self,

@@ -15,6 +15,7 @@ from chat_provider import (
     ProcessOutputChunk,
     ProcessOutputProvider,
     ProviderCapabilities,
+    ToolConsoleProvider,
 )
 from observability import log_exception
 from activity import (
@@ -320,6 +321,16 @@ class MultiProvider:
         provider, raw_id = self._route_conversation(conversation_id)
         if isinstance(provider, ProcessOutputProvider):
             await provider.publish_process_output(raw_id, chunk)
+
+    def supports_tool_console(
+        self,
+        conversation_id: ConversationId,
+    ) -> bool:
+        provider, raw_id = self._route_conversation(conversation_id)
+        return bool(
+            isinstance(provider, ToolConsoleProvider)
+            and provider.supports_tool_console(raw_id)
+        )
 
     async def create_message(
         self,

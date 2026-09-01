@@ -180,6 +180,11 @@ class FakeProvider:
         self.calls.append(("answer", action_id, text, alert))
 
 
+class ConsoleFakeProvider(FakeProvider):
+    def supports_tool_console(self, conversation_id) -> bool:
+        return conversation_id == "!room:example.org"
+
+
 class ChatProviderContractTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         session.set_default_model_target(ModelTarget("local", "test-model"))
@@ -316,6 +321,206 @@ class ChatProviderContractTests(unittest.IsolatedAsyncioTestCase):
             self.provider.calls,
             [("process_output", "!room:example.org", chunk)],
         )
+
+    async def test_tool_console_toggles_and_streams_tail(
+        self,
+    ) -> None:
+        from tool_activity import (
+            ToolActivitySurface,
+            handle_tool_activity_action,
+        )
+
+        self.provider = ConsoleFakeProvider()
+        set_chat_provider(self.provider)
+        surface = ToolActivitySurface("!room:example.org")
+        call = {
+            "name": "shell",
+            "call_id": "c1",
+            "arguments": '{"command":"python -m unittest"}',
+        }
+
+        with patch("tool_activity.CHAT_STREAM_INTERVAL", 0):
+            await surface.running(call)
+            created = self.provider.calls[0]
+            controls = created[4]
+            self.assertEqual(
+                [button.label for button in controls[0]],
+                ["Info", "Console"],
+            )
+            console_action = controls[0][1].action
+            await surface.publish_process_output(
+                ProcessOutputChunk(
+                    call_id="c1",
+                    session_id="shell-1",
+                    stream="stdout",
+                    text="".join(f"line {line}\n" for line in range(1, 10)),
+                )
+            )
+            self.assertFalse(
+                any(call[0] == "edit" for call in self.provider.calls)
+            )
+
+            action = IncomingAction(
+                action_id="callback-1",
+                conversation_id="!room:example.org",
+                sender_id="@operator:example.org",
+                message_id="$event-1",
+                data=console_action,
+            )
+            self.assertTrue(await handle_tool_activity_action(action))
+            console_text = next(
+                call[3]
+                for call in reversed(self.provider.calls)
+                if call[0] == "edit"
+            )
+            self.assertTrue(console_text.startswith(
+                "```bash\n$ python -m unittest\n"
+            ))
+            self.assertIn("line 3", console_text)
+            self.assertNotIn("line 2\n", console_text)
+            self.assertTrue(console_text.endswith("line 9\n```"))
+
+            await surface.publish_process_output(
+                ProcessOutputChunk(
+                    call_id="c1",
+                    session_id="shell-1",
+                    stream="stderr",
+                    text="line 10\n",
+                )
+            )
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+            streamed_text = next(
+                call[3]
+                for call in reversed(self.provider.calls)
+                if call[0] == "edit"
+            )
+            self.assertIn("line 4", streamed_text)
+            self.assertNotIn("line 3\n", streamed_text)
+            self.assertTrue(streamed_text.endswith("line 10\n```"))
+
+            info_action = IncomingAction(
+                action_id="callback-2",
+                conversation_id="!room:example.org",
+                sender_id="@operator:example.org",
+                message_id="$event-1",
+                data=controls[0][0].action,
+            )
+            self.assertTrue(await handle_tool_activity_action(info_action))
+            info_text = next(
+                call[3]
+                for call in reversed(self.provider.calls)
+                if call[0] == "edit"
+            )
+            self.assertTrue(info_text.startswith("Running\n\nTool: shell"))
+
+            await surface.finished(call, {"ok": True})
+            await surface.clear()
+            await surface.publish_process_output(
+                ProcessOutputChunk(
+                    call_id="c1",
+                    session_id="shell-1",
+                    stream="stdout",
+                    text="late output\n",
+                )
+            )
+            edits_before_stale_action = sum(
+                call[0] == "edit" for call in self.provider.calls
+            )
+            await handle_tool_activity_action(action)
+
+        self.assertIn(
+            ("delete_many", "!room:example.org", ("$event-1",)),
+            self.provider.calls,
+        )
+        self.assertEqual(
+            sum(call[0] == "edit" for call in self.provider.calls),
+            edits_before_stale_action,
+        )
+        self.assertEqual(
+            self.provider.calls[-1],
+            (
+                "answer",
+                "callback-1",
+                "Tool view is no longer available.",
+                False,
+            ),
+        )
+
+    async def test_completed_tool_consoles_keep_independent_output(
+        self,
+    ) -> None:
+        from tool_activity import (
+            ToolActivitySurface,
+            handle_tool_activity_action,
+        )
+
+        self.provider = ConsoleFakeProvider()
+        set_chat_provider(self.provider)
+        surface = ToolActivitySurface("!room:example.org")
+        calls = (
+            {
+                "name": "shell",
+                "call_id": "c1",
+                "arguments": '{"command":"first"}',
+            },
+            {
+                "name": "shell",
+                "call_id": "c2",
+                "arguments": '{"command":"second"}',
+            },
+        )
+        commands = ("first", "second")
+
+        for index, call in enumerate(calls, start=1):
+            await surface.running(call)
+            await surface.publish_process_output(
+                ProcessOutputChunk(
+                    call_id=f"c{index}",
+                    session_id=f"shell-{index}",
+                    stream="stdout",
+                    text=f"output {index}\n",
+                )
+            )
+            await surface.finished(call, {"ok": True})
+
+        created = [
+            call for call in self.provider.calls if call[0] == "create"
+        ]
+        for index, create in enumerate(created, start=1):
+            action = IncomingAction(
+                action_id=f"callback-{index}",
+                conversation_id="!room:example.org",
+                sender_id="@operator:example.org",
+                message_id=f"$event-{index}",
+                data=create[4][0][1].action,
+            )
+            await handle_tool_activity_action(action)
+            projected = next(
+                call[3]
+                for call in reversed(self.provider.calls)
+                if call[0] == "edit" and call[2] == f"$event-{index}"
+            )
+            self.assertIn(f"$ {commands[index - 1]}", projected)
+            self.assertIn(f"output {index}", projected)
+
+        await surface.clear()
+
+    async def test_tool_console_controls_are_shell_only(self) -> None:
+        from tool_activity import ToolActivitySurface
+
+        self.provider = ConsoleFakeProvider()
+        set_chat_provider(self.provider)
+        surface = ToolActivitySurface("!room:example.org")
+
+        await surface.running({
+            "name": "read_file",
+            "call_id": "c1",
+            "arguments": '{"path":"README.md"}',
+        })
+        await surface.clear()
+
+        self.assertEqual(self.provider.calls[0][4], ())
 
     async def test_child_tool_activity_uses_same_unpinned_bubble(self) -> None:
         from tool_activity import ToolActivitySurface
@@ -1396,6 +1601,20 @@ class TelegramMultiChatTests(unittest.IsolatedAsyncioTestCase):
 
 
 class TelegramTransportTests(unittest.IsolatedAsyncioTestCase):
+    def test_tool_console_uses_telegram_bash_rendering(self) -> None:
+        import telegram
+
+        provider = telegram.TelegramProvider()
+
+        self.assertTrue(provider.supports_tool_console("1/42"))
+        self.assertEqual(
+            telegram.markdown_to_telegram_html(
+                "```bash\n$ python -m unittest\nOK\n```"
+            ),
+            '<pre><code class="language-bash">'
+            "$ python -m unittest\nOK</code></pre>",
+        )
+
     async def test_bulk_delete_chunks_telegram_requests(self) -> None:
         import telegram
 

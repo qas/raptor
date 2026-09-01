@@ -78,6 +78,16 @@ class ProcessOutputProvider(Protocol):
 
 
 @runtime_checkable
+class ToolConsoleProvider(Protocol):
+    """Optional provider extension for interactive shell-tool views."""
+
+    def supports_tool_console(
+        self,
+        conversation_id: ConversationId,
+    ) -> bool: ...
+
+
+@runtime_checkable
 class ChatProvider(Protocol):
     """Capabilities required by the agent framework from a chat backend."""
 

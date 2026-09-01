@@ -1370,6 +1370,13 @@ class TelegramProvider:
     def restore_delivery_context(self, token) -> None:
         del token
 
+    def supports_tool_console(
+        self,
+        conversation_id: ConversationId,
+    ) -> bool:
+        _telegram_destination(conversation_id)
+        return True
+
     async def open_activity_surface(
         self,
         conversation_id: ConversationId,

@@ -196,7 +196,8 @@ can cancel it.
 command. It applies the configured filesystem policy, records the exact
 command in the shell audit log, and bounds retained output. Sandbox preparation
 has a 60-second limit. After the command starts, it has a 20-second execution
-limit. A console command never becomes background work.
+limit. Results use a fenced Bash block containing the command and its output.
+A console command never becomes background work.
 
 `/shutdown` pauses an active goal, cleans up owned turns, subagents, and shell
 processes, and then exits. A stopped process cannot receive chat commands. To
@@ -332,7 +333,9 @@ When approval is enabled, Raptor adds Approve and Deny controls before
 execution. Terminal bubbles remain visible during the turn. Raptor removes
 them before it sends the final answer. Tool activity never replaces an active
 thread or goal pin. `/ask` uses the same lifecycle after its non-streaming model
-response produces a tool call. Steering is transient and is never pinned.
+response produces a tool call. On Telegram, shell bubbles include `Info` and
+`Console` views; `Console` streams the latest seven output lines. Steering is
+transient and is never pinned.
 
 ### Context and compaction
 

@@ -11,8 +11,8 @@ from application_control import (
     application_control_available,
     request_application_exit,
 )
+from chat_format import bash_console_block
 from chat_provider import ConversationId
-
 from chat_store import (
     TruncationCleanupError,
     append_meta,
@@ -123,30 +123,29 @@ from tool_activity import ToolActivitySurface
 CONSOLE_TIMEOUT_SECONDS = 20
 
 
-def _format_console_result(result: dict[str, Any]) -> str:
+def _format_console_result(
+    command_text: str,
+    result: dict[str, Any],
+) -> str:
     status = str(result.get("status") or "unknown")
     exit_code = result.get("exit_code")
-    lines = [
-        (
-            f"Console exited with code {exit_code}."
-            if exit_code is not None
-            else f"Console status: {status}."
-        )
-    ]
+    output: list[str] = []
     stdout = str(result.get("stdout") or "")
     stderr = str(result.get("stderr") or "")
     error = str(result.get("error") or "")
     if stdout:
-        lines.extend(("stdout:", stdout))
+        output.append(stdout.rstrip("\n"))
     if stderr:
-        lines.extend(("stderr:", stderr))
+        output.append(stderr.rstrip("\n"))
     if error and error not in stderr:
-        lines.extend(("error:", error))
+        output.append(error)
     if result.get("truncated"):
-        lines.append("Output was truncated to the configured limit.")
-    if len(lines) == 1:
-        lines.append("(no output)")
-    return "\n".join(lines)
+        output.append("Output was truncated to the configured limit.")
+    if isinstance(exit_code, int) and exit_code != 0:
+        output.append(f"Process exited with code {exit_code}.")
+    elif status not in {"completed", "unknown"} and not output:
+        output.append(f"Process status: {status}.")
+    return bash_console_block(command_text, "\n".join(output))
 
 
 async def _run_console_command(
@@ -180,17 +179,24 @@ async def _run_console_command(
             session_id = str(result.get("session_id") or "")
             if session_id:
                 await cancel_shell_session(session_id)
-            await send(
-                chat_id,
-                "Console command exceeded the time limit and was stopped.",
-            )
-            return
-        await send(chat_id, _format_console_result(result))
+            result = {
+                "status": "timed_out",
+                "error": (
+                    "Command exceeded the time limit and was stopped."
+                ),
+            }
+        await send(chat_id, _format_console_result(command_text, result))
     except asyncio.CancelledError:
         raise
     except Exception as exc:
         log_exception("console", "command_error", exc)
-        await send(chat_id, f"Console error: {type(exc).__name__}: {exc}")
+        await send(
+            chat_id,
+            bash_console_block(
+                command_text,
+                f"Console error: {type(exc).__name__}: {exc}",
+            ),
+        )
 
 
 async def _run_stateless_ask(

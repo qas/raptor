@@ -16,6 +16,7 @@ from controller import start_root_session
 from presentation import clear_steering_indicator, steering_indicator
 from session import StateCapacityError, state, steer_queue
 from steering import handle_steering_action
+from tool_activity import handle_tool_activity_action
 from threads import handle_thread_action
 import session
 from observability import log_agent_activity, log_event, log_exception
@@ -61,6 +62,8 @@ async def handle_event(event: ChatEvent) -> None:
         return
 
     if isinstance(event, IncomingAction):
+        if await handle_tool_activity_action(event):
+            return
         if await handle_thread_action(event):
             return
         if await handle_steering_action(event):

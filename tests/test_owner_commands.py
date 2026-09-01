@@ -83,8 +83,10 @@ class OwnerCommandTests(unittest.IsolatedAsyncioTestCase):
             chat_id=1,
             parent_session_id="session-1",
         )
-        self.assertIn("Console exited with code 0.", send.await_args.args[1])
-        self.assertIn("operator", send.await_args.args[1])
+        self.assertEqual(
+            send.await_args.args[1],
+            "```bash\n$ whoami\noperator\n```",
+        )
 
     async def test_console_stops_command_that_outlives_wait(self) -> None:
         send = AsyncMock()
@@ -117,7 +119,11 @@ class OwnerCommandTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(handled)
         cancel.assert_awaited_once_with("shell-1")
-        self.assertIn("time limit", send.await_args.args[1])
+        self.assertEqual(
+            send.await_args.args[1],
+            "```bash\n$ sleep 60\n"
+            "Command exceeded the time limit and was stopped.\n```",
+        )
 
     async def test_console_waits_for_sandbox_preparation(self) -> None:
         send = AsyncMock()
@@ -158,7 +164,30 @@ class OwnerCommandTests(unittest.IsolatedAsyncioTestCase):
                 * 1000,
             }
         )
-        self.assertIn("operator", send.await_args.args[1])
+        self.assertEqual(
+            send.await_args.args[1],
+            "```bash\n$ whoami\noperator\n```",
+        )
+
+    def test_console_result_preserves_failure_details(self) -> None:
+        rendered = commands._format_console_result(
+            "false",
+            {
+                "status": "failed",
+                "exit_code": 7,
+                "stdout": "",
+                "stderr": "permission denied\n",
+                "error": "permission denied",
+                "truncated": True,
+            },
+        )
+
+        self.assertEqual(
+            rendered,
+            "```bash\n$ false\npermission denied\n"
+            "Output was truncated to the configured limit.\n"
+            "Process exited with code 7.\n```",
+        )
 
     async def test_lifecycle_commands_acknowledge_then_request_exit(self) -> None:
         for name, expected in (

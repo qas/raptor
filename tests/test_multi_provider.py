@@ -208,6 +208,11 @@ class QueueProvider:
         self.calls.append(("activity_restore", conversation_id, surface_id))
 
 
+class ConsoleQueueProvider(QueueProvider):
+    def supports_tool_console(self, conversation_id) -> bool:
+        return conversation_id == "123"
+
+
 class MultiProviderTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         self.telegram = QueueProvider("telegram", "123")
@@ -254,6 +259,16 @@ class MultiProviderTests(unittest.IsolatedAsyncioTestCase):
         await multi.initialize(())
 
         self.assertEqual(multi.primary_conversation_id, "delayed:ready")
+
+    def test_tool_console_support_routes_to_native_provider(self) -> None:
+        telegram = ConsoleQueueProvider("telegram", "123")
+        multi = MultiProvider((telegram, self.api))
+        self.addAsyncCleanup(multi.close)
+
+        self.assertTrue(multi.supports_tool_console("telegram:123"))
+        self.assertFalse(
+            multi.supports_tool_console("responses_api:api:default")
+        )
 
     async def test_close_logs_each_provider_failure(self) -> None:
         with (
