@@ -2271,8 +2271,20 @@ class PinnedStatusSlotTests(unittest.IsolatedAsyncioTestCase):
     async def test_compacting_indicator_animates_then_deletes(self) -> None:
         from presentation import compacting_indicator
 
-        async with compacting_indicator(1, interval=0.005):
-            await asyncio.sleep(0.018)
+        animated = asyncio.Event()
+
+        async def fake_tg(method, payload=None):
+            data = payload or {}
+            self.calls.append((method, data))
+            if method == "sendMessage":
+                return {"message_id": 321}
+            if method == "editMessageText":
+                animated.set()
+            return True
+
+        with patch("telegram.tg_call", fake_tg):
+            async with compacting_indicator(1, interval=0.005):
+                await asyncio.wait_for(animated.wait(), timeout=1)
 
         methods = [method for method, _payload in self.calls]
         self.assertEqual(methods[0], "sendMessage")
@@ -2283,8 +2295,7 @@ class PinnedStatusSlotTests(unittest.IsolatedAsyncioTestCase):
             if method in {"sendMessage", "editMessageText"}
         ]
         self.assertEqual(texts[0], "Compacting.")
-        self.assertIn("Compacting..", texts)
-        self.assertIn("Compacting...", texts)
+        self.assertEqual(texts[1], "Compacting..")
         self.assertEqual(
             self.calls[-1][1],
             {"chat_id": 1, "message_id": 321},
