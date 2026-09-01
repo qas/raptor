@@ -36,6 +36,7 @@ def acquire_runtime_lock() -> bool:
     ensure_private_directory(RUNTIME_LOCK_PATH.parent)
     fd = os.open(RUNTIME_LOCK_PATH, os.O_RDWR | os.O_CREAT, 0o600)
     try:
+        os.set_inheritable(fd, False)
         os.fchmod(fd, 0o600)
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:

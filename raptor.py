@@ -8,6 +8,13 @@ from process_lock import acquire_runtime_lock, release_runtime_lock
 from shell_supervisor import SUPERVISOR_MODE
 
 
+def _restart_argv() -> list[str]:
+    executable = os.path.realpath(sys.executable)
+    if getattr(sys, "frozen", False):
+        return [executable, *sys.argv[1:]]
+    return [executable, os.path.realpath(__file__), *sys.argv[1:]]
+
+
 def run() -> int:
     """Parse the CLI and establish ownership before loading the application."""
     if len(sys.argv) > 1 and sys.argv[1] == SUPERVISOR_MODE:
@@ -58,28 +65,37 @@ def run() -> int:
         if args.daemon:
             ready_fd = daemonize()
         set_runtime(daemon=args.daemon)
+        restart_requested = False
         try:
             import application
             import session
 
             session.DAEMON_MODE = args.daemon
-            if ready_fd is None:
-                asyncio.run(application.main())
-            else:
-                from runtime import signal_daemon_ready
+            try:
+                if ready_fd is None:
+                    asyncio.run(application.main())
+                else:
+                    from runtime import signal_daemon_ready
 
-                def on_ready() -> None:
-                    nonlocal ready_fd
-                    assert ready_fd is not None
-                    owned_fd = ready_fd
-                    ready_fd = None
-                    signal_daemon_ready(owned_fd)
+                    def on_ready() -> None:
+                        nonlocal ready_fd
+                        assert ready_fd is not None
+                        owned_fd = ready_fd
+                        ready_fd = None
+                        signal_daemon_ready(owned_fd)
 
-                asyncio.run(application.main(on_ready=on_ready))
+                    asyncio.run(application.main(on_ready=on_ready))
+            except (KeyboardInterrupt, asyncio.CancelledError):
+                pass
+            from application_control import ExitRequest, take_exit_request
+            restart_requested = take_exit_request() is ExitRequest.RESTART
         finally:
             if ready_fd is not None:
                 os.close(ready_fd)
             clear_runtime_if_ours()
+        if restart_requested:
+            argv = _restart_argv()
+            os.execv(argv[0], argv)
         return 0
     except (KeyboardInterrupt, asyncio.CancelledError):
         return 0

@@ -22,6 +22,7 @@ import process_lock
 import raptor
 import runtime
 import session
+from application_control import ExitRequest
 
 
 class RuntimeLockTests(unittest.TestCase):
@@ -50,6 +51,9 @@ class RuntimeLockTests(unittest.TestCase):
         self.assertTrue(process_lock.acquire_runtime_lock())
         self.assertTrue(process_lock.runtime_lock_held())
         self.assertEqual(self.lock_path.read_text().strip(), str(os.getpid()))
+        self.assertFalse(
+            os.get_inheritable(process_lock._runtime_lock_fd)
+        )
 
         process_lock.release_runtime_lock()
 
@@ -280,6 +284,80 @@ finally:
             order,
             ["parse", "lock", "publish", "application", "clear"],
         )
+
+    def test_restart_executes_only_after_runtime_state_is_cleared(self) -> None:
+        order: list[str] = []
+        runtime_module = types.ModuleType("runtime")
+        runtime_module.parse_args = lambda: Namespace(
+            status=False,
+            stop_daemon=False,
+            check_proxy=False,
+            daemon=False,
+        )
+        runtime_module.cli_runtime_status = lambda: 0
+        runtime_module.stop_daemon = lambda: 0
+        runtime_module.daemonize = lambda: None
+        runtime_module.set_runtime = lambda **_kw: order.append("publish")
+        runtime_module.clear_runtime_if_ours = lambda: order.append("clear")
+        application_module = types.ModuleType("application")
+
+        async def application_main() -> None:
+            order.append("application")
+
+        application_module.main = application_main
+        session_module = types.ModuleType("session")
+        session_module.DAEMON_MODE = False
+
+        with (
+            patch.object(sys, "argv", ["raptor.py"]),
+            patch.object(raptor, "acquire_runtime_lock", return_value=True),
+            patch.object(
+                raptor,
+                "release_runtime_lock",
+                side_effect=lambda: order.append("release"),
+            ),
+            patch.object(
+                raptor.os,
+                "execv",
+                side_effect=lambda *_args: order.append("exec"),
+            ) as execv,
+            patch(
+                "application_control.take_exit_request",
+                return_value=ExitRequest.RESTART,
+            ),
+            patch.dict(
+                sys.modules,
+                {
+                    "runtime": runtime_module,
+                    "application": application_module,
+                    "session": session_module,
+                },
+            ),
+        ):
+            result = raptor.run()
+
+        self.assertEqual(result, 0)
+        self.assertEqual(
+            order,
+            ["publish", "application", "clear", "exec", "release"],
+        )
+        execv.assert_called_once_with(
+            os.path.realpath(sys.executable),
+            [
+                os.path.realpath(sys.executable),
+                os.path.realpath(raptor.__file__),
+            ],
+        )
+
+    def test_frozen_restart_reuses_original_process_arguments(self) -> None:
+        with (
+            patch.object(sys, "frozen", True, create=True),
+            patch.object(sys, "executable", "/opt/raptor/raptor"),
+            patch.object(sys, "argv", ["raptor", "--daemon"]),
+        ):
+            argv = raptor._restart_argv()
+
+        self.assertEqual(argv, ["/opt/raptor/raptor", "--daemon"])
 
     def test_daemon_entrypoint_signals_after_application_ready(self) -> None:
         order: list[str] = []

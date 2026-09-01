@@ -18,12 +18,41 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 import application
+from application_control import ExitRequest
 from chat_provider import IncomingMessage, ProviderCapabilities
 from chat_runtime import get_chat_provider, set_chat_provider
 from model_providers import ModelTarget
 
 
 class ApplicationLifecycleTests(unittest.IsolatedAsyncioTestCase):
+    def test_restart_preserves_active_goal_for_next_process(self) -> None:
+        with (
+            patch.object(
+                application,
+                "current_exit_request",
+                return_value=ExitRequest.RESTART,
+            ),
+            patch.object(application, "goal_is_active", return_value=True),
+            patch.object(application, "thread_active", return_value=False),
+        ):
+            should_pause = application._should_pause_active_goal()
+
+        self.assertFalse(should_pause)
+
+    def test_shutdown_pauses_active_goal(self) -> None:
+        with (
+            patch.object(
+                application,
+                "current_exit_request",
+                return_value=ExitRequest.SHUTDOWN,
+            ),
+            patch.object(application, "goal_is_active", return_value=True),
+            patch.object(application, "thread_active", return_value=False),
+        ):
+            should_pause = application._should_pause_active_goal()
+
+        self.assertTrue(should_pause)
+
     async def test_ignored_event_is_finalized_without_binding_chat_state(
         self,
     ) -> None:
@@ -71,6 +100,46 @@ class ApplicationLifecycleTests(unittest.IsolatedAsyncioTestCase):
         bound_chat.assert_called_once_with("configured")
         handle.assert_awaited_once_with(event)
         provider.finish_event.assert_awaited_once_with(event)
+
+    async def test_exit_request_activates_after_event_finalization(self) -> None:
+        order: list[str] = []
+        provider = Mock(authorized_user_id="operator")
+        provider.prepare_event = Mock()
+
+        async def finish(_event) -> None:
+            order.append("finish")
+
+        provider.finish_event = AsyncMock(side_effect=finish)
+        event = IncomingMessage(
+            conversation_id="configured",
+            sender_id="operator",
+            message_id="1",
+            text="/shutdown",
+        )
+
+        async def handle(_event) -> None:
+            order.append("handle")
+
+        def activate() -> bool:
+            order.append("activate")
+            return True
+
+        with (
+            patch.object(
+                application.session,
+                "bound_chat",
+                return_value=nullcontext(),
+            ),
+            patch.object(application, "handle_event", side_effect=handle),
+            patch.object(
+                application,
+                "activate_application_exit",
+                side_effect=activate,
+            ),
+        ):
+            await application.dispatch_event(provider, event)
+
+        self.assertEqual(order, ["handle", "finish", "activate"])
 
     async def test_failed_event_does_not_drop_later_batch_events(self) -> None:
         provider = Mock(name="provider", authorized_user_id="operator")

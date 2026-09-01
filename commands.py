@@ -6,6 +6,11 @@ import re
 from datetime import datetime, timezone
 from typing import Any
 
+from application_control import (
+    ExitRequest,
+    application_control_available,
+    request_application_exit,
+)
 from chat_provider import ConversationId
 
 from chat_store import (
@@ -90,8 +95,10 @@ from subagents import (
     subagent_summaries,
 )
 from shell_sessions import (
+    cancel_shell_session,
     cancel_shell_sessions,
     pending_shell_completions,
+    run_shell,
     running_shell_sessions,
 )
 from skills import skill_catalog_instructions
@@ -110,6 +117,65 @@ from tool_activity import ToolActivitySurface
 # ---------------------------------------------------------------------------
 # Chat commands
 # ---------------------------------------------------------------------------
+
+CONSOLE_TIMEOUT_SECONDS = 20
+
+
+def _format_console_result(result: dict[str, Any]) -> str:
+    status = str(result.get("status") or "unknown")
+    exit_code = result.get("exit_code")
+    lines = [
+        (
+            f"Console exited with code {exit_code}."
+            if exit_code is not None
+            else f"Console status: {status}."
+        )
+    ]
+    stdout = str(result.get("stdout") or "")
+    stderr = str(result.get("stderr") or "")
+    error = str(result.get("error") or "")
+    if stdout:
+        lines.extend(("stdout:", stdout))
+    if stderr:
+        lines.extend(("stderr:", stderr))
+    if error and error not in stderr:
+        lines.extend(("error:", error))
+    if result.get("truncated"):
+        lines.append("Output was truncated to the configured limit.")
+    if len(lines) == 1:
+        lines.append("(no output)")
+    return "\n".join(lines)
+
+
+async def _run_console_command(
+    chat_id: ConversationId,
+    command_text: str,
+) -> None:
+    try:
+        result = await run_shell(
+            command_text,
+            timeout=CONSOLE_TIMEOUT_SECONDS,
+            yield_time_ms=30_000,
+            tty=False,
+            chat_id=chat_id,
+            parent_session_id=str(state.get("current_session_id") or "")
+            or None,
+        )
+        if result.get("status") == "running":
+            session_id = str(result.get("session_id") or "")
+            if session_id:
+                await cancel_shell_session(session_id)
+            await send(
+                chat_id,
+                "Console command exceeded the time limit and was stopped.",
+            )
+            return
+        await send(chat_id, _format_console_result(result))
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        log_exception("console", "command_error", exc)
+        await send(chat_id, f"Console error: {type(exc).__name__}: {exc}")
 
 
 async def _run_stateless_ask(
@@ -365,12 +431,43 @@ async def command(
                 "/approval off - allow tools immediately\n"
                 "/todos - show todo list\n"
                 "/subagents - show subagent status\n"
+                "/console <command> - run a bounded managed shell command\n"
+                "/shutdown - stop Raptor after cleanup\n"
+                "/restart - restart Raptor after cleanup\n"
                 "/goal - show persistent goal\n"
                 "/goal <objective> - start or replace goal\n"
                 "/goal pause|resume|complete|clear"
             ),
         )
 
+        return True
+
+    if cmd == "/console":
+        if not arg:
+            await send(chat_id, "Usage: /console <command>")
+            return True
+        await _run_console_command(chat_id, arg)
+        return True
+
+    if cmd in {"/shutdown", "/restart"}:
+        if arg:
+            await send(chat_id, f"Usage: {cmd}")
+            return True
+        if not application_control_available():
+            await send(chat_id, "Application control is unavailable.")
+            return True
+        request = (
+            ExitRequest.RESTART if cmd == "/restart" else ExitRequest.SHUTDOWN
+        )
+        await send(
+            chat_id,
+            (
+                "Restarting Raptor."
+                if request is ExitRequest.RESTART
+                else "Shutting down Raptor."
+            ),
+        )
+        request_application_exit(request)
         return True
 
     if cmd == "/ask":

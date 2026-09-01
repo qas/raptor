@@ -13,6 +13,13 @@ from activity import (
     close_activity_projections,
     reconcile_activity_surfaces,
 )
+from application_control import (
+    ExitRequest,
+    activate_application_exit,
+    bind_application_task,
+    current_exit_request,
+    unbind_application_task,
+)
 from agent import flush_pending_delivery, repair_interrupted_root_turn
 from chat_provider import ChatEvent, ChatProvider
 from chat_runtime import load_chat_providers, send, set_chat_provider
@@ -61,7 +68,10 @@ async def dispatch_event(provider: ChatProvider, event: ChatEvent) -> None:
         with session.bound_chat(conversation_id):
             await handle_event(event)
     finally:
-        await provider.finish_event(event)
+        try:
+            await provider.finish_event(event)
+        finally:
+            activate_application_exit()
 
 
 async def dispatch_events(
@@ -93,6 +103,14 @@ async def _cleanup(name: str, operation: Awaitable[Any]) -> None:
         log_exception("runtime", "shutdown_error", exc, {"operation": name})
 
 
+def _should_pause_active_goal() -> bool:
+    return bool(
+        current_exit_request() is not ExitRequest.RESTART
+        and goal_is_active()
+        and not thread_active()
+    )
+
+
 async def main(on_ready: Callable[[], None] | None = None) -> None:
     loop = asyncio.get_running_loop()
     current_task = asyncio.current_task()
@@ -112,6 +130,8 @@ async def main(on_ready: Callable[[], None] | None = None) -> None:
     cursor: object | None = None
 
     try:
+        if current_task is not None:
+            bind_application_task(current_task)
         initialize_workspace_identity()
         initialize_builtin_skills()
         default_target = await ensure_target(MODEL_CONFIGURATION.default_target)
@@ -251,7 +271,7 @@ async def main(on_ready: Callable[[], None] | None = None) -> None:
         for runtime in session.all_chat_runtimes():
             with session.bound_runtime(runtime):
                 try:
-                    if goal_is_active() and not thread_active():
+                    if _should_pause_active_goal():
                         pause_goal()
                 except Exception as exc:
                     log_exception(
@@ -275,3 +295,5 @@ async def main(on_ready: Callable[[], None] | None = None) -> None:
         await _cleanup("close chat provider", provider.close())
         set_chat_provider(None)
         await _cleanup("close Responses client", session.responses.aclose())
+        if current_task is not None:
+            unbind_application_task(current_task)

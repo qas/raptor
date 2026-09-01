@@ -36,6 +36,9 @@ COMMANDS: tuple[tuple[str, str], ...] = (
     ("approval", "Toggle tool approval"),
     ("todos", "Show todo list"),
     ("subagents", "Show subagent status"),
+    ("console", "Run a managed shell command"),
+    ("shutdown", "Shut down Raptor"),
+    ("restart", "Restart Raptor"),
     ("goal", "Show or set persistent goal"),
     ("help", "Show commands"),
 )

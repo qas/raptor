@@ -162,6 +162,9 @@ the daemon (the launch workspace's `.raptor` directory by default).
 | `/approval` | Toggle tool approval |
 | `/todos` | Show the active execution plan |
 | `/subagents` | Show subagent status, provider, and model |
+| `/console <command>` | Run one bounded command in the managed shell sandbox |
+| `/shutdown` | Clean up owned work and stop the Raptor process |
+| `/restart` | Clean up owned work and replace the Raptor process |
 | `/goal` | Inspect or manage the persistent goal |
 | `/help` | Show available commands |
 
@@ -171,6 +174,17 @@ catalog as a normal agent turn. It may use normal tools for multiple in-memory
 rounds, but neither its model exchange nor answer is added to the canonical
 transcript. Tool side effects remain real. The query runs as the chat's owned
 turn, so provider polling stays responsive and `/stop` can cancel it.
+
+`/console` is admitted through the same authorized-user check as every other
+interactive command. It uses the configured filesystem policy, records the
+exact command in the shell audit log, bounds retained output, and stops after
+20 seconds. It never becomes background work.
+
+`/shutdown` pauses an active goal, cleans up owned turns, subagents, and shell
+processes, then exits. A stopped process cannot receive chat commands; start it
+again from the host with `raptor --daemon`. `/restart` performs the same cleanup
+but preserves an active goal and replaces the process with its original command
+line after clearing its published runtime state.
 
 `/thread` creates a separate crash-safe transcript. Clearing a thread restores
 the parent unchanged. Merging copies only post-fork user, assistant,
@@ -212,6 +226,7 @@ transcript remains available as audit history.
 | `install.sh` | Unix installer and uninstaller for published Linux and macOS binaries |
 | `raptor.py` | Ownership-first process entry point and CLI |
 | `application.py` | Long-running provider and agent application lifecycle |
+| `application_control.py` | Application-task shutdown and restart requests |
 | `workspace_identity.py` | Workspace identity bootstrap and bounded loading |
 | `process_lock.py` | State-independent atomic process ownership |
 | `runtime.py` | Process metadata and daemon controls |
