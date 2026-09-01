@@ -29,6 +29,7 @@ from config import (
     CHAT_DIR,
     CHAT_PROVIDERS,
     CHAT_STREAMING,
+    CHAT_TOOL_ACTIVITY,
     CONTEXT_COMPACT_RATIO,
     CONTEXT_SAFETY_TOKENS,
     MAX_TOOL_ROUNDS,
@@ -237,6 +238,7 @@ async def main(on_ready: Callable[[], None] | None = None) -> None:
                 "context_safety_tokens": CONTEXT_SAFETY_TOKENS,
                 "tool_round_limit": MAX_TOOL_ROUNDS,
                 "streaming": CHAT_STREAMING,
+                "tool_activity": CHAT_TOOL_ACTIVITY,
                 "capabilities": {
                     "drafts": provider.capabilities.drafts,
                     "reasoning_summaries": (

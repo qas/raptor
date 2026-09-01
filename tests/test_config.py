@@ -63,6 +63,7 @@ class ResponsesServerConfigurationTests(unittest.TestCase):
 
         self.assertEqual(values["RESPONSES_SERVER_HOST"], "127.0.0.1")
         self.assertEqual(values["RESPONSES_SERVER_API_KEY"], "")
+        self.assertTrue(values["CHAT_TOOL_ACTIVITY"])
 
 
 class TomlConfigurationTests(unittest.TestCase):
@@ -94,6 +95,7 @@ class TomlConfigurationTests(unittest.TestCase):
                     "providers": ["telegram"],
                     "streaming": False,
                     "stream_interval": 0.2,
+                    "tool_activity": False,
                     "max_pending_steers": 6,
                     "max_runtimes": 12,
                 },
@@ -148,6 +150,7 @@ class TomlConfigurationTests(unittest.TestCase):
             "CHAT_PROVIDERS": ("telegram",),
             "CHAT_STREAMING": False,
             "CHAT_STREAM_INTERVAL": 0.2,
+            "CHAT_TOOL_ACTIVITY": False,
             "MAX_PENDING_STEERS": 6,
             "MAX_CHAT_RUNTIMES": 12,
             "TG_USER_ID": 7,
@@ -188,7 +191,10 @@ class TomlConfigurationTests(unittest.TestCase):
     def test_environment_overrides_toml(self) -> None:
         values = self._load(
             {
-                "chat": {"streaming": False},
+                "chat": {
+                    "streaming": False,
+                    "tool_activity": False,
+                },
                 "telegram": {
                     "chat_ids": [8],
                     "subagent_topics_silent": True,
@@ -196,12 +202,14 @@ class TomlConfigurationTests(unittest.TestCase):
             },
             {
                 "CHAT_STREAMING": "true",
+                "CHAT_TOOL_ACTIVITY": "true",
                 "TG_CHAT_IDS": "9,-1002",
                 "TELEGRAM_SUBAGENT_TOPICS_SILENT": "false",
             },
         )
 
         self.assertTrue(values["CHAT_STREAMING"])
+        self.assertTrue(values["CHAT_TOOL_ACTIVITY"])
         self.assertEqual(values["TG_CHAT_IDS"], (9, -1002))
         self.assertFalse(values["TELEGRAM_SUBAGENT_TOPICS_SILENT"])
 
@@ -382,6 +390,18 @@ class ContextBudgetTests(unittest.TestCase):
             with self.assertRaisesRegex(
                 ValueError,
                 "CHAT_STREAMING must be a boolean",
+            ):
+                runpy.run_path(str(ROOT / "config.py"))
+
+    def test_rejects_invalid_tool_activity_environment_value(self) -> None:
+        with patch.dict(
+            os.environ,
+            {"CHAT_TOOL_ACTIVITY": "sometimes"},
+            clear=True,
+        ):
+            with self.assertRaisesRegex(
+                ValueError,
+                "CHAT_TOOL_ACTIVITY must be a boolean",
             ):
                 runpy.run_path(str(ROOT / "config.py"))
 

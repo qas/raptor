@@ -20,7 +20,7 @@ from chat_provider import (
     ToolConsoleProvider,
 )
 from chat_runtime import get_chat_provider
-from config import CHAT_STREAM_INTERVAL, MAX_TOOL_OUTPUT
+from config import CHAT_STREAM_INTERVAL, CHAT_TOOL_ACTIVITY, MAX_TOOL_OUTPUT
 from observability import log_exception
 
 
@@ -121,8 +121,11 @@ class ToolActivitySurface:
     def __init__(
         self,
         conversation_id: ConversationId,
+        *,
+        enabled: bool | None = None,
     ) -> None:
         self.conversation_id = conversation_id
+        self._enabled = CHAT_TOOL_ACTIVITY if enabled is None else enabled
         self._active: _ToolBubble | None = None
         self._completed: deque[_ToolBubble] = deque()
         self._by_call_id: dict[str, _ToolBubble] = {}
@@ -311,12 +314,16 @@ class ToolActivitySurface:
         call: dict[str, Any],
         complete: bool,
     ) -> None:
+        if not self._enabled:
+            return
         bubble = self._update_active("Preparing tool", call)
         self._queue(bubble)
         if complete:
             await self._flush(bubble)
 
     async def running(self, call: dict[str, Any]) -> None:
+        if not self._enabled and self._active is None:
+            return
         bubble = self._update_active("Running", call)
         wait_ms = _poll_wait_ms(call)
         if wait_ms is not None and self._supports_console():
@@ -410,6 +417,8 @@ class ToolActivitySurface:
         call: dict[str, Any],
         result: dict[str, Any],
     ) -> None:
+        if not self._enabled and self._active is None:
+            return
         status = "Completed" if result.get("ok") else "Failed"
         if result.get("status") == "interrupted":
             status = "Interrupted"

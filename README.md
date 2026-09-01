@@ -91,6 +91,7 @@ context_window = 131072
 
 [chat]
 providers = ["telegram", "responses_api"]
+tool_activity = true
 
 [telegram]
 user_id = 123456789
@@ -341,7 +342,9 @@ response produces a tool call. On Telegram, shell bubbles open in `Console`,
 which streams the latest seven output lines; one button toggles between that
 view and `Info`. Empty `write_stdin` polls edit one waiting bubble every five
 seconds instead of exposing polling arguments. Steering is transient and is
-never pinned.
+never pinned. Set `chat.tool_activity = false` to hide nonessential transient
+tool bubbles. Approval prompts remain visible because they require an operator
+decision.
 
 ### Context and compaction
 
@@ -604,6 +607,7 @@ no_proxy = ["models.internal", "*.example.net"]
 providers = ["telegram", "responses_api"]
 streaming = true
 stream_interval = 0.35
+tool_activity = true
 max_pending_steers = 64
 max_runtimes = 1024
 
@@ -742,6 +746,7 @@ the conversation or subagent.
 | `CHAT_PROVIDERS` | `telegram,responses_api` | Comma-separated built-ins or `module:attribute` providers |
 | `CHAT_STREAMING` | `1` | Enable streamed draft previews |
 | `CHAT_STREAM_INTERVAL` | `0.35` | Minimum seconds between draft snapshots |
+| `CHAT_TOOL_ACTIVITY` | `1` | Show transient tool activity bubbles |
 | `MAX_TOOL_ROUNDS` | `0` | Tool-round cap; `0` is uncapped |
 | `SHELL_TIMEOUT` | `0` | Default shell deadline in seconds; `0` disables it |
 | `MAX_TOOL_OUTPUT` | `30000` | Tool text, output, shell-input, and audit-command character budget |

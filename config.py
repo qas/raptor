@@ -285,6 +285,7 @@ _CHAT = config_section(
         "providers",
         "streaming",
         "stream_interval",
+        "tool_activity",
         "max_pending_steers",
         "max_runtimes",
     },
@@ -636,6 +637,12 @@ CHAT_STREAMING = _env_bool(
     "CHAT_STREAMING",
     True,
     configured=_CHAT.get("streaming"),
+)
+
+CHAT_TOOL_ACTIVITY = _env_bool(
+    "CHAT_TOOL_ACTIVITY",
+    True,
+    configured=_CHAT.get("tool_activity"),
 )
 
 TELEGRAM_MARKDOWN = _env_bool(

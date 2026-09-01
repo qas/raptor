@@ -322,6 +322,61 @@ class ChatProviderContractTests(unittest.IsolatedAsyncioTestCase):
             [("process_output", "!room:example.org", chunk)],
         )
 
+    async def test_disabled_tool_activity_suppresses_transient_bubbles(
+        self,
+    ) -> None:
+        from tool_activity import ToolActivitySurface
+
+        surface = ToolActivitySurface("!room:example.org", enabled=False)
+        call = {
+            "name": "shell",
+            "call_id": "c1",
+            "arguments": '{"command":"pwd"}',
+        }
+        chunk = ProcessOutputChunk(
+            call_id="c1",
+            session_id="shell-1",
+            stream="stdout",
+            text="working\n",
+        )
+
+        await surface.stream(call, True)
+        await surface.running(call)
+        await surface.publish_process_output(chunk)
+        await surface.finished(call, {"ok": True})
+        await surface.clear()
+
+        self.assertEqual(
+            self.provider.calls,
+            [("process_output", "!room:example.org", chunk)],
+        )
+
+    async def test_disabled_tool_activity_keeps_required_approval(
+        self,
+    ) -> None:
+        from tool_activity import ToolActivitySurface
+
+        surface = ToolActivitySurface("!room:example.org", enabled=False)
+        call = {
+            "name": "shell",
+            "call_id": "c1",
+            "arguments": '{"command":"touch marker"}',
+        }
+        controls = ((
+            ActionButton("Approve", "approve"),
+            ActionButton("Deny", "deny"),
+        ),)
+
+        await surface.stream(call, True)
+        await surface.approval(call, controls)
+        await surface.running(call)
+        await surface.finished(call, {"ok": True})
+        await surface.clear()
+
+        methods = [item[0] for item in self.provider.calls]
+        self.assertEqual(methods, ["create", "edit", "edit", "delete_many"])
+        self.assertEqual(self.provider.calls[0][4], controls)
+
     async def test_tool_console_toggles_and_streams_tail(
         self,
     ) -> None:
