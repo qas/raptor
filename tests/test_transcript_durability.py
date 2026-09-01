@@ -22,6 +22,7 @@ if str(_ROOT) not in sys.path:
 
 import agent as agent_mod
 import chat_store
+import context
 import controller
 import responses
 from response_errors import MalformedToolCallError
@@ -257,6 +258,108 @@ class TranscriptDurabilityTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("function_call", types)
         self.assertIn("function_call_output", types)
         self.assertIn("message", types)
+
+    async def test_threshold_compaction_resumes_without_reanswering(self) -> None:
+        requests: list[list[dict]] = []
+        compact_calls = 0
+        call = {
+            "type": "function_call",
+            "name": "list_dir",
+            "call_id": "c1",
+            "arguments": "{}",
+        }
+
+        async def fake_stream(_target, _chat_id, items, **_kwargs):
+            requests.append(copy.deepcopy(items))
+            if len(requests) == 1:
+                return {
+                    "output": [
+                        {
+                            "type": "message",
+                            "role": "assistant",
+                            "content": [
+                                {
+                                    "type": "output_text",
+                                    "text": "Initial answer already streamed.",
+                                }
+                            ],
+                        },
+                        call,
+                    ]
+                }
+            return {
+                "output": [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [
+                            {"type": "output_text", "text": "Finished."}
+                        ],
+                    }
+                ]
+            }
+
+        def estimate(items, **_kwargs):
+            return (
+                200
+                if any(
+                    item.get("type") == "function_call_output"
+                    for item in items
+                )
+                else 1
+            )
+
+        async def compact(*_args, **kwargs):
+            nonlocal compact_calls
+            compact_calls += 1
+            work = [
+                {"role": "user", "content": "Inspect the repository."},
+                {
+                    "role": "user",
+                    "content": (
+                        "Raptor conversation checkpoint: the initial answer "
+                        "was already communicated; finish the tool work."
+                    ),
+                },
+            ]
+            if kwargs["include_continuation"]:
+                work.extend(context.checkpoint_continuation_input())
+            return work
+
+        @asynccontextmanager
+        async def indicator(*_args, **_kwargs):
+            yield
+
+        surface = Mock(
+            stream=AsyncMock(),
+            finished=AsyncMock(),
+            clear=AsyncMock(),
+        )
+        with (
+            patch.object(agent_mod, "ToolActivitySurface", return_value=surface),
+            patch.object(agent_mod, "responses_create_stream", fake_stream),
+            patch.object(
+                agent_mod,
+                "execute_tool_with_approval",
+                AsyncMock(return_value={"ok": True}),
+            ),
+            patch.object(agent_mod, "estimate_response_request_tokens", estimate),
+            patch.object(agent_mod, "_input_budget", return_value=100),
+            patch.object(agent_mod, "ensure_context_under_budget", compact),
+            patch.object(agent_mod, "compacting_indicator", indicator),
+            patch.object(agent_mod, "send", _noop),
+            patch.object(agent_mod, "typing_loop", _noop),
+            patch.object(agent_mod, "maybe_auto_compact", _noop),
+        ):
+            result = await agent_mod.agent_turn(1, "Inspect the repository.")
+
+        self.assertTrue(result)
+        self.assertEqual(compact_calls, 1)
+        self.assertEqual(len(requests), 2)
+        self.assertEqual(
+            requests[1][-1],
+            context.CHECKPOINT_CONTINUATION_INPUT,
+        )
 
     async def test_root_tool_activity_streams_and_tracks_execution(self) -> None:
         responses = 0

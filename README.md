@@ -315,6 +315,11 @@ is paused instead of blocked. Providers may show a temporary animated
 the configured context limit and threshold compaction state even when the
 provider's live model-list request is unavailable.
 
+When compaction occurs during an in-progress tool turn, Raptor marks the
+rebuilt request as a continuation: completed or already communicated work is
+not repeated, and the model resumes only the unresolved actions. Manual and
+post-response compaction do not add this transient continuation input.
+
 ### Retries and continuation
 
 Transient transport errors include connection failures, disconnects such as

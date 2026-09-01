@@ -617,6 +617,7 @@ async def run_subagent(
                         )
                     ),
                     reason="threshold",
+                    include_continuation=True,
                     log_source="subagent",
                     input_budget=budget,
                     compaction_input_budget=compaction_input_budget,
@@ -786,8 +787,7 @@ async def run_subagent(
         if not ok:
             return None
         rebuilt = build_active_context(session_id)
-        if reason == "overflow":
-            rebuilt.extend(checkpoint_continuation_input())
+        rebuilt.extend(checkpoint_continuation_input())
         return rebuilt
 
     def checkpoint(events: list[dict[str, Any]]) -> None:

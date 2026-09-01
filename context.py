@@ -55,7 +55,10 @@ Do not continue internal analysis. Emit the checkpoint as the final answer now.
 CHECKPOINT_CONTINUATION_INPUT = {
     "role": "user",
     "content": (
-        "Continue the active task from the checkpoint."
+        "Continue the in-progress turn from the checkpoint. Treat anything "
+        "the checkpoint records as completed or already communicated as "
+        "done; do not repeat it. Resume only unresolved actions, and give "
+        "the user-facing final response after the remaining work is complete."
     ),
 }
 

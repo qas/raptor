@@ -667,6 +667,7 @@ async def agent_turn(
                                 )
                             ),
                             reason="threshold",
+                            include_continuation=True,
                             log_source="agent",
                             input_budget=budget,
                             compaction_input_budget=(
@@ -835,7 +836,7 @@ async def agent_turn(
                     ),
                     reason=reason,
                     force=force,
-                    include_continuation=force,
+                    include_continuation=True,
                     log_source="agent",
                     input_budget=_input_budget(target),
                     compaction_input_budget=_input_budget(compaction_target),
