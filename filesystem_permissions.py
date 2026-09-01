@@ -69,6 +69,42 @@ def _could_match_descendant(
     )
 
 
+@lru_cache(maxsize=4096)
+def _prefix_match_states(
+    pattern: tuple[str, ...],
+    path: tuple[str, ...],
+) -> frozenset[int]:
+    """Return glob positions reachable after consuming path."""
+
+    def closure(states: set[int]) -> set[int]:
+        expanded = set(states)
+        pending = list(states)
+        while pending:
+            position = pending.pop()
+            if position < len(pattern) and pattern[position] == "**":
+                following = position + 1
+                if following not in expanded:
+                    expanded.add(following)
+                    pending.append(following)
+        return expanded
+
+    states = closure({0})
+    for part in path:
+        following: set[int] = set()
+        for position in states:
+            if position >= len(pattern):
+                continue
+            segment = pattern[position]
+            if segment == "**":
+                following.add(position)
+            elif fnmatch.fnmatchcase(part, segment):
+                following.add(position + 1)
+        states = closure(following)
+        if not states:
+            break
+    return frozenset(states)
+
+
 @dataclass(frozen=True)
 class DenyReadPattern:
     configured: str
@@ -220,14 +256,24 @@ class FileAccessPolicy:
         scanned = 0
         for pattern in self.patterns:
             if not pattern.has_glob:
-                prepared[Path(pattern.absolute)] = True
+                prepared[Path(pattern.absolute).resolve(strict=False)] = True
                 continue
             root = pattern.scan_root
             if not root.exists():
                 continue
             if pattern.matches(root):
-                prepared[root] = prepared.get(root, False)
+                resolved_root = root.resolve(strict=False)
+                prepared[resolved_root] = prepared.get(resolved_root, False)
                 continue
+            try:
+                root_metadata = root.stat()
+            except OSError as exc:
+                raise RuntimeError(
+                    f"cannot inspect deny-read glob root: {root}"
+                ) from exc
+            root_identity = (root_metadata.st_dev, root_metadata.st_ino)
+            root_states = _prefix_match_states(pattern.parts, root.parts)
+            visited = {(root_identity, root_states)}
             stack = [(root, 0)]
             while stack:
                 directory, depth = stack.pop()
@@ -249,41 +295,56 @@ class FileAccessPolicy:
                             )
                         child_path = Path(child.path)
                         if pattern.matches(child_path):
-                            prepared[child_path] = prepared.get(
-                                child_path, False
-                            )
+                            resolved_child = child_path.resolve(strict=False)
+                            prepared[resolved_child] = prepared.get(
+                                resolved_child, False
+                            ) or child.is_symlink()
                             if len(prepared) > MAX_DENY_READ_MATCHES:
                                 raise RuntimeError(
                                     "deny-read patterns matched more than "
                                     f"{MAX_DENY_READ_MATCHES} paths"
-                            )
+                                )
                             continue
                         could_match_below = _could_match_descendant(
                             pattern.parts, child_path.parts
                         )
-                        if child.is_symlink() and could_match_below:
-                            try:
-                                symlink_is_directory = child.is_dir(
-                                    follow_symlinks=True
-                                )
-                            except OSError as exc:
-                                raise RuntimeError(
-                                    "cannot inspect deny-read glob symlink: "
-                                    f"{child_path}"
-                                ) from exc
-                            if symlink_is_directory:
-                                raise RuntimeError(
-                                    "cannot enforce deny-read glob through "
-                                    f"directory symlink: {child_path}"
-                                )
-                        if child.is_dir(follow_symlinks=False):
-                            if depth < self.glob_scan_max_depth:
-                                stack.append((child_path, depth + 1))
-                            elif could_match_below:
-                                raise RuntimeError(
-                                    "deny-read glob scan exceeded depth "
-                                    f"{self.glob_scan_max_depth}"
-                                )
+                        if not could_match_below:
+                            continue
+                        try:
+                            is_directory = child.is_dir(
+                                follow_symlinks=True
+                            )
+                        except OSError as exc:
+                            raise RuntimeError(
+                                "cannot inspect deny-read glob path: "
+                                f"{child_path}"
+                            ) from exc
+                        if not is_directory:
+                            continue
+                        try:
+                            child_metadata = child.stat(follow_symlinks=True)
+                        except OSError as exc:
+                            raise RuntimeError(
+                                "cannot inspect deny-read glob directory: "
+                                f"{child_path}"
+                            ) from exc
+                        child_identity = (
+                            child_metadata.st_dev,
+                            child_metadata.st_ino,
+                        )
+                        child_states = _prefix_match_states(
+                            pattern.parts, child_path.parts
+                        )
+                        visit_key = (child_identity, child_states)
+                        if visit_key in visited:
+                            continue
+                        if depth >= self.glob_scan_max_depth:
+                            raise RuntimeError(
+                                "deny-read glob scan exceeded depth "
+                                f"{self.glob_scan_max_depth}"
+                            )
+                        visited.add(visit_key)
+                        stack.append((child_path, depth + 1))
         selected: list[PreparedDeniedPath] = []
         for path, exact in sorted(
             prepared.items(), key=lambda item: (len(item[0].parts), str(item[0]))

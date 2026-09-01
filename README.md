@@ -604,8 +604,12 @@ non-group/world-writable `bwrap` (Bubblewrap) on `PATH`; macOS uses
 `/usr/bin/sandbox-exec`. Glob expansion is
 bounded to 8,192 matches and 250,000 scanned entries, and
 `glob_scan_max_depth` limits recursive traversal. Its default is `32`. Shell
-launch fails closed when a potentially matching subtree cannot be scanned,
-including at the depth limit or through a directory symlink.
+launch fails closed when a potentially matching subtree cannot be scanned or
+the depth limit is reached.
+Directory symlinks are traversed within the same scan bounds, and matching
+physical targets are denied regardless of which symlink reaches them. Cycles
+stop when the same physical directory is reached with the same remaining glob
+match state.
 Unconfigured `deny_read` defaults to an empty list and does not change shell
 behavior.
 

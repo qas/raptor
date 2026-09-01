@@ -53,28 +53,69 @@ class FileAccessPolicyTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "exceeded depth"):
                 policy.prepare_denied_paths()
 
-    def test_glob_expansion_fails_closed_at_directory_symlink(self) -> None:
+    def test_glob_expansion_follows_directory_symlink(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory).resolve()
-            target = root / "target"
+            base = Path(directory).resolve()
+            root = base / "workspace"
+            root.mkdir()
+            target = base / "external"
             target.mkdir()
-            (target / ".env").write_text("secret")
+            secret = target / ".env"
+            secret.write_text("secret")
             (root / "linked").symlink_to(target, target_is_directory=True)
             policy = FileAccessPolicy.create(root, ["**/.env"])
 
-            with self.assertRaisesRegex(
-                RuntimeError, "through directory symlink"
-            ):
-                policy.prepare_denied_paths()
+            denied = policy.prepare_denied_paths()
+
+            self.assertEqual(
+                denied,
+                (filesystem_permissions.PreparedDeniedPath(secret, False),),
+            )
+
+    def test_exact_pattern_resolves_directory_symlink_target(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory).resolve()
+            root = base / "workspace"
+            root.mkdir()
+            target = base / "external"
+            target.mkdir()
+            secret = target / "restricted.txt"
+            secret.write_text("secret")
+            (root / "linked").symlink_to(target, target_is_directory=True)
+            policy = FileAccessPolicy.create(
+                root, ["linked/restricted.txt"]
+            )
+
+            denied = policy.prepare_denied_paths()
+
+            self.assertEqual(
+                denied,
+                (filesystem_permissions.PreparedDeniedPath(secret, True),),
+            )
+
+    def test_glob_expansion_handles_symlink_cycle_with_new_match_state(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            secret = root / ".env"
+            secret.write_text("secret")
+            (root / "loop").symlink_to(root, target_is_directory=True)
+            policy = FileAccessPolicy.create(root, ["**/loop/.env"])
+
+            denied = policy.prepare_denied_paths()
+
+            self.assertEqual(
+                denied,
+                (filesystem_permissions.PreparedDeniedPath(secret, False),),
+            )
 
     def test_glob_expansion_ignores_file_symlink(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory).resolve()
-            target = root / "raptor-real"
+            target = root / "target-file"
             target.write_text("binary")
-            bin_dir = root / ".local" / "bin"
-            bin_dir.mkdir(parents=True)
-            (bin_dir / "raptor").symlink_to(target)
+            (root / "linked-file").symlink_to(target)
             secret = root / ".env"
             secret.write_text("secret")
             policy = FileAccessPolicy.create(root, ["**/.env"])
@@ -190,10 +231,17 @@ class FileAccessPolicyTests(unittest.TestCase):
 
     def test_shell_sandbox_denies_secret_when_platform_helper_exists(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory).resolve()
-            (root / ".env").write_text("TOP_SECRET")
+            base = Path(directory).resolve()
+            root = base / "workspace"
+            root.mkdir()
+            external = base / "external"
+            external.mkdir()
+            (external / ".env").write_text("TOP_SECRET")
+            (root / "linked").symlink_to(
+                external, target_is_directory=True
+            )
             (root / "visible.txt").write_text("VISIBLE")
-            policy = FileAccessPolicy.create(root, [".env"])
+            policy = FileAccessPolicy.create(root, ["**/.env"])
             helper_available = (
                 filesystem_permissions.sys.platform.startswith("linux")
                 and shutil.which("bwrap") is not None
@@ -208,7 +256,8 @@ class FileAccessPolicyTests(unittest.TestCase):
                     )
                 return
             launch = filesystem_permissions.build_shell_sandbox_launch(
-                "cat .env 2>/dev/null || printf DENIED; cat visible.txt",
+                "cat linked/.env 2>/dev/null || printf DENIED; "
+                "cat visible.txt",
                 policy,
             )
             try:
