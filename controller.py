@@ -37,7 +37,7 @@ WorkEntry = RuntimeEvent | dict[str, Any]
 
 def session_transition_busy() -> bool:
     """Return whether changing the active transcript could orphan work."""
-    from shell_sessions import (
+    from raptor.shell.shell_sessions import (
         pending_shell_completions,
         running_shell_sessions,
     )
@@ -58,7 +58,7 @@ def session_transition_busy() -> bool:
 
 async def requeue_deferred_completions() -> int:
     """Retry background completion delivery on explicit user activity."""
-    from shell_sessions import requeue_deferred_shell_completions
+    from raptor.shell.shell_sessions import requeue_deferred_shell_completions
     from subagents import requeue_deferred_subagent_completions
 
     shell_count, subagent_count = await asyncio.gather(

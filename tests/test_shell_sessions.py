@@ -12,11 +12,11 @@ os.environ["RAPTOR_HOME"] = str(_HOME)
 os.environ["AGENT_WORKDIR"] = str(_HOME)
 
 from raptor.state import session
-import shell_sessions
+from raptor.shell import shell_sessions
 from chat_provider import ProcessOutputChunk
 from config import TOOLS
 from raptor.model.model_providers import ModelTarget
-from shell_sessions import (
+from raptor.shell.shell_sessions import (
     HeadTailBuffer,
     cancel_shell_session,
     cancel_shell_sessions,
@@ -713,7 +713,7 @@ class ShellSessionTests(unittest.IsolatedAsyncioTestCase):
         async def publish(_chunk: ProcessOutputChunk) -> None:
             pass
 
-        with patch("shell_sessions.run_shell", launched):
+        with patch("raptor.shell.shell_sessions.run_shell", launched):
             await shell_tool(
                 {"command": "true"},
                 chat_id="telegram:123",
@@ -735,7 +735,8 @@ class ShellSessionTests(unittest.IsolatedAsyncioTestCase):
     def test_supervisor_argv_uses_source_script(self) -> None:
         argv = supervisor_argv()
         self.assertEqual(argv[0], shell_sessions._SUPERVISOR_EXECUTABLE)
-        self.assertEqual(argv[1], str(shell_sessions._SUPERVISOR_PATH))
+        self.assertEqual(argv[1], str(shell_sessions._SOURCE_LAUNCHER))
+        self.assertEqual(argv[2], shell_sessions.SUPERVISOR_MODE)
 
     def test_supervisor_argv_uses_frozen_executable(self) -> None:
         with (

@@ -3,8 +3,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-import filesystem_permissions
-from filesystem_permissions import FileAccessPolicy
+from raptor.shell import filesystem_permissions
+from raptor.shell.filesystem_permissions import FileAccessPolicy
 
 
 class FileAccessPolicyTests(unittest.TestCase):

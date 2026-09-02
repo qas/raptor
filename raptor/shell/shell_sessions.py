@@ -27,7 +27,7 @@ from chat_provider import (
 )
 from config import AGENT_WORKDIR, FILESYSTEM_POLICY, MAX_TOOL_OUTPUT, SHELL_TIMEOUT
 from observability import log_event, log_shell_start
-from shell_supervisor import SUPERVISOR_MODE
+from raptor.shell.shell_supervisor import SUPERVISOR_MODE
 
 MAX_YIELD_TIME_MS = 30_000
 MAX_POLL_TIME_MS = 300_000
@@ -47,7 +47,7 @@ MAX_LIVE_SESSIONS = 64
 PTY_ROWS = 24
 PTY_COLUMNS = 80
 PTY_TERM = "xterm-256color"
-_SUPERVISOR_PATH = Path(__file__).with_name("shell_supervisor.py")
+_SOURCE_LAUNCHER = Path(__file__).resolve().parents[2] / "raptor.py"
 _SUPERVISOR_EXECUTABLE = os.path.realpath(sys.executable)
 ProcessOutputCallback = Callable[[ProcessOutputChunk], Awaitable[None]]
 
@@ -69,7 +69,7 @@ def supervisor_argv() -> list[str]:
     """Launch the supervisor through this process's original executable."""
     if getattr(sys, "frozen", False):
         return [_SUPERVISOR_EXECUTABLE, SUPERVISOR_MODE]
-    return [_SUPERVISOR_EXECUTABLE, str(_SUPERVISOR_PATH)]
+    return [_SUPERVISOR_EXECUTABLE, str(_SOURCE_LAUNCHER), SUPERVISOR_MODE]
 
 
 class HeadTailBuffer:

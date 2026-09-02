@@ -11,7 +11,7 @@ import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from filesystem_permissions import FileAccessPolicy, PreparedDeniedPath
+from raptor.shell.filesystem_permissions import FileAccessPolicy, PreparedDeniedPath
 
 
 SANDBOX_PROBE_TIMEOUT_SECONDS = 5

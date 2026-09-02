@@ -12,7 +12,7 @@ from chat_runtime import capture_delivery_context, get_chat_provider
 from raptor.state.chat_store import append_meta
 from commands import command
 from config import MAX_PENDING_STEERS
-from console_follow import handle_follow_console_action
+from raptor.shell.console_follow import handle_follow_console_action
 from controller import start_root_session
 from presentation import clear_steering_indicator, steering_indicator
 from raptor.state.session import StateCapacityError, state, steer_queue

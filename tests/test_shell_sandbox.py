@@ -6,8 +6,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-import shell_sandbox
-from filesystem_permissions import FileAccessPolicy
+from raptor.shell import shell_sandbox
+from raptor.shell.filesystem_permissions import FileAccessPolicy
 
 
 class ShellSandboxTests(unittest.TestCase):

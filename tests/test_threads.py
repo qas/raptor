@@ -350,7 +350,7 @@ class ThreadTests(unittest.IsolatedAsyncioTestCase):
     async def test_thread_refuses_while_background_shell_is_running(
         self,
     ) -> None:
-        with patch("shell_sessions.running_shell_sessions", return_value=1):
+        with patch("raptor.shell.shell_sessions.running_shell_sessions", return_value=1):
             result = await start_thread("!room:example.org")
 
         self.assertFalse(result["ok"])

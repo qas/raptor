@@ -282,8 +282,8 @@ history remains available in the archived transcript as an audit record.
 | `thread_state.py` | Temporary-thread state queries |
 | `thread_status.py` | Temporary-thread status projection |
 | `subagents.py` | Isolated foreground and background subagents |
-| `shell_supervisor.py` | Child process-group ownership and exit enforcement |
-| `shell_sessions.py` | Managed shell state, PTYs, polling, and completion |
+| `raptor/shell/shell_supervisor.py` | Child process-group ownership and exit enforcement |
+| `raptor/shell/shell_sessions.py` | Managed shell state, PTYs, polling, and completion |
 | `skills.py` | Progressive workspace skill discovery and loading |
 | `commands.py` | Provider-neutral slash commands |
 | `threads.py` | Temporary branch lifecycle and merge policy |

@@ -481,7 +481,7 @@ finally:
                 ],
             ),
             patch.object(entrypoint, "acquire_runtime_lock") as acquire,
-            patch("shell_supervisor.main", return_value=9) as supervisor,
+            patch("raptor.shell.shell_supervisor.main", return_value=9) as supervisor,
         ):
             result = entrypoint.run()
         self.assertEqual(result, 9)
@@ -598,7 +598,7 @@ finally:
         runtime_module.daemonize = lambda: None
         runtime_module.set_runtime = lambda **_kw: None
         runtime_module.clear_runtime_if_ours = lambda: None
-        sandbox_module = types.ModuleType("shell_sandbox")
+        sandbox_module = types.ModuleType("raptor.shell.shell_sandbox")
         checked: list[bool] = []
         sandbox_module.probe_linux_shell_sandbox = lambda: checked.append(True)
         with (
@@ -607,7 +607,7 @@ finally:
                 sys.modules,
                 {
                     "runtime": runtime_module,
-                    "shell_sandbox": sandbox_module,
+                    "raptor.shell.shell_sandbox": sandbox_module,
                 },
             ),
             redirect_stdout(io.StringIO()) as output,
@@ -635,7 +635,7 @@ finally:
         runtime_module.daemonize = lambda: None
         runtime_module.set_runtime = lambda **_kw: None
         runtime_module.clear_runtime_if_ours = lambda: None
-        sandbox_module = types.ModuleType("shell_sandbox")
+        sandbox_module = types.ModuleType("raptor.shell.shell_sandbox")
 
         def fail_probe() -> None:
             raise RuntimeError("permission denied")
@@ -647,7 +647,7 @@ finally:
                 sys.modules,
                 {
                     "runtime": runtime_module,
-                    "shell_sandbox": sandbox_module,
+                    "raptor.shell.shell_sandbox": sandbox_module,
                 },
             ),
             redirect_stderr(io.StringIO()) as error,

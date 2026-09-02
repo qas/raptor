@@ -295,7 +295,7 @@ class SessionRotationTests(unittest.IsolatedAsyncioTestCase):
             sent.append(text)
 
         with (
-            patch("shell_sessions.running_shell_sessions", return_value=1),
+            patch("raptor.shell.shell_sessions.running_shell_sessions", return_value=1),
             patch("commands.send", capture),
         ):
             await command(1, "/new")

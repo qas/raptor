@@ -7,8 +7,8 @@ import sys
 import time
 from collections.abc import Callable
 
-from filesystem_permissions import FileAccessPolicy
-from shell_sandbox import build_shell_sandbox_launch
+from raptor.shell.filesystem_permissions import FileAccessPolicy
+from raptor.shell.shell_sandbox import build_shell_sandbox_launch
 
 SUPERVISOR_MODE = "_shell-supervisor"
 

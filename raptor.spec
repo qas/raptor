@@ -20,7 +20,7 @@ a = Analysis(
         "telegram",
         "responses_provider",
         "multi_provider",
-        "shell_supervisor",
+        "raptor.shell.shell_supervisor",
         "socksio",
     ],
     hookspath=[],

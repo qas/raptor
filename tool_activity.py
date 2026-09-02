@@ -158,7 +158,7 @@ def _poll_wait_ms(call: dict[str, Any]) -> int | None:
     if not isinstance(arguments, dict) or str(arguments.get("chars") or ""):
         return None
     try:
-        from shell_sessions import write_stdin_wait_ms
+        from raptor.shell.shell_sessions import write_stdin_wait_ms
 
         return write_stdin_wait_ms(arguments)
     except (TypeError, ValueError):

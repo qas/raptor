@@ -10,7 +10,7 @@ os.environ["RAPTOR_HOME"] = str(_HOME)
 os.environ["AGENT_WORKDIR"] = str(_HOME)
 
 import skills
-from filesystem_permissions import FileAccessPolicy
+from raptor.shell.filesystem_permissions import FileAccessPolicy
 from config import TOOLS
 from tools import execute_tool
 

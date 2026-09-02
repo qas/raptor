@@ -4,7 +4,7 @@ import time
 import unittest
 from unittest.mock import patch
 
-import shell_supervisor
+from raptor.shell import shell_supervisor
 
 
 class SupervisorWaitTests(unittest.TestCase):

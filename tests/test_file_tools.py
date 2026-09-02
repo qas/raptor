@@ -13,7 +13,7 @@ os.environ.setdefault("TG_USER_ID", "1")
 
 import tools
 from config import TOOLS
-from filesystem_permissions import FileAccessPolicy
+from raptor.shell.filesystem_permissions import FileAccessPolicy
 
 
 class FileToolTests(unittest.TestCase):

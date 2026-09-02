@@ -13,7 +13,7 @@ from application_control import (
 )
 from chat_format import bash_console_block
 from chat_provider import ConversationId
-from console_follow import start_follow_console
+from raptor.shell.console_follow import start_follow_console
 from raptor.state.chat_store import (
     TruncationCleanupError,
     append_meta,
@@ -95,7 +95,7 @@ from subagents import (
     running_background_subagents,
     subagent_summaries,
 )
-from shell_sessions import (
+from raptor.shell.shell_sessions import (
     SANDBOX_PREPARATION_TIMEOUT_SECONDS,
     cancel_shell_session,
     cancel_shell_sessions,

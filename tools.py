@@ -183,7 +183,7 @@ async def cancel_tool(args: dict[str, Any]) -> dict[str, Any]:
         from subagents import cancel_background_subagent
 
         return await cancel_background_subagent(resource_id)
-    from shell_sessions import cancel_shell_session
+    from raptor.shell.shell_sessions import cancel_shell_session
 
     return await cancel_shell_session(resource_id)
 
@@ -208,7 +208,7 @@ async def shell_tool(
                 "command is required",
         }
 
-    from shell_sessions import run_shell
+    from raptor.shell.shell_sessions import run_shell
 
     parent_session_id = None
     process_output = None
@@ -821,7 +821,7 @@ async def _execute_write_stdin(
     _chat_id: ConversationId | None,
     _context: dict[str, Any],
 ) -> dict[str, Any]:
-    from shell_sessions import write_stdin
+    from raptor.shell.shell_sessions import write_stdin
 
     return await write_stdin(args)
 

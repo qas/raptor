@@ -659,7 +659,7 @@ class ChatProviderContractTests(unittest.IsolatedAsyncioTestCase):
 
         with (
             patch(
-                "shell_sessions.write_stdin_wait_ms",
+                "raptor.shell.shell_sessions.write_stdin_wait_ms",
                 return_value=20,
             ),
             patch("tool_activity.WAIT_UPDATE_INTERVAL_SECONDS", 0.01),
@@ -698,7 +698,7 @@ class ChatProviderContractTests(unittest.IsolatedAsyncioTestCase):
 
         with (
             patch(
-                "shell_sessions.write_stdin_wait_ms",
+                "raptor.shell.shell_sessions.write_stdin_wait_ms",
                 return_value=100,
             ),
             patch("tool_activity.WAIT_UPDATE_INTERVAL_SECONDS", 0.01),

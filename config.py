@@ -6,7 +6,7 @@ import re
 from urllib.parse import urlsplit
 
 from config_document import config_section, load_config_document
-from filesystem_permissions import (
+from raptor.shell.filesystem_permissions import (
     DEFAULT_GLOB_SCAN_MAX_DEPTH,
     FileAccessPolicy,
 )

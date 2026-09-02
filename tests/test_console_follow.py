@@ -12,7 +12,7 @@ os.environ["AGENT_WORKDIR"] = str(_HOME)
 os.environ.setdefault("TG_BOT_TOKEN", "test-token")
 os.environ.setdefault("TG_USER_ID", "1")
 
-import console_follow
+from raptor.shell import console_follow
 from raptor.state import session
 from chat_provider import (
     IncomingAction,
