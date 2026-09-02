@@ -2,7 +2,7 @@
 
 from typing import Any
 
-import session
+from raptor.state import session
 
 
 def current_thread() -> dict[str, Any] | None:

@@ -7,7 +7,7 @@ from typing import Any
 import httpx
 from chat_provider import ConversationId
 
-from chat_store import (
+from raptor.state.chat_store import (
     active_checkpoint,
     append_item,
     append_meta,
@@ -40,8 +40,8 @@ from goals import (
     goal_instructions,
     todo_store_for_execution,
 )
-from session import save_state, state, steer_queue
-import session
+from raptor.state.session import save_state, state, steer_queue
+from raptor.state import session
 from approval import execute_tool_with_approval
 from chat_runtime import (
     activate_delivery_context,

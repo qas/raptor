@@ -30,7 +30,7 @@ from config import (
 from network import outbound_http_client
 from observability import log_event, log_exception
 from runtime_paths import RAPTOR_HOME
-from storage import FileTooLargeError, read_text_bounded, write_text_atomic
+from raptor.state.storage import FileTooLargeError, read_text_bounded, write_text_atomic
 
 _client: httpx.AsyncClient | None = None
 

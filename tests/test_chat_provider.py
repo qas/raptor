@@ -39,7 +39,7 @@ from chat_runtime import (
     set_chat_provider,
 )
 from raptor.model.model_providers import ModelTarget
-import session
+from raptor.state import session
 from turn_runtime import TurnKind, turns
 
 

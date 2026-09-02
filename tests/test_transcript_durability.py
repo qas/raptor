@@ -21,12 +21,12 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 import agent as agent_mod
-import chat_store
+from raptor.state import chat_store
 import context
 import controller
 from raptor.model import responses
 from raptor.model.response_errors import MalformedToolCallError
-import session
+from raptor.state import session
 from turn_runtime import turns
 import subagents
 from raptor.model.model_providers import ModelConfiguration, ModelProvider, ModelTarget

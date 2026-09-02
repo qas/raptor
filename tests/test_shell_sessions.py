@@ -11,7 +11,7 @@ _HOME = Path(tempfile.mkdtemp(prefix="raptor-shell-tests-"))
 os.environ["RAPTOR_HOME"] = str(_HOME)
 os.environ["AGENT_WORKDIR"] = str(_HOME)
 
-import session
+from raptor.state import session
 import shell_sessions
 from chat_provider import ProcessOutputChunk
 from config import TOOLS

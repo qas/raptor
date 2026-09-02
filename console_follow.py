@@ -5,7 +5,7 @@ import secrets
 from dataclasses import dataclass, field
 from typing import Any
 
-import session
+from raptor.state import session
 from chat_format import bash_console_block
 from chat_provider import (
     ActionButton,

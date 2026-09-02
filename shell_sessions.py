@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-import session as runtime_session
+from raptor.state import session as runtime_session
 from chat_provider import (
     ConversationId,
     ProcessOutputChunk,

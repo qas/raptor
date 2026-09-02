@@ -13,11 +13,11 @@ os.environ["AGENT_WORKDIR"] = str(_HOME)
 os.environ.setdefault("TG_BOT_TOKEN", "test-token")
 os.environ.setdefault("TG_USER_ID", "1")
 
-import chat_store
+from raptor.state import chat_store
 import chat_runtime
 import commands
-import session
-import storage
+from raptor.state import session
+from raptor.state import storage
 from raptor.model.model_providers import ModelTarget
 from turn_runtime import turns
 

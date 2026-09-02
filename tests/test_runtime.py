@@ -21,7 +21,7 @@ os.environ["AGENT_WORKDIR"] = str(_HOME)
 import process_lock
 from raptor import entrypoint
 import runtime
-import session
+from raptor.state import session
 from application_control import ExitRequest
 
 
@@ -74,7 +74,7 @@ class RuntimeLockTests(unittest.TestCase):
             "import sys; import runtime; "
             "runtime.runtime_info(); "
             "assert 'config' not in sys.modules; "
-            "assert 'session' not in sys.modules"
+            "assert 'raptor.state.session' not in sys.modules"
         )
 
         completed = subprocess.run(
@@ -258,7 +258,7 @@ finally:
             order.append("application")
 
         application_module.main = application_main
-        session_module = types.ModuleType("session")
+        session_module = types.ModuleType("raptor.state.session")
         session_module.DAEMON_MODE = False
 
         def acquire() -> bool:
@@ -274,7 +274,7 @@ finally:
                 {
                     "runtime": runtime_module,
                     "application": application_module,
-                    "session": session_module,
+                    "raptor.state.session": session_module,
                 },
             ),
         ):
@@ -307,7 +307,7 @@ finally:
             order.append("application")
 
         application_module.main = application_main
-        session_module = types.ModuleType("session")
+        session_module = types.ModuleType("raptor.state.session")
         session_module.DAEMON_MODE = False
 
         with (
@@ -332,7 +332,7 @@ finally:
                 {
                     "runtime": runtime_module,
                     "application": application_module,
-                    "session": session_module,
+                    "raptor.state.session": session_module,
                 },
             ),
         ):
@@ -387,7 +387,7 @@ finally:
             order.append("running")
 
         application_module.main = application_main
-        session_module = types.ModuleType("session")
+        session_module = types.ModuleType("raptor.state.session")
         session_module.DAEMON_MODE = False
 
         with (
@@ -399,7 +399,7 @@ finally:
                 {
                     "runtime": runtime_module,
                     "application": application_module,
-                    "session": session_module,
+                    "raptor.state.session": session_module,
                 },
             ),
         ):
@@ -443,7 +443,7 @@ finally:
             on_ready()
 
         application_module.main = application_main
-        session_module = types.ModuleType("session")
+        session_module = types.ModuleType("raptor.state.session")
         session_module.DAEMON_MODE = False
 
         with (
@@ -456,7 +456,7 @@ finally:
                 {
                     "runtime": runtime_module,
                     "application": application_module,
-                    "session": session_module,
+                    "raptor.state.session": session_module,
                 },
             ),
         ):

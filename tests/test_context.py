@@ -18,7 +18,7 @@ os.environ["COMPACT_KEEP_RECENT_TOKENS"] = "50"
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-import chat_store
+from raptor.state import chat_store
 import context
 from raptor.model.responses import ContextLengthError, TransientResponsesError
 

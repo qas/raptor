@@ -5,7 +5,7 @@ import os
 from dataclasses import dataclass
 
 from runtime_paths import RAPTOR_HOME
-from storage import ensure_private_directory
+from raptor.state.storage import ensure_private_directory
 
 
 RUNTIME_LOCK_PATH = RAPTOR_HOME / "runtime.lock"

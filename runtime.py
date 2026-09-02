@@ -16,7 +16,7 @@ from process_lock import (
     runtime_lock_status,
 )
 from runtime_paths import AGENT_WORKDIR, LOG_PATH, STATE_PATH
-from storage import (
+from raptor.state.storage import (
     FileTooLargeError,
     ensure_private_directory,
     read_bytes_bounded,
@@ -62,7 +62,7 @@ def runtime_info() -> dict[str, Any]:
 
 
 def set_runtime(*, daemon: bool) -> None:
-    from session import save_state, state
+    from raptor.state.session import save_state, state
 
     refresh_runtime_lock_owner()
     state["runtime"] = {
@@ -75,7 +75,7 @@ def set_runtime(*, daemon: bool) -> None:
 
 
 def clear_runtime_if_ours() -> None:
-    from session import save_state, state
+    from raptor.state.session import save_state, state
 
     info = state.get("runtime")
 

@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from config import CHAT_DIR, COMPACTION_MAX_RECORD_CHARS, RAPTOR_HOME
-from storage import (
+from raptor.state.storage import (
     ensure_private_directory,
     fsync_directory,
     write_bytes_exclusive_atomic,

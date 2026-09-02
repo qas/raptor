@@ -5,7 +5,7 @@ from typing import Any
 
 from observability import log_event
 
-from chat_store import (
+from raptor.state.chat_store import (
     active_checkpoint,
     active_item_events,
     active_projection,

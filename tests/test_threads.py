@@ -18,13 +18,13 @@ os.environ["AGENT_WORKDIR"] = str(_HOME)
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-import chat_store
+from raptor.state import chat_store
 import agent as agent_mod
 from chat_runtime import set_chat_provider
 from chat_provider import IncomingAction, IncomingMessage
 from context import build_active_context
 from goals import ensure_goal_pin, goal_instructions, replace_goal, sync_goal_pin
-import session
+from raptor.state import session
 from raptor.model.model_providers import ModelTarget
 from tests.test_chat_provider import FakeProvider
 from threads import (

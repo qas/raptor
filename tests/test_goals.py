@@ -21,7 +21,7 @@ if str(_ROOT) not in sys.path:
 
 import agent as agent_mod
 import controller
-import session
+from raptor.state import session
 from chat_provider import ProviderCapabilities
 from chat_runtime import set_chat_provider
 from raptor.model.model_providers import ModelTarget
@@ -139,8 +139,8 @@ class GoalTests(unittest.IsolatedAsyncioTestCase):
             except asyncio.QueueEmpty:
                 break
         session.pending_steers.clear()
-        from chat_store import create_session
-        import chat_store
+        from raptor.state.chat_store import create_session
+        from raptor.state import chat_store
         self._chat_dir = Path(tempfile.mkdtemp(prefix="chats-"))
         self._chat_patch = patch.object(
             chat_store,
@@ -238,7 +238,7 @@ class GoalTests(unittest.IsolatedAsyncioTestCase):
         replace_goal("Keep me out of history")
         prompt = goal_instructions()
         self.assertTrue(prompt)
-        from chat_store import item_events
+        from raptor.state.chat_store import item_events
         session_id = session.state["current_session_id"]
         for event in item_events(session_id):
             item = event.get("item") or {}
@@ -249,7 +249,7 @@ class GoalTests(unittest.IsolatedAsyncioTestCase):
     async def test_goal_survives_compaction(self) -> None:
         replace_goal("Survive compaction")
         goal_before = copy.deepcopy(current_goal())
-        from chat_store import append_checkpoint, append_item
+        from raptor.state.chat_store import append_checkpoint, append_item
         session_id = session.state["current_session_id"]
         append_item(
             session_id,
@@ -1687,8 +1687,8 @@ class GoalPinTests(unittest.IsolatedAsyncioTestCase):
                 session.runtime_event_queue.task_done()
             except asyncio.QueueEmpty:
                 break
-        from chat_store import create_session
-        import chat_store
+        from raptor.state.chat_store import create_session
+        from raptor.state import chat_store
         self._chat_dir = Path(tempfile.mkdtemp(prefix="chats-"))
         self._chat_patch = patch.object(
             chat_store,
@@ -2334,8 +2334,8 @@ class SetGoalToolTests(unittest.IsolatedAsyncioTestCase):
                 session.runtime_event_queue.task_done()
             except asyncio.QueueEmpty:
                 break
-        from chat_store import create_session
-        import chat_store
+        from raptor.state.chat_store import create_session
+        from raptor.state import chat_store
         self._chat_dir = Path(tempfile.mkdtemp(prefix="chats-"))
         self._chat_patch = patch.object(
             chat_store,

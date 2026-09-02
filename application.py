@@ -8,7 +8,7 @@ from typing import Any
 
 import httpx
 
-import session
+from raptor.state import session
 from activity import (
     close_activity_projections,
     reconcile_activity_surfaces,
@@ -24,7 +24,7 @@ from application_control import (
 from agent import flush_pending_delivery, repair_interrupted_root_turn
 from chat_provider import ChatEvent, ChatProvider
 from chat_runtime import load_chat_providers, send, set_chat_provider
-from chat_store import chat_path, ensure_chat_dirs
+from raptor.state.chat_store import chat_path, ensure_chat_dirs
 from config import (
     CHAT_DIR,
     CHAT_PROVIDERS,
@@ -45,7 +45,7 @@ from network import outbound_http_client
 from observability import log_event, log_exception
 from raptor.model.model_providers import MODEL_CONFIGURATION
 from raptor.model.responses import ensure_target
-from session import bootstrap_runtime_storage, rehydrate_pending_inputs, state
+from raptor.state.session import bootstrap_runtime_storage, rehydrate_pending_inputs, state
 from shell_sessions import cancel_shell_sessions
 from skills import (
     close_skill_discovery,

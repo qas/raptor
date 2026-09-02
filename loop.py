@@ -9,17 +9,17 @@ from chat_provider import (
     IncomingMessage,
 )
 from chat_runtime import capture_delivery_context, get_chat_provider
-from chat_store import append_meta
+from raptor.state.chat_store import append_meta
 from commands import command
 from config import MAX_PENDING_STEERS
 from console_follow import handle_follow_console_action
 from controller import start_root_session
 from presentation import clear_steering_indicator, steering_indicator
-from session import StateCapacityError, state, steer_queue
+from raptor.state.session import StateCapacityError, state, steer_queue
 from steering import handle_steering_action
 from tool_activity import handle_tool_activity_action
 from threads import handle_thread_action
-import session
+from raptor.state import session
 from observability import log_agent_activity, log_event, log_exception
 from turn_runtime import turns
 

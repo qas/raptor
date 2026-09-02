@@ -4,7 +4,7 @@ import asyncio
 from dataclasses import dataclass, replace
 from typing import Any, Protocol, runtime_checkable
 
-import session
+from raptor.state import session
 from chat_provider import ConversationId
 from chat_runtime import get_chat_provider
 from config import MAX_TOOL_OUTPUT

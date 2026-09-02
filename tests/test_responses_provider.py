@@ -29,7 +29,7 @@ from raptor.model.responses import build_response_payload, reasoning_summary_del
 from raptor.model.responses import responses_create_stream
 from subagents import build_subagent_payload
 from raptor.model.model_providers import ModelTarget
-import session
+from raptor.state import session
 from turn_runtime import TurnKind, turns
 
 

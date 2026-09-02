@@ -13,8 +13,8 @@ _HOME = Path(tempfile.mkdtemp(prefix="raptor-multichat-tests-"))
 os.environ["RAPTOR_HOME"] = str(_HOME)
 os.environ["AGENT_WORKDIR"] = str(_HOME)
 
-import session
-from chat_store import append_item, list_sessions, session_chat_key
+from raptor.state import session
+from raptor.state.chat_store import append_item, list_sessions, session_chat_key
 from engine import assistant_message
 from tools import chat_history_tool
 from turn_runtime import TurnKind, turns

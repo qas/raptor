@@ -8,7 +8,7 @@ from typing import Any
 
 from chat_provider import ConversationId
 
-from chat_store import (
+from raptor.state.chat_store import (
     iter_events,
     list_sessions,
     render_compaction_records,
@@ -17,9 +17,9 @@ from chat_store import (
     validate_session_id,
 )
 from config import AGENT_WORKDIR, FILESYSTEM_POLICY, MAX_TOOL_OUTPUT, TOOLS
-import session
-from session import save_state, state
-from storage import FileTooLargeError, read_bytes_bounded, write_text_atomic
+from raptor.state import session
+from raptor.state.session import save_state, state
+from raptor.state.storage import FileTooLargeError, read_bytes_bounded, write_text_atomic
 from todos import MAX_TODO_EXPLANATION_CHARS, validate_plan
 
 

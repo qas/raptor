@@ -181,7 +181,7 @@ class TurnRegistry:
 
     @staticmethod
     def _current() -> TurnCoordinator:
-        from session import current_runtime
+        from raptor.state.session import current_runtime
 
         return current_runtime().turns
 

@@ -84,7 +84,7 @@ def run() -> int:
         restart_requested = False
         try:
             import application
-            import session
+            from raptor.state import session
 
             session.DAEMON_MODE = args.daemon
             try:

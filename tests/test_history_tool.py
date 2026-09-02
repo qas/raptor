@@ -16,8 +16,8 @@ os.environ["MAX_TOOL_OUTPUT"] = "1024"
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-import chat_store
-import session
+from raptor.state import chat_store
+from raptor.state import session
 from tools import chat_history_tool
 
 TEST_MODEL_TARGET = {"provider_id": "local", "model": "test-model"}

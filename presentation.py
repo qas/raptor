@@ -11,7 +11,7 @@ from chat_provider import (
 )
 from chat_runtime import get_chat_provider
 from observability import log_exception
-import session
+from raptor.state import session
 
 def _pinned_status_lock() -> asyncio.Lock:
     runtime = session.current_runtime()

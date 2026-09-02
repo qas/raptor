@@ -2,7 +2,7 @@
 
 from chat_provider import ActionButton, ConversationId
 import presentation
-import session
+from raptor.state import session
 from thread_state import current_thread, thread_owner
 
 

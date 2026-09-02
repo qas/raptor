@@ -17,7 +17,7 @@ os.environ["RAPTOR_HOME"] = str(_HOME)
 os.environ["AGENT_WORKDIR"] = str(_HOME)
 
 import controller
-import session
+from raptor.state import session
 import subagents
 from raptor.model import responses
 from raptor.model.model_providers import (

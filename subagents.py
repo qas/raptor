@@ -6,7 +6,7 @@ import time
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-import session
+from raptor.state import session
 from activity import (
     append_subagent_activity_input,
     delete_subagent_activity,
@@ -17,7 +17,7 @@ from activity import (
     subagent_activity_conversation_id,
 )
 from chat_provider import ConversationId
-from chat_store import (
+from raptor.state.chat_store import (
     append_item,
     create_session,
     reset_model_context,
@@ -59,7 +59,7 @@ from raptor.model.responses import (
     model_provider,
 )
 from raptor.model.model_providers import MODEL_CONFIGURATION, ModelTarget
-from session import (
+from raptor.state.session import (
     bounded_interrupted_subagents,
     prune_subagent_records,
     save_state,

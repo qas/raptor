@@ -275,10 +275,10 @@ history remains available in the archived transcript as an audit record.
 | `responses_provider.py` | Inbound Responses-compatible HTTP adapter |
 | `presentation.py` | Provider-neutral status, controls, and activity policy |
 | `tool_activity.py` | Streamed root tool-call status and lifecycle projection |
-| `chat_store.py` | Append-only transcript storage |
-| `storage.py` | Crash-safe atomic local file replacement |
+| `raptor/state/chat_store.py` | Append-only transcript storage |
+| `raptor/state/storage.py` | Crash-safe atomic local file replacement |
 | `context.py` | Active-context construction and checkpoint compaction |
-| `session.py` | Durable chat registry and context-bound per-chat runtimes |
+| `raptor/state/session.py` | Durable chat registry and context-bound per-chat runtimes |
 | `thread_state.py` | Temporary-thread state queries |
 | `thread_status.py` | Temporary-thread status projection |
 | `subagents.py` | Isolated foreground and background subagents |

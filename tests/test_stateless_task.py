@@ -18,10 +18,10 @@ os.environ["AGENT_WORKDIR"] = str(_HOME)
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-import chat_store
+from raptor.state import chat_store
 import commands
 from raptor.model import responses
-import session
+from raptor.state import session
 from raptor.model.model_providers import ModelTarget
 
 

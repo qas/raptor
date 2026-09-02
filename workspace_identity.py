@@ -5,7 +5,7 @@ import stat
 from pathlib import Path
 
 from runtime_paths import AGENT_WORKDIR
-from storage import FileTooLargeError, fsync_directory
+from raptor.state.storage import FileTooLargeError, fsync_directory
 
 
 MAX_WORKSPACE_IDENTITY_FILE_BYTES = 32 * 1024

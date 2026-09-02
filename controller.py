@@ -3,7 +3,7 @@ import asyncio
 from collections.abc import Callable
 from typing import Any, Literal
 
-import session
+from raptor.state import session
 from agent import (
     RetryableTurnFailure,
     agent_turn,
@@ -27,7 +27,7 @@ from goals import (
 from observability import log_event
 from presentation import clear_steering_indicator
 from runtime_events import RuntimeEvent, RuntimeEventKind
-from session import save_state
+from raptor.state.session import save_state
 from thread_state import thread_active
 from turn_runtime import InterruptResult, TurnKind, TurnSnapshot, turns
 

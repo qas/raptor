@@ -7,7 +7,7 @@ from typing import Any
 
 from chat_provider import ConversationId, IncomingAction
 from chat_runtime import get_chat_provider
-from chat_store import (
+from raptor.state.chat_store import (
     active_item_events,
     append_event,
     append_item,
@@ -20,7 +20,7 @@ from chat_store import (
 from context import build_active_context
 from controller import ensure_root_session
 from goals import goal_is_active, sync_goal_pin
-import session
+from raptor.state import session
 from observability import log_event, log_exception
 from thread_state import current_thread, thread_active, thread_owner
 from thread_status import ensure_thread_status

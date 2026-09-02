@@ -18,7 +18,7 @@ from config import (
     TOOLS,
 )
 from raptor.model.model_providers import MODEL_CONFIGURATION, ModelProvider, ModelTarget
-import session
+from raptor.state import session
 from chat_runtime import send_draft, send_reasoning_summary
 from observability import log_event
 from engine import estimate_tokens

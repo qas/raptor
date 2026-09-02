@@ -14,7 +14,7 @@ from application_control import (
 from chat_format import bash_console_block
 from chat_provider import ConversationId
 from console_follow import start_follow_console
-from chat_store import (
+from raptor.state.chat_store import (
     TruncationCleanupError,
     append_meta,
     create_session,
@@ -37,8 +37,8 @@ from config import (
     MAX_TOOL_ROUNDS,
     model_context_input_budget,
 )
-from session import pending_approvals, save_state, state
-import session
+from raptor.state.session import pending_approvals, save_state, state
+from raptor.state import session
 from observability import log_exception
 from agent import context_tokens
 from context import session_context_stats
