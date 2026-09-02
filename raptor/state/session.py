@@ -937,8 +937,10 @@ def persist_steer_handoff(entry: dict[str, Any]) -> None:
                 **(
                     {
                         "chat_message": {
-                            "conversation_id": get_chat_provider().encode_conversation_id(
-                                entry["chat_id"]
+                            "conversation_id": (
+                                get_chat_provider().encode_conversation_id(
+                                    entry["chat_id"]
+                                )
                             ),
                             "message_id": entry["source_message_id"],
                         }

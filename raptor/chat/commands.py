@@ -1305,10 +1305,13 @@ async def command(
             )
             return True
         current = session.current_model_target()
-        lines = [
-            f"{'*' if provider_id == current.provider_id and item == current.model else ' '} {item}"
-            for item in models
-        ]
+        lines = []
+        for item in models:
+            selected = (
+                provider_id == current.provider_id
+                and item == current.model
+            )
+            lines.append(f"{'*' if selected else ' '} {item}")
         header = f"Models from {provider.id}:"
         await send(chat_id, header + ("\n" + "\n".join(lines) if lines else " none"))
         return True

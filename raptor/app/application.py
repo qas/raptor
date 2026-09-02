@@ -45,7 +45,11 @@ from raptor.network import outbound_http_client
 from raptor.observability import log_event, log_exception
 from raptor.model.model_providers import MODEL_CONFIGURATION
 from raptor.model.responses import ensure_target
-from raptor.state.session import bootstrap_runtime_storage, rehydrate_pending_inputs, state
+from raptor.state.session import (
+    bootstrap_runtime_storage,
+    rehydrate_pending_inputs,
+    state,
+)
 from raptor.shell.shell_sessions import cancel_shell_sessions
 from raptor.agent.skills import (
     close_skill_discovery,

@@ -253,6 +253,13 @@ history remains available in the archived transcript as an audit record.
 | `install.sh` | Unix installer and uninstaller for published Linux and macOS binaries |
 | `raptor.py` | Thin source and frozen executable launcher |
 | `raptor/entrypoint.py` | Ownership-first process entry point and CLI |
+| `raptor/app/` | Process lifecycle, ownership, and application assembly |
+| `raptor/agent/` | Agent execution, scheduling, goals, threads, and skills |
+| `raptor/chat/` | Provider-neutral chat orchestration and presentation |
+| `raptor/chat/providers/` | Built-in chat transport adapters |
+| `raptor/model/` | Model-provider selection and outbound Responses protocol |
+| `raptor/shell/` | Filesystem policy, sandboxing, and managed processes |
+| `raptor/state/` | Durable chat state, transcripts, and atomic storage |
 | `raptor/app/application.py` | Provider and agent application lifecycle |
 | `raptor/app/application_control.py` | Shutdown and restart requests |
 | `raptor/app/workspace_identity.py` | Workspace identity bootstrap and loading |
