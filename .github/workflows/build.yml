@@ -64,11 +64,11 @@ jobs:
           RELEASE_TAG: ${{ inputs.release_tag }}
         run: |
           if [ "$BUILD_CHANNEL" = "release" ]; then
-            uv run python build_info.py release \
+            uv run python -m raptor.build_info release \
               "$BUILD_REVISION" "$BUILD_TIMESTAMP" .raptor-build.json \
               --tag "$RELEASE_TAG"
           else
-            uv run python build_info.py nightly \
+            uv run python -m raptor.build_info nightly \
               "$BUILD_REVISION" "$BUILD_TIMESTAMP" .raptor-build.json
           fi
       - name: Run tests

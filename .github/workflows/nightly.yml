@@ -28,7 +28,7 @@ jobs:
           REVISION: ${{ github.sha }}
         run: |
           built_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          python3 build_info.py nightly \
+          python3 -m raptor.build_info nightly \
             "$REVISION" "$built_at" /tmp/raptor-build.json
           echo "built_at=${built_at}" >> "$GITHUB_OUTPUT"
       - name: Check installer syntax
