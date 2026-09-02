@@ -82,8 +82,8 @@ from engine import (
     response_text,
 )
 from approval import execute_tool_with_approval
-from model_providers import MODEL_CONFIGURATION, ModelSettings, ModelTarget
-from responses import (
+from raptor.model.model_providers import MODEL_CONFIGURATION, ModelSettings, ModelTarget
+from raptor.model.responses import (
     MODEL_LIST_TIMEOUT_SECONDS,
     list_models,
     model_provider,

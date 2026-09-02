@@ -15,7 +15,7 @@ os.environ.setdefault("TG_USER_ID", "1")
 os.environ.setdefault("TG_CHAT_IDS", "1")
 
 import activity
-from model_providers import ModelTarget
+from raptor.model.model_providers import ModelTarget
 
 
 class RecordingActivityProvider:

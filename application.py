@@ -43,8 +43,8 @@ from goals import goal_is_active, pause_goal, prepare_goal_on_startup
 from loop import COMMANDS, accepts_event, handle_event
 from network import outbound_http_client
 from observability import log_event, log_exception
-from model_providers import MODEL_CONFIGURATION
-from responses import ensure_target
+from raptor.model.model_providers import MODEL_CONFIGURATION
+from raptor.model.responses import ensure_target
 from session import bootstrap_runtime_storage, rehydrate_pending_inputs, state
 from shell_sessions import cancel_shell_sessions
 from skills import (

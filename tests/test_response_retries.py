@@ -8,7 +8,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, Mock, patch
 
 import httpx
-from response_errors import MalformedToolCallError
+from raptor.model.response_errors import MalformedToolCallError
 
 _ROOT = Path(__file__).resolve().parent.parent
 _HOME = Path(tempfile.mkdtemp(prefix="raptor-response-retry-tests-"))
@@ -19,8 +19,8 @@ os.environ.setdefault("TG_USER_ID", "1")
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-import responses
-from model_providers import (
+from raptor.model import responses
+from raptor.model.model_providers import (
     ModelConfiguration,
     ModelProvider,
     ModelTarget,

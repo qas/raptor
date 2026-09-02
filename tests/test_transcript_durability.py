@@ -24,12 +24,12 @@ import agent as agent_mod
 import chat_store
 import context
 import controller
-import responses
-from response_errors import MalformedToolCallError
+from raptor.model import responses
+from raptor.model.response_errors import MalformedToolCallError
 import session
 from turn_runtime import turns
 import subagents
-from model_providers import ModelConfiguration, ModelProvider, ModelTarget
+from raptor.model.model_providers import ModelConfiguration, ModelProvider, ModelTarget
 
 
 async def _noop(*_a, **_k):

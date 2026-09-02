@@ -12,8 +12,8 @@ os.environ["AGENT_WORKDIR"] = str(_HOME)
 os.environ.setdefault("TG_BOT_TOKEN", "test-token")
 os.environ.setdefault("TG_USER_ID", "1")
 
-import responses
-from model_providers import (
+from raptor.model import responses
+from raptor.model.model_providers import (
     ModelConfiguration,
     ModelTarget,
     load_model_configuration,

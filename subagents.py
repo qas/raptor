@@ -45,11 +45,11 @@ from context import (
 )
 from engine import assistant_message, estimate_tokens, run_agent
 from observability import log_event
-from response_errors import (
+from raptor.model.response_errors import (
     ContextLengthError,
     MalformedToolCallError,
 )
-from responses import (
+from raptor.model.responses import (
     ResponsesStreamReplayGuard,
     ToolCallStreamCallback,
     parse_http_response_error,
@@ -58,7 +58,7 @@ from responses import (
     validate_chronological_input,
     model_provider,
 )
-from model_providers import MODEL_CONFIGURATION, ModelTarget
+from raptor.model.model_providers import MODEL_CONFIGURATION, ModelTarget
 from session import (
     bounded_interrupted_subagents,
     prune_subagent_records,

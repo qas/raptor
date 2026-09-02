@@ -20,7 +20,7 @@ if str(_ROOT) not in sys.path:
 
 import chat_store
 import context
-from responses import ContextLengthError, TransientResponsesError
+from raptor.model.responses import ContextLengthError, TransientResponsesError
 
 TEST_MODEL_TARGET = {"provider_id": "local", "model": "test-model"}
 
@@ -677,7 +677,7 @@ class ContextLengthParseTests(unittest.TestCase):
         )
 
     def test_parses_underscored_token_aliases(self) -> None:
-        from responses import parse_context_length_error
+        from raptor.model.responses import parse_context_length_error
         response = self._response(
             400,
             {
@@ -696,7 +696,7 @@ class ContextLengthParseTests(unittest.TestCase):
         self.assertEqual(err.context_tokens, 131072)
 
     def test_classifies_500_context_exceeded_message(self) -> None:
-        from responses import parse_context_length_error
+        from raptor.model.responses import parse_context_length_error
         response = self._response(
             500,
             {
@@ -709,7 +709,7 @@ class ContextLengthParseTests(unittest.TestCase):
         self.assertIsNotNone(err)
 
     def test_ignores_unrelated_500(self) -> None:
-        from responses import parse_context_length_error
+        from raptor.model.responses import parse_context_length_error
         response = self._response(
             500,
             {"error": {"message": "internal server error"}},
@@ -717,7 +717,7 @@ class ContextLengthParseTests(unittest.TestCase):
         self.assertIsNone(parse_context_length_error(response))
 
     def test_accepts_413(self) -> None:
-        from responses import parse_context_length_error
+        from raptor.model.responses import parse_context_length_error
         response = self._response(
             413,
             {
@@ -783,7 +783,7 @@ class EnsureUnderBudgetTests(unittest.IsolatedAsyncioTestCase):
         Guards the 314k→314k failure where compaction ran but the next
         request still used an oversized active context.
         """
-        from responses import estimate_response_request_tokens
+        from raptor.model.responses import estimate_response_request_tokens
         budget = 10_000
         # Medium blobs: each fits in the compaction request window, but
         # dozens of them make the full active request far over budget.
@@ -1064,7 +1064,7 @@ class EnsureUnderBudgetTests(unittest.IsolatedAsyncioTestCase):
 
         Rendering truncates for the checkpoint request only; JSONL stays full.
         """
-        from responses import estimate_response_request_tokens
+        from raptor.model.responses import estimate_response_request_tokens
         budget = 10_000
         huge = ("OVERSIZED-RECORD-" + ("Q" * 200) + "\n") * 200
         event = chat_store.append_item(

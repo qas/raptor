@@ -37,7 +37,7 @@ from config import (
     MAX_SUBAGENT_RECORDS,
     STATE_PATH,
 )
-from model_providers import MODEL_CONFIGURATION, ModelTarget
+from raptor.model.model_providers import MODEL_CONFIGURATION, ModelTarget
 from runtime_events import RuntimeEvent
 from storage import write_text_atomic
 from todos import validate_plan

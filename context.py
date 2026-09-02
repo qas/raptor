@@ -21,7 +21,7 @@ from config import (
     COMPACTION_USER_ANCHOR_TOKENS,
 )
 from engine import estimate_tokens, response_text
-from response_errors import ContextLengthError, TransientResponsesError
+from raptor.model.response_errors import ContextLengthError, TransientResponsesError
 
 COMPACTION_INSTRUCTIONS = """
 Create a precise handoff checkpoint for another agent continuing this session.

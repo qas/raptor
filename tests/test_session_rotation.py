@@ -27,7 +27,7 @@ from turn_runtime import turns
 from commands import command
 from goals import replace_goal
 from tools import chat_history_tool
-from model_providers import ModelProvider, ModelTarget
+from raptor.model.model_providers import ModelProvider, ModelTarget
 
 TEST_MODEL_TARGET = {"provider_id": "local", "model": "test-model"}
 

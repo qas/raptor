@@ -57,14 +57,14 @@ from presentation import (
     typing_loop,
 )
 from observability import log_agent_activity, log_event
-from responses import (
+from raptor.model.responses import (
     estimate_response_request_tokens,
     model_provider,
     responses_create,
     responses_create_stream,
 )
-from model_providers import MODEL_CONFIGURATION, ModelTarget
-from response_errors import (
+from raptor.model.model_providers import MODEL_CONFIGURATION, ModelTarget
+from raptor.model.response_errors import (
     ContextLengthError,
     MalformedToolCallError,
     TransientResponsesError,

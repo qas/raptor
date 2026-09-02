@@ -265,9 +265,9 @@ history remains available in the archived transcript as an audit record.
 | `turn_runtime.py` | Root-turn ownership, identity, and bounded interruption |
 | `runtime_events.py` | Typed background-completion events delivered to the root |
 | `observability.py` | Structured runtime events and activity labels |
-| `responses.py` | Outbound Responses client, streaming, and retry policy |
-| `model_providers.py` | `.raptor/config.toml` model-provider registry and target selection |
-| `response_errors.py` | Shared Responses protocol errors |
+| `raptor/model/responses.py` | Outbound Responses client, streaming, and retry policy |
+| `raptor/model/model_providers.py` | Model-provider registry and target selection |
+| `raptor/model/response_errors.py` | Shared Responses protocol errors |
 | `chat_provider.py` | Provider protocol and normalized event types |
 | `chat_runtime.py` | Provider loading, binding, and deferred delivery context |
 | `multi_provider.py` | Concurrent provider routing |

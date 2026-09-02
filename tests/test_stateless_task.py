@@ -20,9 +20,9 @@ if str(_ROOT) not in sys.path:
 
 import chat_store
 import commands
-import responses
+from raptor.model import responses
 import session
-from model_providers import ModelTarget
+from raptor.model.model_providers import ModelTarget
 
 
 class _Response:

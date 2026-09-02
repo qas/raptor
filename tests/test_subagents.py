@@ -19,13 +19,13 @@ os.environ["AGENT_WORKDIR"] = str(_HOME)
 import controller
 import session
 import subagents
-import responses
-from model_providers import (
+from raptor.model import responses
+from raptor.model.model_providers import (
     ModelConfiguration,
     ModelProvider,
     ModelTarget,
 )
-from response_errors import (
+from raptor.model.response_errors import (
     IncompleteResponsesStreamError,
     MalformedToolCallError,
     PartialResponsesStreamError,

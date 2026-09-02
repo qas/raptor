@@ -17,12 +17,12 @@ from config import (
     CHAT_STREAMING,
     TOOLS,
 )
-from model_providers import MODEL_CONFIGURATION, ModelProvider, ModelTarget
+from raptor.model.model_providers import MODEL_CONFIGURATION, ModelProvider, ModelTarget
 import session
 from chat_runtime import send_draft, send_reasoning_summary
 from observability import log_event
 from engine import estimate_tokens
-from response_errors import (
+from raptor.model.response_errors import (
     ContextLengthError,
     IncompleteResponsesStreamError,
     MalformedToolCallError,

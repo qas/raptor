@@ -24,7 +24,7 @@ import controller
 import session
 from chat_provider import ProviderCapabilities
 from chat_runtime import set_chat_provider
-from model_providers import ModelTarget
+from raptor.model.model_providers import ModelTarget
 from goals import (
     GOAL_ACTIVE,
     GOAL_BLOCKED,

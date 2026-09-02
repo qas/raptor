@@ -15,7 +15,7 @@ import session
 import shell_sessions
 from chat_provider import ProcessOutputChunk
 from config import TOOLS
-from model_providers import ModelTarget
+from raptor.model.model_providers import ModelTarget
 from shell_sessions import (
     HeadTailBuffer,
     cancel_shell_session,

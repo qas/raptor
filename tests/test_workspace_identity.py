@@ -10,7 +10,7 @@ _HOME = Path(tempfile.mkdtemp(prefix="raptor-workspace-identity-tests-"))
 os.environ["RAPTOR_HOME"] = str(_HOME / ".raptor")
 os.environ["AGENT_WORKDIR"] = str(_HOME)
 
-import responses
+from raptor.model import responses
 import workspace_identity
 
 

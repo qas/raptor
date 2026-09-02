@@ -38,7 +38,7 @@ from chat_runtime import (
     load_chat_providers,
     set_chat_provider,
 )
-from model_providers import ModelTarget
+from raptor.model.model_providers import ModelTarget
 import session
 from turn_runtime import TurnKind, turns
 

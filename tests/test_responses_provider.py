@@ -25,10 +25,10 @@ from chat_provider import (
     PollResult,
 )
 from responses_provider import ResponsesApiProvider, input_text
-from responses import build_response_payload, reasoning_summary_delta
-from responses import responses_create_stream
+from raptor.model.responses import build_response_payload, reasoning_summary_delta
+from raptor.model.responses import responses_create_stream
 from subagents import build_subagent_payload
-from model_providers import ModelTarget
+from raptor.model.model_providers import ModelTarget
 import session
 from turn_runtime import TurnKind, turns
 

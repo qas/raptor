@@ -17,7 +17,7 @@ os.environ.setdefault("TG_USER_ID", "1")
 import chat_store
 import commands
 import session
-from model_providers import ModelConfiguration, ModelProvider, ModelTarget
+from raptor.model.model_providers import ModelConfiguration, ModelProvider, ModelTarget
 from turn_runtime import turns
 from version import display_version
 

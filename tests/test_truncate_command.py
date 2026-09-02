@@ -18,7 +18,7 @@ import chat_runtime
 import commands
 import session
 import storage
-from model_providers import ModelTarget
+from raptor.model.model_providers import ModelTarget
 from turn_runtime import turns
 
 

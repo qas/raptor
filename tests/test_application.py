@@ -21,7 +21,7 @@ import application
 from application_control import ExitRequest
 from chat_provider import IncomingMessage, ProviderCapabilities
 from chat_runtime import get_chat_provider, set_chat_provider
-from model_providers import ModelTarget
+from raptor.model.model_providers import ModelTarget
 
 
 class ApplicationLifecycleTests(unittest.IsolatedAsyncioTestCase):

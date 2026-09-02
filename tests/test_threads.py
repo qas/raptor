@@ -25,7 +25,7 @@ from chat_provider import IncomingAction, IncomingMessage
 from context import build_active_context
 from goals import ensure_goal_pin, goal_instructions, replace_goal, sync_goal_pin
 import session
-from model_providers import ModelTarget
+from raptor.model.model_providers import ModelTarget
 from tests.test_chat_provider import FakeProvider
 from threads import (
     finish_thread,
