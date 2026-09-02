@@ -10,8 +10,8 @@ from agent import (
     compact_context,
     flush_pending_delivery,
 )
-from chat_provider import ConversationId
-from chat_runtime import bound_delivery_context, send
+from raptor.chat.chat_provider import ConversationId
+from raptor.chat.chat_runtime import bound_delivery_context, send
 from goals import (
     GOAL_BLOCKED,
     GOAL_COMPLETE,
@@ -25,7 +25,7 @@ from goals import (
     sync_goal_pin,
 )
 from observability import log_event
-from presentation import clear_steering_indicator
+from raptor.chat.presentation import clear_steering_indicator
 from runtime_events import RuntimeEvent, RuntimeEventKind
 from raptor.state.session import save_state
 from thread_state import thread_active

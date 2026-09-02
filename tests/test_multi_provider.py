@@ -16,16 +16,16 @@ os.environ.setdefault("TG_USER_ID", "1")
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from chat_provider import (
+from raptor.chat.chat_provider import (
     IncomingAction,
     IncomingMessage,
     PollResult,
     ProcessOutputChunk,
     ProviderCapabilities,
 )
-from multi_provider import MultiProvider
-from responses_provider import ResponsesApiProvider
-from activity import ActivityFinishResult, ActivitySnapshot
+from raptor.chat.providers.multi_provider import MultiProvider
+from raptor.chat.providers.responses_provider import ResponsesApiProvider
+from raptor.chat.activity import ActivityFinishResult, ActivitySnapshot
 
 
 class QueueProvider:
@@ -288,7 +288,7 @@ class MultiProviderTests(unittest.IsolatedAsyncioTestCase):
                 "close",
                 AsyncMock(side_effect=RuntimeError("failed")),
             ),
-            patch("multi_provider.log_exception") as log_exception,
+            patch("raptor.chat.providers.multi_provider.log_exception") as log_exception,
         ):
             await self.multi.close()
 

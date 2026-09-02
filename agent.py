@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import httpx
-from chat_provider import ConversationId
+from raptor.chat.chat_provider import ConversationId
 
 from raptor.state.chat_store import (
     active_checkpoint,
@@ -43,7 +43,7 @@ from goals import (
 from raptor.state.session import save_state, state, steer_queue
 from raptor.state import session
 from approval import execute_tool_with_approval
-from chat_runtime import (
+from raptor.chat.chat_runtime import (
     activate_delivery_context,
     capture_delivery_context,
     detached_delivery_context,
@@ -51,7 +51,7 @@ from chat_runtime import (
     restore_delivery_context,
     send,
 )
-from presentation import (
+from raptor.chat.presentation import (
     clear_steering_indicator,
     compacting_indicator,
     typing_loop,
@@ -70,7 +70,7 @@ from raptor.model.response_errors import (
     TransientResponsesError,
 )
 from skills import skill_catalog_instructions
-from tool_activity import ToolActivitySurface
+from raptor.chat.tool_activity import ToolActivitySurface
 
 
 TURN_ABORTED_GUIDANCE = (

@@ -12,7 +12,7 @@ os.environ.setdefault("TG_BOT_TOKEN", "test-token")
 os.environ.setdefault("TG_USER_ID", "1")
 
 import application_control
-import commands
+from raptor.chat import commands
 
 
 class ApplicationControlTests(unittest.IsolatedAsyncioTestCase):

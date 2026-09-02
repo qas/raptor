@@ -19,12 +19,12 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from raptor.state import chat_store
-import commands
+from raptor.chat import commands
 import controller
 from raptor.state import session
 from raptor.state.session import pending_approvals
 from turn_runtime import turns
-from commands import command
+from raptor.chat.commands import command
 from goals import replace_goal
 from tools import chat_history_tool
 from raptor.model.model_providers import ModelProvider, ModelTarget
@@ -93,7 +93,7 @@ class SessionRotationTests(unittest.IsolatedAsyncioTestCase):
         self,
     ) -> None:
         old = session.state["current_session_id"]
-        with patch("commands.send", _noop):
+        with patch("raptor.chat.commands.send", _noop):
             await command(1, "/new")
         new = session.state["current_session_id"]
         self.assertNotEqual(old, new)
@@ -279,7 +279,7 @@ class SessionRotationTests(unittest.IsolatedAsyncioTestCase):
         goal["todos"] = [
             {"step": "Keep me", "status": "in_progress"},
         ]
-        with patch("commands.send", _noop):
+        with patch("raptor.chat.commands.send", _noop):
             await command(1, "/new")
         self.assertEqual(
             session.state["goal"]["todos"],
@@ -296,7 +296,7 @@ class SessionRotationTests(unittest.IsolatedAsyncioTestCase):
 
         with (
             patch("raptor.shell.shell_sessions.running_shell_sessions", return_value=1),
-            patch("commands.send", capture),
+            patch("raptor.chat.commands.send", capture),
         ):
             await command(1, "/new")
 
@@ -325,7 +325,7 @@ class SessionRotationTests(unittest.IsolatedAsyncioTestCase):
         async def capture(_chat_id, text, **_kwargs):
             sent.append(text)
 
-        with patch("commands.send", capture):
+        with patch("raptor.chat.commands.send", capture):
             await command(1, "/chats")
 
         self.assertIn(f"{current} ·", sent[0])
@@ -345,7 +345,7 @@ class SessionRotationTests(unittest.IsolatedAsyncioTestCase):
         async def capture(_chat_id, text, **_kwargs):
             sent.append(text)
 
-        with patch("commands.send", capture):
+        with patch("raptor.chat.commands.send", capture):
             await command(1, "/chats")
 
         self.assertIn(f"{current} ·", sent[0])
@@ -375,7 +375,7 @@ class SessionRotationTests(unittest.IsolatedAsyncioTestCase):
         async def capture(_chat_id, text, **_kwargs):
             sent.append(text)
 
-        with patch("commands.send", capture):
+        with patch("raptor.chat.commands.send", capture):
             await command(1, "/chats needleproject")
 
         self.assertIn(matching, sent[0])
@@ -399,7 +399,7 @@ class SessionRotationTests(unittest.IsolatedAsyncioTestCase):
         async def capture(_chat_id, text, **_kwargs):
             sent.append(text)
 
-        with patch("commands.send", capture):
+        with patch("raptor.chat.commands.send", capture):
             await command(1, f"/resume {target}")
 
         self.assertEqual(session.state["current_session_id"], target)
@@ -440,8 +440,8 @@ class SessionRotationTests(unittest.IsolatedAsyncioTestCase):
             api_key_env="MISSING_RESUME_KEY",
         )
         with (
-            patch("commands.send", capture),
-            patch("commands.model_provider", return_value=provider),
+            patch("raptor.chat.commands.send", capture),
+            patch("raptor.chat.commands.model_provider", return_value=provider),
             patch.dict(os.environ, {}, clear=True),
         ):
             await command(1, f"/resume {target}")
@@ -463,7 +463,7 @@ class SessionRotationTests(unittest.IsolatedAsyncioTestCase):
         async def capture(_chat_id, text, **_kwargs):
             sent.append(text)
 
-        with patch("commands.send", capture):
+        with patch("raptor.chat.commands.send", capture):
             await command(1, f"/resume {child}")
 
         self.assertEqual(session.state["current_session_id"], current)

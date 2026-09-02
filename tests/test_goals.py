@@ -22,8 +22,8 @@ if str(_ROOT) not in sys.path:
 import agent as agent_mod
 import controller
 from raptor.state import session
-from chat_provider import ProviderCapabilities
-from chat_runtime import set_chat_provider
+from raptor.chat.chat_provider import ProviderCapabilities
+from raptor.chat.chat_runtime import set_chat_provider
 from raptor.model.model_providers import ModelTarget
 from goals import (
     GOAL_ACTIVE,
@@ -729,21 +729,21 @@ class GoalTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_stop_pauses_active_goal(self) -> None:
         replace_goal("stop me")
-        from commands import command
+        from raptor.chat.commands import command
 
         cancel_shells = AsyncMock(return_value=2)
         with (
             patch(
-                "commands.cancel_background_subagents",
+                "raptor.chat.commands.cancel_background_subagents",
                 AsyncMock(return_value=0),
             ),
             patch(
-                "commands.cancel_shell_sessions",
+                "raptor.chat.commands.cancel_shell_sessions",
                 cancel_shells,
             ),
         ):
             with patch(
-                "commands.send",
+                "raptor.chat.commands.send",
                 _noop,
             ):
                 await command(1, "/stop all")
@@ -754,17 +754,17 @@ class GoalTests(unittest.IsolatedAsyncioTestCase):
         cancel_shells.assert_awaited_once_with()
 
     async def test_stop_preserves_background_resources(self) -> None:
-        from commands import command
+        from raptor.chat.commands import command
 
         cancel_subagents = AsyncMock(return_value=1)
         cancel_shells = AsyncMock(return_value=1)
         with (
             patch(
-                "commands.cancel_background_subagents",
+                "raptor.chat.commands.cancel_background_subagents",
                 cancel_subagents,
             ),
-            patch("commands.cancel_shell_sessions", cancel_shells),
-            patch("commands.send", _noop),
+            patch("raptor.chat.commands.cancel_shell_sessions", cancel_shells),
+            patch("raptor.chat.commands.send", _noop),
         ):
             await command(1, "/stop")
 
@@ -772,7 +772,7 @@ class GoalTests(unittest.IsolatedAsyncioTestCase):
         cancel_shells.assert_not_awaited()
 
     async def test_stop_reports_discarded_background_results(self) -> None:
-        from commands import command
+        from raptor.chat.commands import command
 
         sent: list[str] = []
 
@@ -780,17 +780,17 @@ class GoalTests(unittest.IsolatedAsyncioTestCase):
             sent.append(text)
 
         with (
-            patch("commands.pending_subagent_completions", return_value=1),
-            patch("commands.pending_shell_completions", return_value=2),
+            patch("raptor.chat.commands.pending_subagent_completions", return_value=1),
+            patch("raptor.chat.commands.pending_shell_completions", return_value=2),
             patch(
-                "commands.cancel_background_subagents",
+                "raptor.chat.commands.cancel_background_subagents",
                 AsyncMock(return_value=0),
             ) as cancel_subagents,
             patch(
-                "commands.cancel_shell_sessions",
+                "raptor.chat.commands.cancel_shell_sessions",
                 AsyncMock(return_value=0),
             ),
-            patch("commands.send", capture),
+            patch("raptor.chat.commands.send", capture),
         ):
             await command(1, "/stop all")
 
@@ -818,15 +818,15 @@ class GoalTests(unittest.IsolatedAsyncioTestCase):
 
             return Done()
 
-        from commands import command
+        from raptor.chat.commands import command
 
         with (
             patch(
-                "commands.start_root_session",
+                "raptor.chat.commands.start_root_session",
                 fake_start,
             ),
             patch(
-                "commands.send",
+                "raptor.chat.commands.send",
                 _noop,
             ),
         ):
@@ -846,9 +846,9 @@ class GoalTests(unittest.IsolatedAsyncioTestCase):
             kind=TurnKind.REGULAR,
             goal_id=goal_id,
         )
-        from commands import command
+        from raptor.chat.commands import command
 
-        with patch("commands.send", _noop):
+        with patch("raptor.chat.commands.send", _noop):
             await command(1, "/goal clear")
         self.assertIsNone(current_goal())
         self.assertTrue(task.cancelled())
@@ -1389,9 +1389,9 @@ class GoalTests(unittest.IsolatedAsyncioTestCase):
             asyncio.Event().wait(),
             kind=TurnKind.REGULAR,
         )
-        from commands import command
+        from raptor.chat.commands import command
 
-        with patch("commands.send", _noop):
+        with patch("raptor.chat.commands.send", _noop):
             await command(1, "/goal pause")
         self.assertFalse(task.cancelled())
         self.assertEqual(
@@ -1414,9 +1414,9 @@ class GoalTests(unittest.IsolatedAsyncioTestCase):
             kind=TurnKind.REGULAR,
             goal_id=goal_id,
         )
-        from commands import command
+        from raptor.chat.commands import command
 
-        with patch("commands.send", _noop):
+        with patch("raptor.chat.commands.send", _noop):
             await command(1, "/goal pause")
         self.assertTrue(task.cancelled())
         self.assertEqual(
@@ -1434,10 +1434,10 @@ class GoalTests(unittest.IsolatedAsyncioTestCase):
         async def capture_send(_chat_id, text):
             messages.append(text)
 
-        from commands import command
+        from raptor.chat.commands import command
 
         with patch(
-            "commands.send",
+            "raptor.chat.commands.send",
             capture_send,
         ):
             await command(1, "/goal pause")
@@ -1653,8 +1653,8 @@ class GoalTests(unittest.IsolatedAsyncioTestCase):
 class GoalPinTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         _bind_goal_test_provider(self)
-        from chat_runtime import set_chat_provider
-        from telegram import telegram_provider
+        from raptor.chat.chat_runtime import set_chat_provider
+        from raptor.chat.providers.telegram import telegram_provider
 
         previous_provider = set_chat_provider(telegram_provider)
         self.addCleanup(set_chat_provider, previous_provider)
@@ -1715,11 +1715,11 @@ class GoalPinTests(unittest.IsolatedAsyncioTestCase):
         self._cleared: list[int] = []
         self._last_pin_text = ""
         self._show_patch = patch(
-            "presentation.show_goal_pin",
+            "raptor.chat.presentation.show_goal_pin",
             fake_show,
         )
         self._clear_patch = patch(
-            "presentation.clear_goal_pin",
+            "raptor.chat.presentation.clear_goal_pin",
             fake_clear,
         )
         self._show_patch.start()
@@ -1796,8 +1796,8 @@ class GoalPinTests(unittest.IsolatedAsyncioTestCase):
     async def test_goal_pause_removes_pin(self) -> None:
         replace_goal("pause me")
         await ensure_goal_pin(1)
-        from commands import command
-        with patch("commands.send", _noop):
+        from raptor.chat.commands import command
+        with patch("raptor.chat.commands.send", _noop):
             await command(1, "/goal pause")
         self.assertIsNone(session.current_runtime().goal_pin_message_id)
         self.assertEqual(
@@ -1808,21 +1808,21 @@ class GoalPinTests(unittest.IsolatedAsyncioTestCase):
     async def test_goal_clear_removes_pin(self) -> None:
         replace_goal("clear me")
         await ensure_goal_pin(1)
-        from commands import command
-        with patch("commands.send", _noop):
+        from raptor.chat.commands import command
+        with patch("raptor.chat.commands.send", _noop):
             await command(1, "/goal clear")
         self.assertIsNone(session.current_runtime().goal_pin_message_id)
 
     async def test_stop_removes_pin(self) -> None:
         replace_goal("stop me")
         await ensure_goal_pin(1)
-        from commands import command
+        from raptor.chat.commands import command
         with (
             patch(
-                "commands.cancel_background_subagents",
+                "raptor.chat.commands.cancel_background_subagents",
                 AsyncMock(return_value=0),
             ),
-            patch("commands.send", _noop),
+            patch("raptor.chat.commands.send", _noop),
         ):
             await command(1, "/stop")
         self.assertIsNone(session.current_runtime().goal_pin_message_id)
@@ -1835,7 +1835,7 @@ class GoalPinTests(unittest.IsolatedAsyncioTestCase):
         replace_goal("resume me")
         pause_goal()
         await remove_goal_pin(1)
-        from commands import command
+        from raptor.chat.commands import command
 
         def fake_start(chat_id, text, *, internal=False):
             class Done:
@@ -1845,10 +1845,10 @@ class GoalPinTests(unittest.IsolatedAsyncioTestCase):
 
         with (
             patch(
-                "commands.start_root_session",
+                "raptor.chat.commands.start_root_session",
                 fake_start,
             ),
-            patch("commands.send", _noop),
+            patch("raptor.chat.commands.send", _noop),
         ):
             await command(1, "/goal resume")
         self.assertIsNotNone(session.current_runtime().goal_pin_message_id)
@@ -1910,7 +1910,7 @@ class GoalPinTests(unittest.IsolatedAsyncioTestCase):
             return mid
 
         with patch(
-            "presentation.show_goal_pin",
+            "raptor.chat.presentation.show_goal_pin",
             racing_show,
         ):
             await ensure_goal_pin(1)
@@ -1934,7 +1934,7 @@ class GoalPinTests(unittest.IsolatedAsyncioTestCase):
             raise RuntimeError("telegram down")
 
         with patch(
-            "presentation.clear_goal_pin",
+            "raptor.chat.presentation.clear_goal_pin",
             boom,
         ):
             await remove_goal_pin(1)
@@ -1970,8 +1970,8 @@ class GoalPinTests(unittest.IsolatedAsyncioTestCase):
         async def fake_tg(method, payload=None):
             return {"message_id": 9001}
 
-        with patch("telegram.tg_call", fake_tg):
-            from presentation import steering_indicator
+        with patch("raptor.chat.providers.telegram.tg_call", fake_tg):
+            from raptor.chat.presentation import steering_indicator
             mid = await steering_indicator(1, "abcd")
         self.assertEqual(mid, 9001)
         self.assertEqual(session.current_runtime().goal_pin_message_id, goal_pin_id)
@@ -2013,8 +2013,8 @@ class GoalPinTests(unittest.IsolatedAsyncioTestCase):
 class PinnedStatusSlotTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         _bind_goal_test_provider(self)
-        from chat_runtime import set_chat_provider
-        from telegram import telegram_provider
+        from raptor.chat.chat_runtime import set_chat_provider
+        from raptor.chat.providers.telegram import telegram_provider
 
         previous_provider = set_chat_provider(telegram_provider)
         self.addCleanup(set_chat_provider, previous_provider)
@@ -2035,7 +2035,7 @@ class PinnedStatusSlotTests(unittest.IsolatedAsyncioTestCase):
                 return {"message_id": 321}
             return True
 
-        self._tg_patch = patch("telegram.tg_call", fake_tg)
+        self._tg_patch = patch("raptor.chat.providers.telegram.tg_call", fake_tg)
         self._tg_patch.start()
         self.addCleanup(self._tg_patch.stop)
 
@@ -2043,8 +2043,8 @@ class PinnedStatusSlotTests(unittest.IsolatedAsyncioTestCase):
         self,
     ) -> None:
         from approval import execute_tool_with_approval, handle_approval_action
-        from chat_provider import IncomingAction
-        from chat_runtime import get_chat_provider
+        from raptor.chat.chat_provider import IncomingAction
+        from raptor.chat.chat_runtime import get_chat_provider
 
         goal = replace_goal("shared slot")
         await ensure_goal_pin(1)
@@ -2115,9 +2115,9 @@ class PinnedStatusSlotTests(unittest.IsolatedAsyncioTestCase):
         self,
     ) -> None:
         from approval import execute_tool_with_approval, handle_approval_action
-        from chat_provider import IncomingAction
-        from chat_runtime import get_chat_provider
-        import telegram
+        from raptor.chat.chat_provider import IncomingAction
+        from raptor.chat.chat_runtime import get_chat_provider
+        from raptor.chat.providers import telegram
 
         chat = telegram.telegram_provider._chats.setdefault(
             1,
@@ -2209,8 +2209,8 @@ class PinnedStatusSlotTests(unittest.IsolatedAsyncioTestCase):
         self,
     ) -> None:
         from approval import handle_approval_action
-        from chat_provider import IncomingAction
-        from chat_runtime import get_chat_provider
+        from raptor.chat.chat_provider import IncomingAction
+        from raptor.chat.chat_runtime import get_chat_provider
 
         approval_id = "abc123"
         future = asyncio.get_running_loop().create_future()
@@ -2235,7 +2235,7 @@ class PinnedStatusSlotTests(unittest.IsolatedAsyncioTestCase):
     async def test_stale_owner_cannot_clear_newer_slot_occupant(
         self,
     ) -> None:
-        from presentation import clear_pinned_status, show_pinned_status
+        from raptor.chat.presentation import clear_pinned_status, show_pinned_status
 
         await show_pinned_status(1, "approval:old", "approval")
         await show_pinned_status(1, "steer:new", "steering")
@@ -2250,7 +2250,7 @@ class PinnedStatusSlotTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(session.current_runtime().pinned_status_message_id, 321)
 
     async def test_empty_slot_unpins_then_deletes_message(self) -> None:
-        from presentation import clear_pinned_status, show_pinned_status
+        from raptor.chat.presentation import clear_pinned_status, show_pinned_status
 
         await show_pinned_status(1, "goal:test", "Goal active: test")
         cleared = await clear_pinned_status(1, owner="goal:test")
@@ -2269,7 +2269,7 @@ class PinnedStatusSlotTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_compacting_indicator_animates_then_deletes(self) -> None:
-        from presentation import compacting_indicator
+        from raptor.chat.presentation import compacting_indicator
 
         animated = asyncio.Event()
 
@@ -2282,7 +2282,7 @@ class PinnedStatusSlotTests(unittest.IsolatedAsyncioTestCase):
                 animated.set()
             return True
 
-        with patch("telegram.tg_call", fake_tg):
+        with patch("raptor.chat.providers.telegram.tg_call", fake_tg):
             async with compacting_indicator(1, interval=0.005):
                 await asyncio.wait_for(animated.wait(), timeout=1)
 
@@ -2359,15 +2359,15 @@ class SetGoalToolTests(unittest.IsolatedAsyncioTestCase):
             return None
 
         self._show_patch = patch(
-            "presentation.show_goal_pin",
+            "raptor.chat.presentation.show_goal_pin",
             fake_show,
         )
         self._clear_patch = patch(
-            "presentation.clear_goal_pin",
+            "raptor.chat.presentation.clear_goal_pin",
             fake_clear,
         )
         self._send_patch = patch(
-            "chat_runtime.send",
+            "raptor.chat.chat_runtime.send",
             _noop,
         )
         self._show_patch.start()

@@ -9,7 +9,7 @@ from typing import Any
 import httpx
 
 from raptor.state import session
-from activity import (
+from raptor.chat.activity import (
     close_activity_projections,
     reconcile_activity_surfaces,
 )
@@ -22,8 +22,8 @@ from application_control import (
     unbind_application_task,
 )
 from agent import flush_pending_delivery, repair_interrupted_root_turn
-from chat_provider import ChatEvent, ChatProvider
-from chat_runtime import load_chat_providers, send, set_chat_provider
+from raptor.chat.chat_provider import ChatEvent, ChatProvider
+from raptor.chat.chat_runtime import load_chat_providers, send, set_chat_provider
 from raptor.state.chat_store import chat_path, ensure_chat_dirs
 from config import (
     CHAT_DIR,
@@ -40,7 +40,7 @@ from config import (
 from controller import ensure_root_session, interrupt_root_turn
 from raptor.shell.console_follow import close_follow_console
 from goals import goal_is_active, pause_goal, prepare_goal_on_startup
-from loop import COMMANDS, accepts_event, handle_event
+from raptor.chat.loop import COMMANDS, accepts_event, handle_event
 from network import outbound_http_client
 from observability import log_event, log_exception
 from raptor.model.model_providers import MODEL_CONFIGURATION

@@ -19,7 +19,7 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from raptor.state import chat_store
-import commands
+from raptor.chat import commands
 from raptor.model import responses
 from raptor.state import session
 from raptor.model.model_providers import ModelTarget

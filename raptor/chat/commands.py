@@ -11,8 +11,8 @@ from application_control import (
     application_control_available,
     request_application_exit,
 )
-from chat_format import bash_console_block
-from chat_provider import ConversationId
+from raptor.chat.chat_format import bash_console_block
+from raptor.chat.chat_provider import ConversationId
 from raptor.shell.console_follow import start_follow_console
 from raptor.state.chat_store import (
     TruncationCleanupError,
@@ -69,7 +69,7 @@ from goals import (
     todo_store_for_display,
 )
 from runtime import runtime_uptime
-from chat_runtime import (
+from raptor.chat.chat_runtime import (
     bound_delivery_context,
     capture_delivery_context,
     get_chat_provider,
@@ -115,7 +115,7 @@ from thread_state import current_thread, thread_active
 from turn_runtime import TurnKind, turns
 from todos import validate_plan
 from version import display_version
-from tool_activity import ToolActivitySurface
+from raptor.chat.tool_activity import ToolActivitySurface
 
 # ---------------------------------------------------------------------------
 # Chat commands

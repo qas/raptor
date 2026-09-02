@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
-from chat_provider import (
+from raptor.chat.chat_provider import (
     ChatEvent,
     ConversationId,
     Controls,

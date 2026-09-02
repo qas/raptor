@@ -13,7 +13,7 @@ os.environ["AGENT_WORKDIR"] = str(_HOME)
 
 from raptor.state import session
 from raptor.shell import shell_sessions
-from chat_provider import ProcessOutputChunk
+from raptor.chat.chat_provider import ProcessOutputChunk
 from config import TOOLS
 from raptor.model.model_providers import ModelTarget
 from raptor.shell.shell_sessions import (

@@ -3,13 +3,13 @@ import asyncio
 from contextlib import asynccontextmanager
 from typing import AsyncIterator
 
-from chat_provider import (
+from raptor.chat.chat_provider import (
     ActionButton,
     ConversationId,
     Controls,
     MessageId,
 )
-from chat_runtime import get_chat_provider
+from raptor.chat.chat_runtime import get_chat_provider
 from observability import log_exception
 from raptor.state import session
 

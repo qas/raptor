@@ -2,22 +2,22 @@
 import secrets
 
 from approval import handle_approval_action, supersede_pending_approvals
-from chat_provider import (
+from raptor.chat.chat_provider import (
     ChatEvent,
     ChatProvider,
     IncomingAction,
     IncomingMessage,
 )
-from chat_runtime import capture_delivery_context, get_chat_provider
+from raptor.chat.chat_runtime import capture_delivery_context, get_chat_provider
 from raptor.state.chat_store import append_meta
-from commands import command
+from raptor.chat.commands import command
 from config import MAX_PENDING_STEERS
 from raptor.shell.console_follow import handle_follow_console_action
 from controller import start_root_session
-from presentation import clear_steering_indicator, steering_indicator
+from raptor.chat.presentation import clear_steering_indicator, steering_indicator
 from raptor.state.session import StateCapacityError, state, steer_queue
 from steering import handle_steering_action
-from tool_activity import handle_tool_activity_action
+from raptor.chat.tool_activity import handle_tool_activity_action
 from threads import handle_thread_action
 from raptor.state import session
 from observability import log_agent_activity, log_event, log_exception

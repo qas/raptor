@@ -8,8 +8,8 @@ from typing import Any
 
 import httpx
 
-from activity import ActivityFinishResult, ActivitySnapshot
-from chat_provider import (
+from raptor.chat.activity import ActivityFinishResult, ActivitySnapshot
+from raptor.chat.chat_provider import (
     ChatEvent,
     ConversationId,
     Controls,

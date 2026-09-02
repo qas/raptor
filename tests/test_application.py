@@ -19,8 +19,8 @@ if str(_ROOT) not in sys.path:
 
 import application
 from application_control import ExitRequest
-from chat_provider import IncomingMessage, ProviderCapabilities
-from chat_runtime import get_chat_provider, set_chat_provider
+from raptor.chat.chat_provider import IncomingMessage, ProviderCapabilities
+from raptor.chat.chat_runtime import get_chat_provider, set_chat_provider
 from raptor.model.model_providers import ModelTarget
 
 

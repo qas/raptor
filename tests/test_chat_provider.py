@@ -22,7 +22,7 @@ os.environ.setdefault("TG_CHAT_IDS", "1")
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from chat_provider import (
+from raptor.chat.chat_provider import (
     ActionButton,
     ChatProvider,
     Controls,
@@ -32,7 +32,7 @@ from chat_provider import (
     ProcessOutputChunk,
     ProviderCapabilities,
 )
-from chat_runtime import (
+from raptor.chat.chat_runtime import (
     get_chat_provider,
     load_chat_provider,
     load_chat_providers,
@@ -212,7 +212,7 @@ class ChatProviderContractTests(unittest.IsolatedAsyncioTestCase):
         set_chat_provider(self.previous_provider)
 
     async def test_persistent_status_supports_opaque_provider_ids(self) -> None:
-        from presentation import clear_pinned_status, show_pinned_status
+        from raptor.chat.presentation import clear_pinned_status, show_pinned_status
 
         message_id = await show_pinned_status(
             "!room:example.org",
@@ -239,7 +239,7 @@ class ChatProviderContractTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_provider_without_pins_uses_capability_path(self) -> None:
-        from presentation import clear_pinned_status, show_pinned_status
+        from raptor.chat.presentation import clear_pinned_status, show_pinned_status
 
         provider = FakeProvider(pins=False)
         set_chat_provider(provider)
@@ -264,7 +264,7 @@ class ChatProviderContractTests(unittest.IsolatedAsyncioTestCase):
     async def test_tool_activity_streams_then_removes_terminal_bubble(
         self,
     ) -> None:
-        from tool_activity import ToolActivitySurface
+        from raptor.chat.tool_activity import ToolActivitySurface
 
         surface = ToolActivitySurface("!room:example.org")
         partial = {
@@ -278,7 +278,7 @@ class ChatProviderContractTests(unittest.IsolatedAsyncioTestCase):
             "arguments": '{"command":"pwd"}',
         }
 
-        with patch("tool_activity.CHAT_STREAM_INTERVAL", 0):
+        with patch("raptor.chat.tool_activity.CHAT_STREAM_INTERVAL", 0):
             await surface.stream(partial, False)
             await asyncio.sleep(0)
             await surface.stream(complete, False)
@@ -305,7 +305,7 @@ class ChatProviderContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(session.current_runtime().pinned_status_owner)
 
     def test_tool_preview_is_bounded_and_humanizes_field_names(self) -> None:
-        from tool_activity import MAX_TOOL_PREVIEW_CHARS, tool_preview
+        from raptor.chat.tool_activity import MAX_TOOL_PREVIEW_CHARS, tool_preview
 
         preview = tool_preview({
             "name": "write_stdin",
@@ -329,7 +329,7 @@ class ChatProviderContractTests(unittest.IsolatedAsyncioTestCase):
     async def test_tool_activity_exposes_process_output_to_provider(
         self,
     ) -> None:
-        from tool_activity import ToolActivitySurface
+        from raptor.chat.tool_activity import ToolActivitySurface
 
         surface = ToolActivitySurface("!room:example.org")
         chunk = ProcessOutputChunk(
@@ -349,7 +349,7 @@ class ChatProviderContractTests(unittest.IsolatedAsyncioTestCase):
     async def test_disabled_tool_activity_suppresses_transient_bubbles(
         self,
     ) -> None:
-        from tool_activity import ToolActivitySurface
+        from raptor.chat.tool_activity import ToolActivitySurface
 
         surface = ToolActivitySurface("!room:example.org", enabled=False)
         call = {
@@ -378,7 +378,7 @@ class ChatProviderContractTests(unittest.IsolatedAsyncioTestCase):
     async def test_disabled_tool_activity_keeps_required_approval(
         self,
     ) -> None:
-        from tool_activity import ToolActivitySurface
+        from raptor.chat.tool_activity import ToolActivitySurface
 
         surface = ToolActivitySurface("!room:example.org", enabled=False)
         call = {
@@ -404,7 +404,7 @@ class ChatProviderContractTests(unittest.IsolatedAsyncioTestCase):
     async def test_tool_console_toggles_and_streams_tail(
         self,
     ) -> None:
-        from tool_activity import (
+        from raptor.chat.tool_activity import (
             ToolActivitySurface,
             handle_tool_activity_action,
         )
@@ -418,7 +418,7 @@ class ChatProviderContractTests(unittest.IsolatedAsyncioTestCase):
             "arguments": '{"command":"python -m unittest"}',
         }
 
-        with patch("tool_activity.CHAT_STREAM_INTERVAL", 0):
+        with patch("raptor.chat.tool_activity.CHAT_STREAM_INTERVAL", 0):
             await surface.running(call)
             created = self.provider.calls[0]
             controls = created[4]
@@ -547,7 +547,7 @@ class ChatProviderContractTests(unittest.IsolatedAsyncioTestCase):
     async def test_completed_tool_consoles_keep_independent_output(
         self,
     ) -> None:
-        from tool_activity import ToolActivitySurface
+        from raptor.chat.tool_activity import ToolActivitySurface
 
         self.provider = ConsoleFakeProvider()
         set_chat_provider(self.provider)
@@ -590,7 +590,7 @@ class ChatProviderContractTests(unittest.IsolatedAsyncioTestCase):
         await surface.clear()
 
     async def test_tool_console_controls_are_shell_only(self) -> None:
-        from tool_activity import ToolActivitySurface
+        from raptor.chat.tool_activity import ToolActivitySurface
 
         self.provider = ConsoleFakeProvider()
         set_chat_provider(self.provider)
@@ -606,7 +606,7 @@ class ChatProviderContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.provider.calls[0][4], ())
 
     async def test_denied_shell_stays_on_info_without_running(self) -> None:
-        from tool_activity import ToolActivitySurface
+        from raptor.chat.tool_activity import ToolActivitySurface
 
         self.provider = ConsoleFakeProvider()
         set_chat_provider(self.provider)
@@ -642,7 +642,7 @@ class ChatProviderContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(terminal[4], ())
 
     async def test_telegram_poll_wait_edits_one_bubble_to_zero(self) -> None:
-        from tool_activity import ToolActivitySurface, _wait_duration
+        from raptor.chat.tool_activity import ToolActivitySurface, _wait_duration
 
         self.assertEqual(_wait_duration(300), "5m")
         self.assertEqual(_wait_duration(295), "4m 55s")
@@ -662,8 +662,8 @@ class ChatProviderContractTests(unittest.IsolatedAsyncioTestCase):
                 "raptor.shell.shell_sessions.write_stdin_wait_ms",
                 return_value=20,
             ),
-            patch("tool_activity.WAIT_UPDATE_INTERVAL_SECONDS", 0.01),
-            patch("tool_activity.CHAT_STREAM_INTERVAL", 0),
+            patch("raptor.chat.tool_activity.WAIT_UPDATE_INTERVAL_SECONDS", 0.01),
+            patch("raptor.chat.tool_activity.CHAT_STREAM_INTERVAL", 0),
         ):
             await surface.running(call)
             self.assertEqual(self.provider.calls[0][3], "Waiting 1s")
@@ -685,7 +685,7 @@ class ChatProviderContractTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_telegram_poll_wait_stops_on_early_completion(self) -> None:
-        from tool_activity import ToolActivitySurface
+        from raptor.chat.tool_activity import ToolActivitySurface
 
         self.provider = ConsoleFakeProvider()
         set_chat_provider(self.provider)
@@ -701,7 +701,7 @@ class ChatProviderContractTests(unittest.IsolatedAsyncioTestCase):
                 "raptor.shell.shell_sessions.write_stdin_wait_ms",
                 return_value=100,
             ),
-            patch("tool_activity.WAIT_UPDATE_INTERVAL_SECONDS", 0.01),
+            patch("raptor.chat.tool_activity.WAIT_UPDATE_INTERVAL_SECONDS", 0.01),
         ):
             await surface.running(call)
             await surface.finished(
@@ -726,7 +726,7 @@ class ChatProviderContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(terminal, "Command completed")
 
     async def test_write_stdin_input_keeps_normal_tool_activity(self) -> None:
-        from tool_activity import ToolActivitySurface
+        from raptor.chat.tool_activity import ToolActivitySurface
 
         self.provider = ConsoleFakeProvider()
         set_chat_provider(self.provider)
@@ -747,7 +747,7 @@ class ChatProviderContractTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_poll_wait_presentation_is_provider_opt_in(self) -> None:
-        from tool_activity import ToolActivitySurface
+        from raptor.chat.tool_activity import ToolActivitySurface
 
         surface = ToolActivitySurface("!room:example.org")
         call = {
@@ -766,7 +766,7 @@ class ChatProviderContractTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_child_tool_activity_uses_same_unpinned_bubble(self) -> None:
-        from tool_activity import ToolActivitySurface
+        from raptor.chat.tool_activity import ToolActivitySurface
 
         surface = ToolActivitySurface("!room:example.org/child")
         call = {
@@ -799,8 +799,8 @@ class ChatProviderContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(session.current_runtime().pinned_status_owner)
 
     async def test_tool_activity_preserves_existing_status_owner(self) -> None:
-        from presentation import show_pinned_status
-        from tool_activity import ToolActivitySurface
+        from raptor.chat.presentation import show_pinned_status
+        from raptor.chat.tool_activity import ToolActivitySurface
 
         await show_pinned_status(
             "!room:example.org",
@@ -831,7 +831,7 @@ class ChatProviderContractTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_next_tool_gets_a_fresh_terminal_bubble(self) -> None:
-        from tool_activity import ToolActivitySurface
+        from raptor.chat.tool_activity import ToolActivitySurface
 
         surface = ToolActivitySurface("!room:example.org/child")
         first = {
@@ -872,7 +872,7 @@ class ChatProviderContractTests(unittest.IsolatedAsyncioTestCase):
     async def test_tool_activity_bounds_bubbles_retained_until_clear(
         self,
     ) -> None:
-        from tool_activity import ToolActivitySurface
+        from raptor.chat.tool_activity import ToolActivitySurface
 
         surface = ToolActivitySurface("!room:example.org/child")
         first = {
@@ -886,7 +886,7 @@ class ChatProviderContractTests(unittest.IsolatedAsyncioTestCase):
             "arguments": '{"path":"README.md"}',
         }
 
-        with patch("tool_activity.MAX_RETAINED_TOOL_BUBBLES", 1):
+        with patch("raptor.chat.tool_activity.MAX_RETAINED_TOOL_BUBBLES", 1):
             await surface.running(first)
             await surface.finished(first, {"ok": True})
             await surface.running(second)
@@ -911,7 +911,7 @@ class ChatProviderContractTests(unittest.IsolatedAsyncioTestCase):
     async def test_tool_bubble_delete_failure_does_not_block_restoration(
         self,
     ) -> None:
-        from tool_activity import ToolActivitySurface
+        from raptor.chat.tool_activity import ToolActivitySurface
 
         surface = ToolActivitySurface("!room:example.org")
         call = {
@@ -928,7 +928,7 @@ class ChatProviderContractTests(unittest.IsolatedAsyncioTestCase):
                 "delete_messages",
                 AsyncMock(side_effect=RuntimeError("unavailable")),
             ),
-            patch("tool_activity.log_exception") as logged,
+            patch("raptor.chat.tool_activity.log_exception") as logged,
         ):
             await surface.clear()
 
@@ -938,7 +938,7 @@ class ChatProviderContractTests(unittest.IsolatedAsyncioTestCase):
     async def test_active_tool_delete_failure_does_not_block_restoration(
         self,
     ) -> None:
-        from tool_activity import ToolActivitySurface
+        from raptor.chat.tool_activity import ToolActivitySurface
 
         surface = ToolActivitySurface("!room:example.org")
         call = {
@@ -954,7 +954,7 @@ class ChatProviderContractTests(unittest.IsolatedAsyncioTestCase):
                 "delete_messages",
                 AsyncMock(side_effect=RuntimeError("unavailable")),
             ),
-            patch("tool_activity.log_exception") as logged,
+            patch("raptor.chat.tool_activity.log_exception") as logged,
         ):
             await surface.clear()
 
@@ -963,7 +963,7 @@ class ChatProviderContractTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_tool_preserves_thread_status(self) -> None:
         from thread_status import ensure_thread_status
-        from tool_activity import ToolActivitySurface
+        from raptor.chat.tool_activity import ToolActivitySurface
 
         previous_thread = session.state.get("thread")
         session.state["thread"] = {
@@ -1012,7 +1012,7 @@ class ChatProviderContractTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_tool_activity_stream_does_not_wait_for_transport(self) -> None:
-        from tool_activity import ToolActivitySurface
+        from raptor.chat.tool_activity import ToolActivitySurface
 
         started = asyncio.Event()
         cancelled = asyncio.Event()
@@ -1040,7 +1040,7 @@ class ChatProviderContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(cancelled.is_set())
 
     async def test_steering_message_is_never_pinned(self) -> None:
-        from presentation import (
+        from raptor.chat.presentation import (
             clear_steering_indicator,
             steering_indicator,
         )
@@ -1304,7 +1304,7 @@ class ChatProviderContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsInstance(loaded, FakeProvider)
 
     def test_responses_api_provider_is_builtin(self) -> None:
-        from responses_provider import ResponsesApiProvider
+        from raptor.chat.providers.responses_provider import ResponsesApiProvider
 
         self.assertIsInstance(
             load_chat_provider("responses_api"),
@@ -1313,7 +1313,7 @@ class ChatProviderContractTests(unittest.IsolatedAsyncioTestCase):
 
     def test_configured_providers_are_composed_by_default(self) -> None:
         from config import CHAT_PROVIDERS
-        from multi_provider import MultiProvider
+        from raptor.chat.providers.multi_provider import MultiProvider
 
         self.assertEqual(CHAT_PROVIDERS, ("telegram", "responses_api"))
         self.assertIsInstance(
@@ -1322,7 +1322,7 @@ class ChatProviderContractTests(unittest.IsolatedAsyncioTestCase):
         )
 
     def test_single_configured_provider_is_not_wrapped(self) -> None:
-        from telegram import TelegramProvider
+        from raptor.chat.providers.telegram import TelegramProvider
 
         self.assertIsInstance(
             load_chat_providers(("telegram",)),
@@ -1334,7 +1334,7 @@ class ChatProviderContractTests(unittest.IsolatedAsyncioTestCase):
             load_chat_provider("unknown")
 
     async def test_normalized_message_reaches_core_with_string_id(self) -> None:
-        from loop import handle_event
+        from raptor.chat.loop import handle_event
 
         event = IncomingMessage(
             conversation_id="!room:example.org",
@@ -1343,8 +1343,8 @@ class ChatProviderContractTests(unittest.IsolatedAsyncioTestCase):
             text="continue",
         )
         with (
-            patch("loop.command", AsyncMock(return_value=False)),
-            patch("loop.start_root_session") as start,
+            patch("raptor.chat.loop.command", AsyncMock(return_value=False)),
+            patch("raptor.chat.loop.start_root_session") as start,
         ):
             await handle_event(event)
 
@@ -1358,7 +1358,7 @@ class ChatProviderContractTests(unittest.IsolatedAsyncioTestCase):
     async def test_request_provider_can_reject_busy_input_before_steering(
         self,
     ) -> None:
-        from loop import handle_event
+        from raptor.chat.loop import handle_event
 
         turns.start(
             asyncio.Event().wait(),
@@ -1375,8 +1375,8 @@ class ChatProviderContractTests(unittest.IsolatedAsyncioTestCase):
         )
         try:
             with (
-                patch("loop.command", AsyncMock(return_value=False)),
-                patch("loop.start_root_session") as start,
+                patch("raptor.chat.loop.command", AsyncMock(return_value=False)),
+                patch("raptor.chat.loop.start_root_session") as start,
             ):
                 await handle_event(event)
             start.assert_not_called()
@@ -1394,7 +1394,7 @@ class ChatProviderContractTests(unittest.IsolatedAsyncioTestCase):
     async def test_busy_chat_input_is_queued_and_transport_acknowledged(
         self,
     ) -> None:
-        from loop import handle_event
+        from raptor.chat.loop import handle_event
 
         turns.start(
             asyncio.Event().wait(),
@@ -1411,7 +1411,7 @@ class ChatProviderContractTests(unittest.IsolatedAsyncioTestCase):
             text="change direction",
         )
         try:
-            with patch("loop.command", AsyncMock(return_value=False)):
+            with patch("raptor.chat.loop.command", AsyncMock(return_value=False)):
                 await handle_event(event)
             self.assertEqual(len(session.pending_steers), 1)
             self.assertIn(
@@ -1432,7 +1432,7 @@ class ChatProviderContractTests(unittest.IsolatedAsyncioTestCase):
     async def test_busy_chat_rejects_input_when_steering_queue_is_full(
         self,
     ) -> None:
-        from loop import handle_event
+        from raptor.chat.loop import handle_event
 
         turns.start(
             asyncio.Event().wait(),
@@ -1449,8 +1449,8 @@ class ChatProviderContractTests(unittest.IsolatedAsyncioTestCase):
         )
         try:
             with (
-                patch("loop.command", AsyncMock(return_value=False)),
-                patch("loop.MAX_PENDING_STEERS", 1),
+                patch("raptor.chat.loop.command", AsyncMock(return_value=False)),
+                patch("raptor.chat.loop.MAX_PENDING_STEERS", 1),
             ):
                 await handle_event(event)
             self.assertIn(
@@ -1470,7 +1470,7 @@ class ChatProviderContractTests(unittest.IsolatedAsyncioTestCase):
             session.pending_steers.clear()
 
     async def test_task_prompt_is_not_copied_into_event_log(self) -> None:
-        from loop import handle_event
+        from raptor.chat.loop import handle_event
 
         event = IncomingMessage(
             conversation_id="!room:example.org",
@@ -1479,8 +1479,8 @@ class ChatProviderContractTests(unittest.IsolatedAsyncioTestCase):
             text="/task private side question",
         )
         with (
-            patch("loop.command", AsyncMock(return_value=True)),
-            patch("loop.log_event") as logged,
+            patch("raptor.chat.loop.command", AsyncMock(return_value=True)),
+            patch("raptor.chat.loop.log_event") as logged,
         ):
             await handle_event(event)
 
@@ -1489,7 +1489,7 @@ class ChatProviderContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("text", received)
 
     async def test_unknown_normalized_action_is_acknowledged(self) -> None:
-        from loop import handle_event
+        from raptor.chat.loop import handle_event
 
         await handle_event(
             IncomingAction(
@@ -1508,7 +1508,7 @@ class ChatProviderContractTests(unittest.IsolatedAsyncioTestCase):
 
 class TelegramNormalizationTests(unittest.TestCase):
     def test_callback_is_normalized_at_adapter_boundary(self) -> None:
-        from telegram import telegram_provider
+        from raptor.chat.providers.telegram import telegram_provider
 
         event = telegram_provider.normalize_update(
             {
@@ -1535,7 +1535,7 @@ class TelegramNormalizationTests(unittest.TestCase):
         )
 
     def test_forum_topic_is_an_independent_conversation(self) -> None:
-        import telegram
+        from raptor.chat.providers import telegram
 
         provider = telegram.TelegramProvider()
         event = provider.normalize_update(
@@ -1556,7 +1556,7 @@ class TelegramNormalizationTests(unittest.TestCase):
         self.assertTrue(event.interactive)
 
     def test_activity_topic_input_is_noninteractive(self) -> None:
-        import telegram
+        from raptor.chat.providers import telegram
 
         provider = telegram.TelegramProvider()
         provider._chats[1].activity_topics[42] = (
@@ -1579,7 +1579,7 @@ class TelegramNormalizationTests(unittest.TestCase):
         self.assertFalse(event.interactive)
 
     def test_activity_topic_action_routes_to_parent_runtime(self) -> None:
-        import telegram
+        from raptor.chat.providers import telegram
 
         provider = telegram.TelegramProvider()
         provider._chats[1].activity_topics[42] = (
@@ -1616,7 +1616,7 @@ class TelegramNormalizationTests(unittest.TestCase):
         )
 
     def test_chat_and_topic_membership_are_isolated(self) -> None:
-        import telegram
+        from raptor.chat.providers import telegram
 
         with patch.object(telegram, "TG_CHAT_IDS", (1, 2)):
             provider = telegram.TelegramProvider()
@@ -1666,7 +1666,7 @@ class TelegramNormalizationTests(unittest.TestCase):
 
 class TelegramMultiChatTests(unittest.IsolatedAsyncioTestCase):
     async def test_initialize_discovers_every_chat_in_order(self) -> None:
-        import telegram
+        from raptor.chat.providers import telegram
 
         call = AsyncMock(
             side_effect=[
@@ -1724,7 +1724,7 @@ class TelegramMultiChatTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_poll_restores_only_finalized_telegram_updates(self) -> None:
-        import telegram
+        from raptor.chat.providers import telegram
 
         cursor_path = _HOME / "finalized-update.cursor"
         cursor_path.unlink(missing_ok=True)
@@ -1764,7 +1764,7 @@ class TelegramMultiChatTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(cursor_path.read_text(), "14\n")
 
     def test_invalid_telegram_cursor_fails_startup(self) -> None:
-        import telegram
+        from raptor.chat.providers import telegram
 
         cursor_path = _HOME / "invalid-update.cursor"
         cursor_path.write_text("not-an-offset\n")
@@ -1776,7 +1776,7 @@ class TelegramMultiChatTests(unittest.IsolatedAsyncioTestCase):
     async def test_initialize_requires_read_only_topic_permissions(
         self,
     ) -> None:
-        import telegram
+        from raptor.chat.providers import telegram
 
         call = AsyncMock(
             side_effect=[
@@ -1799,7 +1799,7 @@ class TelegramMultiChatTests(unittest.IsolatedAsyncioTestCase):
             await telegram.TelegramProvider().initialize(())
 
     async def test_drafts_are_routed_only_to_private_chats(self) -> None:
-        import telegram
+        from raptor.chat.providers import telegram
 
         with patch.object(telegram, "TG_CHAT_IDS", (7, -1002)):
             provider = telegram.TelegramProvider()
@@ -1814,8 +1814,8 @@ class TelegramMultiChatTests(unittest.IsolatedAsyncioTestCase):
         draft.assert_awaited_once_with(7, 1, "private draft")
 
     async def test_activity_topics_are_isolated_by_chat(self) -> None:
-        import telegram
-        from activity import ActivitySnapshot
+        from raptor.chat.providers import telegram
+        from raptor.chat.activity import ActivitySnapshot
 
         with patch.object(telegram, "TG_CHAT_IDS", (-1001, -1002)):
             provider = telegram.TelegramProvider()
@@ -1851,8 +1851,8 @@ class TelegramTransportTests(unittest.IsolatedAsyncioTestCase):
     def test_tool_info_renders_structured_arguments_as_telegram_html(
         self,
     ) -> None:
-        import telegram
-        from tool_activity import tool_preview
+        from raptor.chat.providers import telegram
+        from raptor.chat.tool_activity import tool_preview
 
         preview = tool_preview({
             "name": "edit_file",
@@ -1882,7 +1882,7 @@ class TelegramTransportTests(unittest.IsolatedAsyncioTestCase):
         )
 
     def test_tool_console_uses_telegram_bash_rendering(self) -> None:
-        import telegram
+        from raptor.chat.providers import telegram
 
         provider = telegram.TelegramProvider()
 
@@ -1896,7 +1896,7 @@ class TelegramTransportTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_bulk_delete_chunks_telegram_requests(self) -> None:
-        import telegram
+        from raptor.chat.providers import telegram
 
         provider = telegram.TelegramProvider()
         message_ids = tuple(range(1, 206))
@@ -1924,7 +1924,7 @@ class TelegramTransportTests(unittest.IsolatedAsyncioTestCase):
     async def test_poll_deletes_and_discards_activity_topic_input(
         self,
     ) -> None:
-        import telegram
+        from raptor.chat.providers import telegram
 
         cursor_path = _HOME / "ignored-update.cursor"
         cursor_path.unlink(missing_ok=True)
@@ -1976,7 +1976,7 @@ class TelegramTransportTests(unittest.IsolatedAsyncioTestCase):
     async def test_poll_propagates_transient_activity_input_delete_failure(
         self,
     ) -> None:
-        import telegram
+        from raptor.chat.providers import telegram
 
         provider = telegram.TelegramProvider()
         provider._chats[1].activity_topics[42] = (
@@ -2011,8 +2011,8 @@ class TelegramTransportTests(unittest.IsolatedAsyncioTestCase):
             await provider.poll(None, timeout=30)
 
     async def test_activity_topic_keeps_plain_task_and_result(self) -> None:
-        import telegram
-        from activity import ActivitySnapshot
+        from raptor.chat.providers import telegram
+        from raptor.chat.activity import ActivitySnapshot
 
         provider = telegram.TelegramProvider()
         provider._chats[1].is_forum = True
@@ -2058,8 +2058,8 @@ class TelegramTransportTests(unittest.IsolatedAsyncioTestCase):
     async def test_activity_stream_uses_plain_reasoning_and_reply_messages(
         self,
     ) -> None:
-        import telegram
-        from activity import ActivitySnapshot
+        from raptor.chat.providers import telegram
+        from raptor.chat.activity import ActivitySnapshot
 
         provider = telegram.TelegramProvider()
         provider._chats[1].is_forum = True
@@ -2122,8 +2122,8 @@ class TelegramTransportTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(42, provider._chats[1].activity_topics)
 
     async def test_activity_finish_retries_failed_preview_cleanup(self) -> None:
-        import telegram
-        from activity import ActivitySnapshot
+        from raptor.chat.providers import telegram
+        from raptor.chat.activity import ActivitySnapshot
 
         provider = telegram.TelegramProvider()
         provider._chats[1].is_forum = True
@@ -2161,8 +2161,8 @@ class TelegramTransportTests(unittest.IsolatedAsyncioTestCase):
         delivery.assert_not_awaited()
 
     async def test_missing_activity_preview_is_already_clean(self) -> None:
-        import telegram
-        from activity import ActivitySnapshot
+        from raptor.chat.providers import telegram
+        from raptor.chat.activity import ActivitySnapshot
 
         provider = telegram.TelegramProvider()
         provider._chats[1].is_forum = True
@@ -2206,8 +2206,8 @@ class TelegramTransportTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_existing_subagent_topic_is_reused(self) -> None:
-        import telegram
-        from activity import ActivitySnapshot
+        from raptor.chat.providers import telegram
+        from raptor.chat.activity import ActivitySnapshot
 
         provider = telegram.TelegramProvider()
         provider._chats[1].is_forum = True
@@ -2243,8 +2243,8 @@ class TelegramTransportTests(unittest.IsolatedAsyncioTestCase):
     async def test_deleted_subagent_topic_is_replaced_on_continuation(
         self,
     ) -> None:
-        import telegram
-        from activity import ActivitySnapshot
+        from raptor.chat.providers import telegram
+        from raptor.chat.activity import ActivitySnapshot
 
         provider = telegram.TelegramProvider()
         provider._chats[1].is_forum = True
@@ -2283,8 +2283,8 @@ class TelegramTransportTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(43, provider._chats[1].activity_topics)
 
     async def test_finishing_activity_keeps_topic_open(self) -> None:
-        import telegram
-        from activity import ActivitySnapshot
+        from raptor.chat.providers import telegram
+        from raptor.chat.activity import ActivitySnapshot
 
         provider = telegram.TelegramProvider()
         provider._chats[1].is_forum = True
@@ -2308,7 +2308,7 @@ class TelegramTransportTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(42, provider._chats[1].activity_topics)
 
     async def test_activity_input_is_appended_as_plain_message(self) -> None:
-        import telegram
+        from raptor.chat.providers import telegram
 
         provider = telegram.TelegramProvider()
         provider._chats[1].is_forum = True
@@ -2330,8 +2330,8 @@ class TelegramTransportTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_activity_input_starts_a_fresh_reply_segment(self) -> None:
-        import telegram
-        from activity import ActivitySnapshot
+        from raptor.chat.providers import telegram
+        from raptor.chat.activity import ActivitySnapshot
 
         provider = telegram.TelegramProvider()
         provider._chats[1].is_forum = True
@@ -2371,7 +2371,7 @@ class TelegramTransportTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(topic.reply_message_id, 92)
 
     async def test_deleting_activity_removes_topic_mapping(self) -> None:
-        import telegram
+        from raptor.chat.providers import telegram
 
         provider = telegram.TelegramProvider()
         provider._chats[1].is_forum = True
@@ -2386,7 +2386,7 @@ class TelegramTransportTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(42, provider._chats[1].activity_topics)
 
     async def test_topic_open_state_is_idempotent(self) -> None:
-        import telegram
+        from raptor.chat.providers import telegram
 
         error = telegram.TelegramApiError(
             "reopenForumTopic",
@@ -2405,8 +2405,8 @@ class TelegramTransportTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(reopened)
 
     async def test_activity_update_propagates_real_edit_errors(self) -> None:
-        import telegram
-        from activity import ActivitySnapshot
+        from raptor.chat.providers import telegram
+        from raptor.chat.activity import ActivitySnapshot
 
         provider = telegram.TelegramProvider()
         provider._chats[1].activity_topics[42] = (
@@ -2436,7 +2436,7 @@ class TelegramTransportTests(unittest.IsolatedAsyncioTestCase):
             await provider.update_activity_surface("1/10", "42/77", snapshot)
 
     async def test_unchanged_message_edit_is_a_successful_noop(self) -> None:
-        import telegram
+        from raptor.chat.providers import telegram
 
         error = telegram.TelegramApiError(
             "editMessageText",
@@ -2455,7 +2455,7 @@ class TelegramTransportTests(unittest.IsolatedAsyncioTestCase):
         rich.assert_awaited_once()
 
     async def test_chat_requests_are_spaced(self) -> None:
-        import telegram
+        from raptor.chat.providers import telegram
 
         with (
             patch.object(telegram, "_CHAT_REQUEST_INTERVAL", 0.025),
@@ -2469,7 +2469,7 @@ class TelegramTransportTests(unittest.IsolatedAsyncioTestCase):
         self.assertGreaterEqual(elapsed, 0.02)
 
     async def test_429_wait_metadata_is_applied_before_retry(self) -> None:
-        import telegram
+        from raptor.chat.providers import telegram
 
         request_count = 0
 
@@ -2509,7 +2509,7 @@ class TelegramTransportTests(unittest.IsolatedAsyncioTestCase):
         defer.assert_awaited_once_with(1, 9.0)
 
     async def test_429_retries_are_bounded(self) -> None:
-        import telegram
+        from raptor.chat.providers import telegram
 
         response = httpx.Response(
             429,
@@ -2551,7 +2551,7 @@ class TelegramTransportTests(unittest.IsolatedAsyncioTestCase):
     async def test_rich_text_does_not_retry_rate_limit_as_plain_text(
         self,
     ) -> None:
-        import telegram
+        from raptor.chat.providers import telegram
 
         error = telegram.TelegramApiError(
             "sendMessage",
@@ -2576,7 +2576,7 @@ class TelegramTransportTests(unittest.IsolatedAsyncioTestCase):
     async def test_rich_text_falls_back_only_for_entity_parse_error(
         self,
     ) -> None:
-        import telegram
+        from raptor.chat.providers import telegram
 
         error = telegram.TelegramApiError(
             "sendMessage",
@@ -2603,7 +2603,7 @@ class TelegramTransportTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_edit_clears_controls_in_same_request(self) -> None:
-        import telegram
+        from raptor.chat.providers import telegram
 
         call = AsyncMock(return_value=True)
         with patch.object(telegram, "tg_call", call):
@@ -2621,7 +2621,7 @@ class TelegramTransportTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_subagent_topic_messages_can_be_sent_silently(self) -> None:
-        import telegram
+        from raptor.chat.providers import telegram
 
         rich = AsyncMock(return_value={"message_id": 77})
         conversation = telegram._telegram_conversation_id(1, 42)

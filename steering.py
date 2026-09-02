@@ -2,10 +2,10 @@
 import asyncio
 import re
 
-from chat_provider import IncomingAction
-from chat_runtime import bound_delivery_context, get_chat_provider, send
+from raptor.chat.chat_provider import IncomingAction
+from raptor.chat.chat_runtime import bound_delivery_context, get_chat_provider, send
 from raptor.state import session
-from presentation import clear_steering_indicator
+from raptor.chat.presentation import clear_steering_indicator
 from controller import (
     ensure_root_session,
     interrupt_root_turn,

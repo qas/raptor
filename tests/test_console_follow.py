@@ -14,12 +14,12 @@ os.environ.setdefault("TG_USER_ID", "1")
 
 from raptor.shell import console_follow
 from raptor.state import session
-from chat_provider import (
+from raptor.chat.chat_provider import (
     IncomingAction,
     ProcessOutputChunk,
     ProviderCapabilities,
 )
-from chat_runtime import set_chat_provider
+from raptor.chat.chat_runtime import set_chat_provider
 from raptor.model.model_providers import ModelTarget
 
 

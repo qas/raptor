@@ -1,7 +1,7 @@
 """Projection of temporary-thread state onto the shared status surface."""
 
-from chat_provider import ActionButton, ConversationId
-import presentation
+from raptor.chat.chat_provider import ActionButton, ConversationId
+from raptor.chat import presentation
 from raptor.state import session
 from thread_state import current_thread, thread_owner
 

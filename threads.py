@@ -5,8 +5,8 @@ import secrets
 import time
 from typing import Any
 
-from chat_provider import ConversationId, IncomingAction
-from chat_runtime import get_chat_provider
+from raptor.chat.chat_provider import ConversationId, IncomingAction
+from raptor.chat.chat_runtime import get_chat_provider
 from raptor.state.chat_store import (
     active_item_events,
     append_event,

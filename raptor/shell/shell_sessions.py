@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from raptor.state import session as runtime_session
-from chat_provider import (
+from raptor.chat.chat_provider import (
     ConversationId,
     ProcessOutputChunk,
     ProcessOutputStream,

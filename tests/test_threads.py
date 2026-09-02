@@ -20,8 +20,8 @@ if str(_ROOT) not in sys.path:
 
 from raptor.state import chat_store
 import agent as agent_mod
-from chat_runtime import set_chat_provider
-from chat_provider import IncomingAction, IncomingMessage
+from raptor.chat.chat_runtime import set_chat_provider
+from raptor.chat.chat_provider import IncomingAction, IncomingMessage
 from context import build_active_context
 from goals import ensure_goal_pin, goal_instructions, replace_goal, sync_goal_pin
 from raptor.state import session
@@ -357,10 +357,10 @@ class ThreadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["error"], "Busy. Use /stop all first.")
 
     async def test_thread_commands_start_status_and_clear(self) -> None:
-        from commands import command
+        from raptor.chat.commands import command
 
         send = AsyncMock()
-        with patch("commands.send", send):
+        with patch("raptor.chat.commands.send", send):
             self.assertTrue(
                 await command("!room:example.org", "/thread")
             )
@@ -378,9 +378,9 @@ class ThreadTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(any("Thread cleared" in text for text in texts))
 
     async def test_thread_message_starts_branch_and_returns_message(self) -> None:
-        from commands import command
+        from raptor.chat.commands import command
 
-        with patch("commands.send", AsyncMock()):
+        with patch("raptor.chat.commands.send", AsyncMock()):
             result = await command(
                 "!room:example.org",
                 "/thread explore this separately",
@@ -389,11 +389,11 @@ class ThreadTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(thread_active())
 
     async def test_thread_message_continues_existing_branch(self) -> None:
-        from commands import command
+        from raptor.chat.commands import command
 
         started = await start_thread("!room:example.org")
         self.assertTrue(started["ok"])
-        with patch("commands.send", AsyncMock()):
+        with patch("raptor.chat.commands.send", AsyncMock()):
             result = await command(
                 "!room:example.org",
                 "/thread keep going",
@@ -401,11 +401,11 @@ class ThreadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result, "keep going")
 
     async def test_thread_message_is_dispatched_as_branch_input(self) -> None:
-        from loop import handle_event
+        from raptor.chat.loop import handle_event
 
         with (
-            patch("commands.send", AsyncMock()),
-            patch("loop.start_root_session") as start,
+            patch("raptor.chat.commands.send", AsyncMock()),
+            patch("raptor.chat.loop.start_root_session") as start,
         ):
             await handle_event(IncomingMessage(
                 conversation_id="!room:example.org",

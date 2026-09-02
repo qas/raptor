@@ -10,8 +10,8 @@ from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import Any, Generic, TypeVar
 
-from chat_provider import ConversationId
-from chat_runtime import get_chat_provider
+from raptor.chat.chat_provider import ConversationId
+from raptor.chat.chat_runtime import get_chat_provider
 from raptor.state.chat_store import (
     append_meta,
     append_item,

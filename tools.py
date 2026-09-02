@@ -6,7 +6,7 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
-from chat_provider import ConversationId
+from raptor.chat.chat_provider import ConversationId
 
 from raptor.state.chat_store import (
     iter_events,

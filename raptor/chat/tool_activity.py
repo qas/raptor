@@ -8,8 +8,8 @@ from collections import deque
 from dataclasses import dataclass
 from typing import Any
 
-from chat_format import bash_console_block
-from chat_provider import (
+from raptor.chat.chat_format import bash_console_block
+from raptor.chat.chat_provider import (
     ActionButton,
     ConversationId,
     Controls,
@@ -19,7 +19,7 @@ from chat_provider import (
     ProcessOutputProvider,
     ToolConsoleProvider,
 )
-from chat_runtime import get_chat_provider
+from raptor.chat.chat_runtime import get_chat_provider
 from config import CHAT_STREAM_INTERVAL, CHAT_TOOL_ACTIVITY, MAX_TOOL_OUTPUT
 from observability import log_exception
 

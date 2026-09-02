@@ -6,8 +6,8 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from raptor.state import session
-from chat_format import bash_console_block
-from chat_provider import (
+from raptor.chat.chat_format import bash_console_block
+from raptor.chat.chat_provider import (
     ActionButton,
     ConversationControlsProvider,
     Controls,
@@ -16,7 +16,7 @@ from chat_provider import (
     MessageId,
     ProcessOutputChunk,
 )
-from chat_runtime import detached_delivery_context, get_chat_provider
+from raptor.chat.chat_runtime import detached_delivery_context, get_chat_provider
 from config import CHAT_STREAM_INTERVAL
 from observability import log_exception
 from raptor.shell.shell_sessions import (

@@ -7,7 +7,7 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 from raptor.state import session
-from activity import (
+from raptor.chat.activity import (
     append_subagent_activity_input,
     delete_subagent_activity,
     finish_subagent_activity,
@@ -16,7 +16,7 @@ from activity import (
     publish_subagent_response,
     subagent_activity_conversation_id,
 )
-from chat_provider import ConversationId
+from raptor.chat.chat_provider import ConversationId
 from raptor.state.chat_store import (
     append_item,
     create_session,
@@ -66,7 +66,7 @@ from raptor.state.session import (
     state,
 )
 from skills import skill_catalog_instructions
-from tool_activity import ToolActivitySurface
+from raptor.chat.tool_activity import ToolActivitySurface
 
 _background_reservations = 0
 _SUBAGENT_ROSTER_TEXT_CHARS = 160

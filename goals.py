@@ -3,10 +3,10 @@ import secrets
 import time
 from typing import Any
 
-from chat_provider import ConversationId
+from raptor.chat.chat_provider import ConversationId
 
-import chat_runtime
-import presentation
+from raptor.chat import chat_runtime
+from raptor.chat import presentation
 from raptor.state.session import save_state, state
 from raptor.state import session
 from observability import log_event, log_exception

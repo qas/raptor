@@ -18,13 +18,13 @@ os.environ.setdefault("TG_USER_ID", "1")
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from chat_provider import (
+from raptor.chat.chat_provider import (
     ActionButton,
     IncomingAction,
     IncomingMessage,
     PollResult,
 )
-from responses_provider import ResponsesApiProvider, input_text
+from raptor.chat.providers.responses_provider import ResponsesApiProvider, input_text
 from raptor.model.responses import build_response_payload, reasoning_summary_delta
 from raptor.model.responses import responses_create_stream
 from subagents import build_subagent_payload
@@ -407,7 +407,7 @@ class ResponsesApiProviderTests(unittest.IsolatedAsyncioTestCase):
             "stream": True,
         })
         writer = Writer()
-        with patch("responses_provider.SSE_HEARTBEAT_SECONDS", 0.01):
+        with patch("raptor.chat.providers.responses_provider.SSE_HEARTBEAT_SECONDS", 0.01):
             task = asyncio.create_task(
                 self.provider._write_sse(writer, pending)
             )

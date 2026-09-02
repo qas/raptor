@@ -9,7 +9,7 @@ from email.utils import parsedate_to_datetime
 from typing import Any, TypeVar
 
 import httpx
-from chat_provider import ConversationId
+from raptor.chat.chat_provider import ConversationId
 
 from config import (
     BASE_INSTRUCTIONS,
@@ -19,7 +19,7 @@ from config import (
 )
 from raptor.model.model_providers import MODEL_CONFIGURATION, ModelProvider, ModelTarget
 from raptor.state import session
-from chat_runtime import send_draft, send_reasoning_summary
+from raptor.chat.chat_runtime import send_draft, send_reasoning_summary
 from observability import log_event
 from engine import estimate_tokens
 from raptor.model.response_errors import (

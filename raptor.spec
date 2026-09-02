@@ -17,9 +17,9 @@ a = Analysis(
     binaries=[],
     datas=collect_data_files("certifi") + build_data,
     hiddenimports=[
-        "telegram",
-        "responses_provider",
-        "multi_provider",
+        "raptor.chat.providers.telegram",
+        "raptor.chat.providers.responses_provider",
+        "raptor.chat.providers.multi_provider",
         "raptor.shell.shell_supervisor",
         "socksio",
     ],

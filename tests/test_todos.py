@@ -19,7 +19,7 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from raptor.state import session
-from commands import format_todos
+from raptor.chat.commands import format_todos
 from todos import MAX_TODO_ITEMS, validate_plan
 from tools import (
     TOOL_HANDLERS,

@@ -3,7 +3,7 @@ import importlib
 from contextlib import contextmanager
 from typing import Any, Iterator
 
-from chat_provider import ChatProvider, ConversationId
+from raptor.chat.chat_provider import ChatProvider, ConversationId
 
 _provider: ChatProvider | None = None
 
@@ -21,10 +21,10 @@ def set_chat_provider(
 def load_chat_provider(spec: str) -> ChatProvider:
     """Load a built-in provider or a ``module:attribute`` plugin."""
     if spec == "telegram":
-        from telegram import telegram_provider
+        from raptor.chat.providers.telegram import telegram_provider
         return telegram_provider
     if spec == "responses_api":
-        from responses_provider import responses_provider
+        from raptor.chat.providers.responses_provider import responses_provider
         return responses_provider
     if ":" not in spec:
         raise ValueError(
@@ -49,7 +49,7 @@ def load_chat_providers(specs: tuple[str, ...]) -> ChatProvider:
         raise ValueError("CHAT_PROVIDERS must contain at least one provider")
     if len(providers) == 1:
         return providers[0]
-    from multi_provider import MultiProvider
+    from raptor.chat.providers.multi_provider import MultiProvider
     return MultiProvider(providers)
 
 

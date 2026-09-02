@@ -14,8 +14,8 @@ os.environ.setdefault("TG_BOT_TOKEN", "test-token")
 os.environ.setdefault("TG_USER_ID", "1")
 
 from raptor.state import chat_store
-import chat_runtime
-import commands
+from raptor.chat import chat_runtime
+from raptor.chat import commands
 from raptor.state import session
 from raptor.state import storage
 from raptor.model.model_providers import ModelTarget

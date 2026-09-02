@@ -268,13 +268,13 @@ history remains available in the archived transcript as an audit record.
 | `raptor/model/responses.py` | Outbound Responses client, streaming, and retry policy |
 | `raptor/model/model_providers.py` | Model-provider registry and target selection |
 | `raptor/model/response_errors.py` | Shared Responses protocol errors |
-| `chat_provider.py` | Provider protocol and normalized event types |
-| `chat_runtime.py` | Provider loading, binding, and deferred delivery context |
-| `multi_provider.py` | Concurrent provider routing |
-| `telegram.py` | Telegram adapter |
-| `responses_provider.py` | Inbound Responses-compatible HTTP adapter |
-| `presentation.py` | Provider-neutral status, controls, and activity policy |
-| `tool_activity.py` | Streamed root tool-call status and lifecycle projection |
+| `raptor/chat/chat_provider.py` | Provider protocol and normalized event types |
+| `raptor/chat/chat_runtime.py` | Provider loading, binding, and delivery context |
+| `raptor/chat/providers/multi_provider.py` | Concurrent provider routing |
+| `raptor/chat/providers/telegram.py` | Telegram adapter |
+| `raptor/chat/providers/responses_provider.py` | Responses-compatible HTTP adapter |
+| `raptor/chat/presentation.py` | Provider-neutral status and activity policy |
+| `raptor/chat/tool_activity.py` | Streamed tool-call status and lifecycle projection |
 | `raptor/state/chat_store.py` | Append-only transcript storage |
 | `raptor/state/storage.py` | Crash-safe atomic local file replacement |
 | `context.py` | Active-context construction and checkpoint compaction |
@@ -285,7 +285,7 @@ history remains available in the archived transcript as an audit record.
 | `raptor/shell/shell_supervisor.py` | Child process-group ownership and exit enforcement |
 | `raptor/shell/shell_sessions.py` | Managed shell state, PTYs, polling, and completion |
 | `skills.py` | Progressive workspace skill discovery and loading |
-| `commands.py` | Provider-neutral slash commands |
+| `raptor/chat/commands.py` | Provider-neutral slash commands |
 | `threads.py` | Temporary branch lifecycle and merge policy |
 
 ### Main chats, scheduling, and delivery

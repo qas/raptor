@@ -3,7 +3,7 @@ import asyncio
 from dataclasses import replace
 from typing import Any
 
-from chat_provider import (
+from raptor.chat.chat_provider import (
     ChatEvent,
     ChatProvider,
     ConversationControlsProvider,
@@ -19,7 +19,7 @@ from chat_provider import (
     ToolConsoleProvider,
 )
 from observability import log_exception
-from activity import (
+from raptor.chat.activity import (
     ActivityConversationProvider,
     ActivityFinishResult,
     ActivitySnapshot,

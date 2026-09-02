@@ -5,8 +5,8 @@ from dataclasses import dataclass, replace
 from typing import Any, Protocol, runtime_checkable
 
 from raptor.state import session
-from chat_provider import ConversationId
-from chat_runtime import get_chat_provider
+from raptor.chat.chat_provider import ConversationId
+from raptor.chat.chat_runtime import get_chat_provider
 from config import MAX_TOOL_OUTPUT
 from observability import log_exception
 
