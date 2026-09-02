@@ -952,8 +952,8 @@ def _completion_prompt(session: ShellSession) -> str:
 
 
 def _queue_shell_completion(session_id: str) -> bool:
-    from controller import enqueue_runtime_event
-    from runtime_events import RuntimeEventKind
+    from raptor.agent.controller import enqueue_runtime_event
+    from raptor.agent.runtime_events import RuntimeEventKind
 
     item = _sessions.get(session_id)
     if item is None or not item.completion_pending:

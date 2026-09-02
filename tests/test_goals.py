@@ -19,13 +19,13 @@ TEST_MODEL_TARGET = {"provider_id": "local", "model": "test-model"}
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-import agent as agent_mod
-import controller
+from raptor.agent import agent as agent_mod
+from raptor.agent import controller
 from raptor.state import session
 from raptor.chat.chat_provider import ProviderCapabilities
 from raptor.chat.chat_runtime import set_chat_provider
 from raptor.model.model_providers import ModelTarget
-from goals import (
+from raptor.agent.goals import (
     GOAL_ACTIVE,
     GOAL_BLOCKED,
     GOAL_COMPLETE,
@@ -52,8 +52,8 @@ from goals import (
     todo_store_for_execution,
     update_goal_tool,
 )
-from runtime_events import RuntimeEvent, RuntimeEventKind
-from turn_runtime import TurnKind, turns
+from raptor.agent.runtime_events import RuntimeEvent, RuntimeEventKind
+from raptor.agent.turn_runtime import TurnKind, turns
 
 _MODEL_TARGET = ModelTarget("local", "model-a")
 session.set_default_model_target(_MODEL_TARGET)
@@ -267,7 +267,7 @@ class GoalTests(unittest.IsolatedAsyncioTestCase):
 
         with (
             patch(
-                "agent.compact_session",
+                "raptor.agent.agent.compact_session",
                 fake_compact,
             ),
             patch.object(
@@ -895,7 +895,7 @@ class GoalTests(unittest.IsolatedAsyncioTestCase):
 
     def test_root_goal_not_copied_to_subagent(self) -> None:
         replace_goal("root only")
-        from subagents import (
+        from raptor.agent.subagents import (
             build_subagent_payload,
             subagent_tools,
         )
@@ -2042,7 +2042,7 @@ class PinnedStatusSlotTests(unittest.IsolatedAsyncioTestCase):
     async def test_approval_uses_unpinned_bubble_and_preserves_goal(
         self,
     ) -> None:
-        from approval import execute_tool_with_approval, handle_approval_action
+        from raptor.agent.approval import execute_tool_with_approval, handle_approval_action
         from raptor.chat.chat_provider import IncomingAction
         from raptor.chat.chat_runtime import get_chat_provider
 
@@ -2057,7 +2057,7 @@ class PinnedStatusSlotTests(unittest.IsolatedAsyncioTestCase):
         session.state["approval_mode"] = "on"
         call = {"name": "shell", "arguments": '{"command":"pwd"}'}
         with patch(
-            "approval.execute_tool",
+            "raptor.agent.approval.execute_tool",
             AsyncMock(return_value={"ok": True}),
         ):
             execution = asyncio.create_task(
@@ -2114,7 +2114,7 @@ class PinnedStatusSlotTests(unittest.IsolatedAsyncioTestCase):
     async def test_subagent_approval_uses_same_bubble_in_child_topic(
         self,
     ) -> None:
-        from approval import execute_tool_with_approval, handle_approval_action
+        from raptor.agent.approval import execute_tool_with_approval, handle_approval_action
         from raptor.chat.chat_provider import IncomingAction
         from raptor.chat.chat_runtime import get_chat_provider
         from raptor.chat.providers import telegram
@@ -2137,7 +2137,7 @@ class PinnedStatusSlotTests(unittest.IsolatedAsyncioTestCase):
         session.state["approval_mode"] = "on"
         call = {"name": "shell", "arguments": '{"command":"pwd"}'}
         execute = patch(
-            "approval.execute_tool",
+            "raptor.agent.approval.execute_tool",
             AsyncMock(return_value={"ok": True}),
         )
         execute.start()
@@ -2208,7 +2208,7 @@ class PinnedStatusSlotTests(unittest.IsolatedAsyncioTestCase):
     async def test_approval_action_resolves_decision_without_ui_cleanup(
         self,
     ) -> None:
-        from approval import handle_approval_action
+        from raptor.agent.approval import handle_approval_action
         from raptor.chat.chat_provider import IncomingAction
         from raptor.chat.chat_runtime import get_chat_provider
 
@@ -2432,7 +2432,7 @@ class SetGoalToolTests(unittest.IsolatedAsyncioTestCase):
         User-source turns are gate-authorized; declining a goal is
         enforced by the set_goal tool description, not text matching.
         """
-        import goals as goals_mod
+        from raptor.agent import goals as goals_mod
         from config import TOOLS
         self.assertFalse(
             hasattr(goals_mod, "user_requests_goal_creation")

@@ -18,7 +18,7 @@ from raptor.state import chat_store
 from raptor.chat import commands
 from raptor.state import session
 from raptor.model.model_providers import ModelConfiguration, ModelProvider, ModelTarget
-from turn_runtime import turns
+from raptor.agent.turn_runtime import turns
 from version import display_version
 
 

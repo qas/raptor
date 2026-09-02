@@ -3,7 +3,7 @@
 from raptor.chat.chat_provider import ActionButton, ConversationId
 from raptor.chat import presentation
 from raptor.state import session
-from thread_state import current_thread, thread_owner
+from raptor.agent.thread_state import current_thread, thread_owner
 
 
 async def ensure_thread_status(

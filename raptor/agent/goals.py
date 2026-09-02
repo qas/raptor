@@ -10,8 +10,8 @@ from raptor.chat import presentation
 from raptor.state.session import save_state, state
 from raptor.state import session
 from observability import log_event, log_exception
-from thread_state import thread_active
-from thread_status import ensure_thread_status
+from raptor.agent.thread_state import thread_active
+from raptor.agent.thread_status import ensure_thread_status
 
 GOAL_ACTIVE = "active"
 GOAL_PAUSED = "paused"

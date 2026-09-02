@@ -36,14 +36,14 @@ from config import (
     model_compaction_generation_budget,
     model_context_input_budget,
 )
-from context import (
+from raptor.agent.context import (
     build_active_context,
     checkpoint_continuation_input,
     compact_session,
     ensure_context_under_budget,
     request_with_checkpoint_retry,
 )
-from engine import assistant_message, estimate_tokens, run_agent
+from raptor.agent.engine import assistant_message, estimate_tokens, run_agent
 from observability import log_event
 from raptor.model.response_errors import (
     ContextLengthError,
@@ -65,7 +65,7 @@ from raptor.state.session import (
     save_state,
     state,
 )
-from skills import skill_catalog_instructions
+from raptor.agent.skills import skill_catalog_instructions
 from raptor.chat.tool_activity import ToolActivitySurface
 
 _background_reservations = 0
@@ -494,7 +494,7 @@ async def run_subagent(
     depth: int,
     allow_subagents: bool,
 ) -> str:
-    from approval import execute_tool_with_approval
+    from raptor.agent.approval import execute_tool_with_approval
     record = session.subagent_records[agent_id]
     target = record_model_target(record)
     compaction_target = MODEL_CONFIGURATION.select_compaction_target(target)
@@ -1782,8 +1782,8 @@ async def requeue_deferred_subagent_completions() -> int:
 
 
 def _queue_subagent_completion(record: dict[str, Any]) -> bool:
-    from controller import enqueue_runtime_event
-    from runtime_events import RuntimeEventKind
+    from raptor.agent.controller import enqueue_runtime_event
+    from raptor.agent.runtime_events import RuntimeEventKind
 
     chat_id = record.get("chat_id")
     if chat_id is None:

@@ -27,10 +27,10 @@ from raptor.chat.chat_provider import (
 from raptor.chat.providers.responses_provider import ResponsesApiProvider, input_text
 from raptor.model.responses import build_response_payload, reasoning_summary_delta
 from raptor.model.responses import responses_create_stream
-from subagents import build_subagent_payload
+from raptor.agent.subagents import build_subagent_payload
 from raptor.model.model_providers import ModelTarget
 from raptor.state import session
-from turn_runtime import TurnKind, turns
+from raptor.agent.turn_runtime import TurnKind, turns
 
 
 class ResponsesInputTests(unittest.TestCase):

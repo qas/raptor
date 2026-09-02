@@ -1,7 +1,7 @@
 """Provider-neutral incoming chat-event dispatcher."""
 import secrets
 
-from approval import handle_approval_action, supersede_pending_approvals
+from raptor.agent.approval import handle_approval_action, supersede_pending_approvals
 from raptor.chat.chat_provider import (
     ChatEvent,
     ChatProvider,
@@ -13,15 +13,15 @@ from raptor.state.chat_store import append_meta
 from raptor.chat.commands import command
 from config import MAX_PENDING_STEERS
 from raptor.shell.console_follow import handle_follow_console_action
-from controller import start_root_session
+from raptor.agent.controller import start_root_session
 from raptor.chat.presentation import clear_steering_indicator, steering_indicator
 from raptor.state.session import StateCapacityError, state, steer_queue
-from steering import handle_steering_action
+from raptor.agent.steering import handle_steering_action
 from raptor.chat.tool_activity import handle_tool_activity_action
-from threads import handle_thread_action
+from raptor.agent.threads import handle_thread_action
 from raptor.state import session
 from observability import log_agent_activity, log_event, log_exception
-from turn_runtime import turns
+from raptor.agent.turn_runtime import turns
 
 COMMANDS: tuple[tuple[str, str], ...] = (
     ("new", "New session"),

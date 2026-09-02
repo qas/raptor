@@ -528,9 +528,9 @@ class ShellSessionTests(unittest.IsolatedAsyncioTestCase):
     async def test_detached_completion_enters_internal_event_path(self) -> None:
         completion = asyncio.get_running_loop().create_future()
         delivered = Mock(return_value=completion)
-        controller = types.ModuleType("controller")
+        controller = types.ModuleType("raptor.agent.controller")
         controller.enqueue_runtime_event = delivered
-        with patch.dict(sys.modules, {"controller": controller}):
+        with patch.dict(sys.modules, {"raptor.agent.controller": controller}):
             result = await run_shell(
                 "sleep 0.5; printf notified",
                 timeout=2,
@@ -551,10 +551,10 @@ class ShellSessionTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_completion_delivery_exception_is_deferred(self) -> None:
         delivered = Mock(side_effect=RuntimeError("controller failed"))
-        controller = types.ModuleType("controller")
+        controller = types.ModuleType("raptor.agent.controller")
         controller.enqueue_runtime_event = delivered
         with (
-            patch.dict(sys.modules, {"controller": controller}),
+            patch.dict(sys.modules, {"raptor.agent.controller": controller}),
             patch.object(shell_sessions, "log_event") as logged,
         ):
             result = await run_shell(
@@ -650,10 +650,10 @@ class ShellSessionTests(unittest.IsolatedAsyncioTestCase):
         )
         shell_sessions._sessions[item.id] = item
         completion = asyncio.get_running_loop().create_future()
-        controller = types.ModuleType("controller")
+        controller = types.ModuleType("raptor.agent.controller")
         controller.enqueue_runtime_event = Mock(return_value=completion)
 
-        with patch.dict(sys.modules, {"controller": controller}):
+        with patch.dict(sys.modules, {"raptor.agent.controller": controller}):
             count = await shell_sessions.requeue_deferred_shell_completions()
 
         self.assertEqual(count, 1)

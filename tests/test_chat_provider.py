@@ -40,7 +40,7 @@ from raptor.chat.chat_runtime import (
 )
 from raptor.model.model_providers import ModelTarget
 from raptor.state import session
-from turn_runtime import TurnKind, turns
+from raptor.agent.turn_runtime import TurnKind, turns
 
 
 class FakeProvider:
@@ -962,7 +962,7 @@ class ChatProviderContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(session.current_runtime().pinned_status_owner)
 
     async def test_tool_preserves_thread_status(self) -> None:
-        from thread_status import ensure_thread_status
+        from raptor.agent.thread_status import ensure_thread_status
         from raptor.chat.tool_activity import ToolActivitySurface
 
         previous_thread = session.state.get("thread")
@@ -1064,7 +1064,7 @@ class ChatProviderContractTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_cancel_steering_deletes_user_message(self) -> None:
-        from steering import handle_steering_action
+        from raptor.agent.steering import handle_steering_action
 
         session.state["pending_inputs"] = [
             {"id": "abcd", "text": "cancel me"}
@@ -1085,7 +1085,7 @@ class ChatProviderContractTests(unittest.IsolatedAsyncioTestCase):
             data="steer:abcd:cancel",
         )
 
-        with patch("steering.session.save_state"):
+        with patch("raptor.agent.steering.session.save_state"):
             handled = await handle_steering_action(event)
 
         self.assertTrue(handled)
@@ -1101,8 +1101,8 @@ class ChatProviderContractTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_slow_forced_steer_waits_for_root_ownership(self) -> None:
-        from controller import _dequeue_steer
-        from steering import handle_steering_action
+        from raptor.agent.controller import _dequeue_steer
+        from raptor.agent.steering import handle_steering_action
 
         entry = {
             "id": "abcd",
@@ -1126,7 +1126,7 @@ class ChatProviderContractTests(unittest.IsolatedAsyncioTestCase):
 
         with (
             patch(
-                "steering.interrupt_root_turn",
+                "raptor.agent.steering.interrupt_root_turn",
                 AsyncMock(
                     return_value=types.SimpleNamespace(
                         completed=False,
@@ -1134,7 +1134,7 @@ class ChatProviderContractTests(unittest.IsolatedAsyncioTestCase):
                     )
                 ),
             ),
-            patch("steering.ensure_root_session") as ensure,
+            patch("raptor.agent.steering.ensure_root_session") as ensure,
         ):
             handled = await handle_steering_action(event)
 
@@ -1149,7 +1149,7 @@ class ChatProviderContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(session.state["pending_inputs"], [])
 
     async def test_forced_steer_consumes_durable_pending_input(self) -> None:
-        from steering import handle_steering_action
+        from raptor.agent.steering import handle_steering_action
 
         entry = {
             "id": "abcd",
@@ -1172,7 +1172,7 @@ class ChatProviderContractTests(unittest.IsolatedAsyncioTestCase):
 
         with (
             patch(
-                "steering.interrupt_root_turn",
+                "raptor.agent.steering.interrupt_root_turn",
                 AsyncMock(
                     return_value=types.SimpleNamespace(
                         completed=True,
@@ -1180,7 +1180,7 @@ class ChatProviderContractTests(unittest.IsolatedAsyncioTestCase):
                     )
                 ),
             ),
-            patch("steering.start_root_session") as start,
+            patch("raptor.agent.steering.start_root_session") as start,
         ):
             handled = await handle_steering_action(event)
 
@@ -1195,7 +1195,7 @@ class ChatProviderContractTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_cancelled_steer_claim_returns_to_queue(self) -> None:
-        from controller import _dequeue_steer
+        from raptor.agent.controller import _dequeue_steer
 
         entry = {
             "id": "abcd",
@@ -1211,7 +1211,7 @@ class ChatProviderContractTests(unittest.IsolatedAsyncioTestCase):
             raise asyncio.CancelledError
 
         with patch(
-            "controller.clear_steering_indicator",
+            "raptor.agent.controller.clear_steering_indicator",
             cancel_cleanup,
         ):
             with self.assertRaises(asyncio.CancelledError):
@@ -1223,7 +1223,7 @@ class ChatProviderContractTests(unittest.IsolatedAsyncioTestCase):
         session.steer_queue.task_done()
 
     async def test_global_stop_discards_queued_steering(self) -> None:
-        from steering import cancel_pending_steers
+        from raptor.agent.steering import cancel_pending_steers
 
         session.state["pending_inputs"] = [
             {"id": "queued-id", "text": "queued"}
@@ -1237,7 +1237,7 @@ class ChatProviderContractTests(unittest.IsolatedAsyncioTestCase):
         }
         await session.steer_queue.put(session.pending_steers["abcd"])
 
-        with patch("steering.session.save_state"):
+        with patch("raptor.agent.steering.session.save_state"):
             cancelled = await cancel_pending_steers()
 
         self.assertEqual(cancelled, 1)
@@ -1246,7 +1246,7 @@ class ChatProviderContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(session.steer_queue.empty())
 
     async def test_interruption_cleanup_preserves_only_forced_steer(self) -> None:
-        from steering import cancel_unforced_steers
+        from raptor.agent.steering import cancel_unforced_steers
 
         queued = {
             "id": "queued",
@@ -1268,7 +1268,7 @@ class ChatProviderContractTests(unittest.IsolatedAsyncioTestCase):
         await session.steer_queue.put(queued)
         await session.steer_queue.put(forced)
 
-        with patch("steering.session.save_state"):
+        with patch("raptor.agent.steering.session.save_state"):
             cancelled = await cancel_unforced_steers()
 
         self.assertEqual(cancelled, 1)

@@ -4,7 +4,7 @@ from collections.abc import Callable
 from typing import Any, Literal
 
 from raptor.state import session
-from agent import (
+from raptor.agent.agent import (
     RetryableTurnFailure,
     agent_turn,
     compact_context,
@@ -12,7 +12,7 @@ from agent import (
 )
 from raptor.chat.chat_provider import ConversationId
 from raptor.chat.chat_runtime import bound_delivery_context, send
-from goals import (
+from raptor.agent.goals import (
     GOAL_BLOCKED,
     GOAL_COMPLETE,
     block_goal,
@@ -26,10 +26,10 @@ from goals import (
 )
 from observability import log_event
 from raptor.chat.presentation import clear_steering_indicator
-from runtime_events import RuntimeEvent, RuntimeEventKind
+from raptor.agent.runtime_events import RuntimeEvent, RuntimeEventKind
 from raptor.state.session import save_state
-from thread_state import thread_active
-from turn_runtime import InterruptResult, TurnKind, TurnSnapshot, turns
+from raptor.agent.thread_state import thread_active
+from raptor.agent.turn_runtime import InterruptResult, TurnKind, TurnSnapshot, turns
 
 WorkSource = Literal["user", "runtime", "goal", "internal"]
 WorkEntry = RuntimeEvent | dict[str, Any]
@@ -41,7 +41,7 @@ def session_transition_busy() -> bool:
         pending_shell_completions,
         running_shell_sessions,
     )
-    from subagents import pending_subagent_completions
+    from raptor.agent.subagents import pending_subagent_completions
 
     return bool(
         session.current_runtime().state.get("session_transition")
@@ -59,7 +59,7 @@ def session_transition_busy() -> bool:
 async def requeue_deferred_completions() -> int:
     """Retry background completion delivery on explicit user activity."""
     from raptor.shell.shell_sessions import requeue_deferred_shell_completions
-    from subagents import requeue_deferred_subagent_completions
+    from raptor.agent.subagents import requeue_deferred_subagent_completions
 
     shell_count, subagent_count = await asyncio.gather(
         requeue_deferred_shell_completions(),
@@ -469,7 +469,7 @@ async def _run_manual_compaction(chat_id: ConversationId) -> None:
         current_task = asyncio.current_task()
         if turns.task is current_task:
             if cancelled:
-                from steering import cancel_unforced_steers
+                from raptor.agent.steering import cancel_unforced_steers
 
                 await cancel_unforced_steers()
             if (

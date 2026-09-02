@@ -21,7 +21,7 @@ from raptor.model.model_providers import MODEL_CONFIGURATION, ModelProvider, Mod
 from raptor.state import session
 from raptor.chat.chat_runtime import send_draft, send_reasoning_summary
 from observability import log_event
-from engine import estimate_tokens
+from raptor.agent.engine import estimate_tokens
 from raptor.model.response_errors import (
     ContextLengthError,
     IncompleteResponsesStreamError,

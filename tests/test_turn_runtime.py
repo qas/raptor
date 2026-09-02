@@ -2,7 +2,7 @@ import asyncio
 import unittest
 from unittest.mock import patch
 
-from turn_runtime import TurnCoordinator, TurnKind
+from raptor.agent.turn_runtime import TurnCoordinator, TurnKind
 
 
 class TurnCoordinatorTests(unittest.IsolatedAsyncioTestCase):
@@ -75,7 +75,7 @@ class TurnCoordinatorTests(unittest.IsolatedAsyncioTestCase):
         async def fail() -> None:
             raise RuntimeError("controller failed")
 
-        with patch("turn_runtime.log_event") as logged:
+        with patch("raptor.agent.turn_runtime.log_event") as logged:
             task = coordinator.start(fail(), kind=TurnKind.REGULAR)
             with self.assertRaisesRegex(RuntimeError, "controller failed"):
                 await task

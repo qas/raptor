@@ -16,9 +16,9 @@ _HOME = Path(tempfile.mkdtemp(prefix="raptor-subagent-tests-"))
 os.environ["RAPTOR_HOME"] = str(_HOME)
 os.environ["AGENT_WORKDIR"] = str(_HOME)
 
-import controller
+from raptor.agent import controller
 from raptor.state import session
-import subagents
+from raptor.agent import subagents
 from raptor.model import responses
 from raptor.model.model_providers import (
     ModelConfiguration,
@@ -439,7 +439,7 @@ class BackgroundSubagentTests(unittest.IsolatedAsyncioTestCase):
                 return_value=surface,
             ) as surface_type,
             patch(
-                "approval.execute_tool_with_approval",
+                "raptor.agent.approval.execute_tool_with_approval",
                 AsyncMock(return_value={"ok": True}),
             ) as execute,
         ):
@@ -1636,10 +1636,10 @@ class BackgroundSubagentTests(unittest.IsolatedAsyncioTestCase):
         }
         session.subagent_records["worker-1"] = live
         stale = dict(live, run_generation=1)
-        controller = types.ModuleType("controller")
+        controller = types.ModuleType("raptor.agent.controller")
         controller.enqueue_runtime_event = Mock()
 
-        with patch.dict(sys.modules, {"controller": controller}):
+        with patch.dict(sys.modules, {"raptor.agent.controller": controller}):
             queued = subagents._queue_subagent_completion(stale)
 
         self.assertFalse(queued)
@@ -1660,12 +1660,12 @@ class BackgroundSubagentTests(unittest.IsolatedAsyncioTestCase):
         }
         session.subagent_records["worker-1"] = live
         stale = dict(live, task_count=2)
-        controller = types.ModuleType("controller")
+        controller = types.ModuleType("raptor.agent.controller")
         completion = asyncio.get_running_loop().create_future()
         completion.set_result(True)
         controller.enqueue_runtime_event = Mock(return_value=completion)
 
-        with patch.dict(sys.modules, {"controller": controller}):
+        with patch.dict(sys.modules, {"raptor.agent.controller": controller}):
             queued = subagents._queue_subagent_completion(stale)
             await asyncio.sleep(0)
 
@@ -1809,11 +1809,11 @@ class BackgroundSubagentTests(unittest.IsolatedAsyncioTestCase):
         with session.bound_chat("telegram:123"):
             session.subagent_records["worker-1"] = record
         delivered = Mock(side_effect=RuntimeError("controller failed"))
-        controller = types.ModuleType("controller")
+        controller = types.ModuleType("raptor.agent.controller")
         controller.enqueue_runtime_event = delivered
 
         with (
-            patch.dict(sys.modules, {"controller": controller}),
+            patch.dict(sys.modules, {"raptor.agent.controller": controller}),
             patch.object(subagents, "save_state"),
             patch.object(subagents, "log_event") as logged,
         ):
@@ -1838,11 +1838,11 @@ class BackgroundSubagentTests(unittest.IsolatedAsyncioTestCase):
         }
         session.subagent_records["worker-1"] = record
         completion = asyncio.get_running_loop().create_future()
-        controller = types.ModuleType("controller")
+        controller = types.ModuleType("raptor.agent.controller")
         controller.enqueue_runtime_event = Mock(return_value=completion)
 
         with (
-            patch.dict(sys.modules, {"controller": controller}),
+            patch.dict(sys.modules, {"raptor.agent.controller": controller}),
             patch.object(subagents, "save_state") as saved,
         ):
             count = await subagents.requeue_deferred_subagent_completions()

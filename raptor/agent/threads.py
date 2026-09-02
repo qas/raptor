@@ -17,14 +17,14 @@ from raptor.state.chat_store import (
     iter_events,
     session_exists,
 )
-from context import build_active_context
-from controller import ensure_root_session
-from goals import goal_is_active, sync_goal_pin
+from raptor.agent.context import build_active_context
+from raptor.agent.controller import ensure_root_session
+from raptor.agent.goals import goal_is_active, sync_goal_pin
 from raptor.state import session
 from observability import log_event, log_exception
-from thread_state import current_thread, thread_active, thread_owner
-from thread_status import ensure_thread_status
-from controller import session_transition_busy
+from raptor.agent.thread_state import current_thread, thread_active, thread_owner
+from raptor.agent.thread_status import ensure_thread_status
+from raptor.agent.controller import session_transition_busy
 
 
 def thread_busy() -> bool:

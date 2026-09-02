@@ -40,9 +40,9 @@ from config import (
 from raptor.state.session import pending_approvals, save_state, state
 from raptor.state import session
 from observability import log_exception
-from agent import context_tokens
-from context import session_context_stats
-from controller import (
+from raptor.agent.agent import context_tokens
+from raptor.agent.context import session_context_stats
+from raptor.agent.controller import (
     discard_runtime_events,
     ensure_root_session,
     interrupt_active_goal_controller,
@@ -52,7 +52,7 @@ from controller import (
     start_manual_compaction,
     start_root_session,
 )
-from goals import (
+from raptor.agent.goals import (
     GOAL_ACTIVE,
     GOAL_BLOCKED,
     GOAL_PAUSED,
@@ -75,13 +75,13 @@ from raptor.chat.chat_runtime import (
     get_chat_provider,
     send,
 )
-from engine import (
+from raptor.agent.engine import (
     function_call_output,
     response_calls,
     response_output,
     response_text,
 )
-from approval import execute_tool_with_approval
+from raptor.agent.approval import execute_tool_with_approval
 from raptor.model.model_providers import MODEL_CONFIGURATION, ModelSettings, ModelTarget
 from raptor.model.responses import (
     MODEL_LIST_TIMEOUT_SECONDS,
@@ -89,7 +89,7 @@ from raptor.model.responses import (
     model_provider,
     stateless_response,
 )
-from subagents import (
+from raptor.agent.subagents import (
     cancel_background_subagents,
     pending_subagent_completions,
     running_background_subagents,
@@ -104,16 +104,16 @@ from raptor.shell.shell_sessions import (
     running_shell_sessions,
     write_stdin as poll_shell_session,
 )
-from skills import skill_catalog_instructions
-from steering import cancel_pending_steers
-from threads import (
+from raptor.agent.skills import skill_catalog_instructions
+from raptor.agent.steering import cancel_pending_steers
+from raptor.agent.threads import (
     finish_thread,
     resume_main_goal,
     start_thread,
 )
-from thread_state import current_thread, thread_active
-from turn_runtime import TurnKind, turns
-from todos import validate_plan
+from raptor.agent.thread_state import current_thread, thread_active
+from raptor.agent.turn_runtime import TurnKind, turns
+from raptor.agent.todos import validate_plan
 from version import display_version
 from raptor.chat.tool_activity import ToolActivitySurface
 

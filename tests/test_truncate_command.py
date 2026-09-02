@@ -19,7 +19,7 @@ from raptor.chat import commands
 from raptor.state import session
 from raptor.state import storage
 from raptor.model.model_providers import ModelTarget
-from turn_runtime import turns
+from raptor.agent.turn_runtime import turns
 
 
 class TruncateCommandTests(unittest.IsolatedAsyncioTestCase):

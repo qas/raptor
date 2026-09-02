@@ -38,9 +38,9 @@ from config import (
     STATE_PATH,
 )
 from raptor.model.model_providers import MODEL_CONFIGURATION, ModelTarget
-from runtime_events import RuntimeEvent
+from raptor.agent.runtime_events import RuntimeEvent
 from raptor.state.storage import write_text_atomic
-from todos import validate_plan
+from raptor.agent.todos import validate_plan
 
 STATE_SCHEMA_VERSION = 4
 _RECOVERY_BYTES_PER_CHAT = 512
@@ -78,7 +78,7 @@ DEFAULT_STATE: dict[str, Any] = {
 
 
 def _new_turn_coordinator() -> Any:
-    from turn_runtime import TurnCoordinator
+    from raptor.agent.turn_runtime import TurnCoordinator
 
     return TurnCoordinator()
 

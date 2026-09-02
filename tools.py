@@ -20,7 +20,7 @@ from config import AGENT_WORKDIR, FILESYSTEM_POLICY, MAX_TOOL_OUTPUT, TOOLS
 from raptor.state import session
 from raptor.state.session import save_state, state
 from raptor.state.storage import FileTooLargeError, read_bytes_bounded, write_text_atomic
-from todos import MAX_TODO_EXPLANATION_CHARS, validate_plan
+from raptor.agent.todos import MAX_TODO_EXPLANATION_CHARS, validate_plan
 
 
 FILE_READ_CHUNK_CHARS = 64 * 1024
@@ -180,7 +180,7 @@ async def cancel_tool(args: dict[str, Any]) -> dict[str, Any]:
     if not resource_id:
         return {"ok": False, "error": "id is required"}
     if kind == "subagent":
-        from subagents import cancel_background_subagent
+        from raptor.agent.subagents import cancel_background_subagent
 
         return await cancel_background_subagent(resource_id)
     from raptor.shell.shell_sessions import cancel_shell_session
@@ -847,7 +847,7 @@ async def _execute_read_skill(
     _chat_id: ConversationId | None,
     _context: dict[str, Any],
 ) -> dict[str, Any]:
-    from skills import read_skill_tool
+    from raptor.agent.skills import read_skill_tool
 
     return await read_skill_tool(args)
 
@@ -881,7 +881,7 @@ async def _execute_get_goal(
     _chat_id: ConversationId | None,
     _context: dict[str, Any],
 ) -> dict[str, Any]:
-    from goals import get_goal_tool_result
+    from raptor.agent.goals import get_goal_tool_result
 
     return get_goal_tool_result()
 
@@ -891,7 +891,7 @@ async def _execute_update_goal(
     _chat_id: ConversationId | None,
     _context: dict[str, Any],
 ) -> dict[str, Any]:
-    from goals import update_goal_tool
+    from raptor.agent.goals import update_goal_tool
 
     return update_goal_tool(args)
 
@@ -901,7 +901,7 @@ async def _execute_set_goal(
     chat_id: ConversationId | None,
     _context: dict[str, Any],
 ) -> dict[str, Any]:
-    from goals import set_goal_tool
+    from raptor.agent.goals import set_goal_tool
 
     return await set_goal_tool(args, chat_id=chat_id)
 
@@ -919,7 +919,7 @@ async def _execute_subagent(
     chat_id: ConversationId | None,
     context: dict[str, Any],
 ) -> dict[str, Any]:
-    from subagents import subagent_tool
+    from raptor.agent.subagents import subagent_tool
 
     return await subagent_tool(
         args,

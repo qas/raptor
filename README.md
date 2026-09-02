@@ -259,11 +259,11 @@ history remains available in the archived transcript as an audit record.
 | `process_lock.py` | State-independent atomic process ownership |
 | `runtime.py` | Process metadata and daemon controls |
 | `runtime_paths.py` | Dependency-free runtime filesystem locations |
-| `agent.py` | Root turn execution and compaction integration |
-| `engine.py` | Tool-round engine and response parsing |
-| `controller.py` | Single-owner root scheduling and goal continuation |
-| `turn_runtime.py` | Root-turn ownership, identity, and bounded interruption |
-| `runtime_events.py` | Typed background-completion events delivered to the root |
+| `raptor/agent/agent.py` | Root turn execution and compaction integration |
+| `raptor/agent/engine.py` | Tool-round engine and response parsing |
+| `raptor/agent/controller.py` | Single-owner root scheduling and goal continuation |
+| `raptor/agent/turn_runtime.py` | Root-turn ownership and bounded interruption |
+| `raptor/agent/runtime_events.py` | Typed background-completion events |
 | `observability.py` | Structured runtime events and activity labels |
 | `raptor/model/responses.py` | Outbound Responses client, streaming, and retry policy |
 | `raptor/model/model_providers.py` | Model-provider registry and target selection |
@@ -277,16 +277,16 @@ history remains available in the archived transcript as an audit record.
 | `raptor/chat/tool_activity.py` | Streamed tool-call status and lifecycle projection |
 | `raptor/state/chat_store.py` | Append-only transcript storage |
 | `raptor/state/storage.py` | Crash-safe atomic local file replacement |
-| `context.py` | Active-context construction and checkpoint compaction |
+| `raptor/agent/context.py` | Active-context construction and checkpoint compaction |
 | `raptor/state/session.py` | Durable chat registry and context-bound per-chat runtimes |
-| `thread_state.py` | Temporary-thread state queries |
-| `thread_status.py` | Temporary-thread status projection |
-| `subagents.py` | Isolated foreground and background subagents |
+| `raptor/agent/thread_state.py` | Temporary-thread state queries |
+| `raptor/agent/thread_status.py` | Temporary-thread status projection |
+| `raptor/agent/subagents.py` | Isolated foreground and background subagents |
 | `raptor/shell/shell_supervisor.py` | Child process-group ownership and exit enforcement |
 | `raptor/shell/shell_sessions.py` | Managed shell state, PTYs, polling, and completion |
-| `skills.py` | Progressive workspace skill discovery and loading |
+| `raptor/agent/skills.py` | Progressive workspace skill discovery and loading |
 | `raptor/chat/commands.py` | Provider-neutral slash commands |
-| `threads.py` | Temporary branch lifecycle and merge policy |
+| `raptor/agent/threads.py` | Temporary branch lifecycle and merge policy |
 
 ### Main chats, scheduling, and delivery
 

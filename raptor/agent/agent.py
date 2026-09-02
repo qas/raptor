@@ -22,27 +22,27 @@ from config import (
     model_compaction_generation_budget,
     model_context_input_budget,
 )
-from context import (
+from raptor.agent.context import (
     build_active_context,
     compact_session,
     ensure_context_under_budget,
     request_with_checkpoint_retry,
 )
-from engine import (
+from raptor.agent.engine import (
     assistant_message,
     function_call_output,
     interrupted_tool_result,
     run_agent,
     response_text,
 )
-from goals import (
+from raptor.agent.goals import (
     combine_instructions,
     goal_instructions,
     todo_store_for_execution,
 )
 from raptor.state.session import save_state, state, steer_queue
 from raptor.state import session
-from approval import execute_tool_with_approval
+from raptor.agent.approval import execute_tool_with_approval
 from raptor.chat.chat_runtime import (
     activate_delivery_context,
     capture_delivery_context,
@@ -69,7 +69,7 @@ from raptor.model.response_errors import (
     MalformedToolCallError,
     TransientResponsesError,
 )
-from skills import skill_catalog_instructions
+from raptor.agent.skills import skill_catalog_instructions
 from raptor.chat.tool_activity import ToolActivitySurface
 
 
@@ -994,7 +994,7 @@ async def agent_turn(
                 await steer_queue.put(entry)
                 break
         else:
-            from steering import cancel_unforced_steers
+            from raptor.agent.steering import cancel_unforced_steers
 
             await cancel_unforced_steers()
         for token in reversed(delivery_tokens):

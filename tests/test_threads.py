@@ -19,22 +19,22 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from raptor.state import chat_store
-import agent as agent_mod
+from raptor.agent import agent as agent_mod
 from raptor.chat.chat_runtime import set_chat_provider
 from raptor.chat.chat_provider import IncomingAction, IncomingMessage
-from context import build_active_context
-from goals import ensure_goal_pin, goal_instructions, replace_goal, sync_goal_pin
+from raptor.agent.context import build_active_context
+from raptor.agent.goals import ensure_goal_pin, goal_instructions, replace_goal, sync_goal_pin
 from raptor.state import session
 from raptor.model.model_providers import ModelTarget
 from tests.test_chat_provider import FakeProvider
-from threads import (
+from raptor.agent.threads import (
     finish_thread,
     handle_thread_action,
     start_thread,
     thread_active,
 )
 from tools import chat_history_tool
-from turn_runtime import TurnKind, turns
+from raptor.agent.turn_runtime import TurnKind, turns
 
 
 class ThreadTests(unittest.IsolatedAsyncioTestCase):

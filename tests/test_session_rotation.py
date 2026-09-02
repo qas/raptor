@@ -20,12 +20,12 @@ if str(_ROOT) not in sys.path:
 
 from raptor.state import chat_store
 from raptor.chat import commands
-import controller
+from raptor.agent import controller
 from raptor.state import session
 from raptor.state.session import pending_approvals
-from turn_runtime import turns
+from raptor.agent.turn_runtime import turns
 from raptor.chat.commands import command
-from goals import replace_goal
+from raptor.agent.goals import replace_goal
 from tools import chat_history_tool
 from raptor.model.model_providers import ModelProvider, ModelTarget
 

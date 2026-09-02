@@ -15,9 +15,9 @@ os.environ["AGENT_WORKDIR"] = str(_HOME)
 
 from raptor.state import session
 from raptor.state.chat_store import append_item, list_sessions, session_chat_key
-from engine import assistant_message
+from raptor.agent.engine import assistant_message
 from tools import chat_history_tool
-from turn_runtime import TurnKind, turns
+from raptor.agent.turn_runtime import TurnKind, turns
 
 
 class MultichatTests(unittest.IsolatedAsyncioTestCase):

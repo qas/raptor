@@ -20,7 +20,7 @@ from config import (
     COMPACTION_GENERATION_TOKENS,
     COMPACTION_USER_ANCHOR_TOKENS,
 )
-from engine import estimate_tokens, response_text
+from raptor.agent.engine import estimate_tokens, response_text
 from raptor.model.response_errors import ContextLengthError, TransientResponsesError
 
 COMPACTION_INSTRUCTIONS = """

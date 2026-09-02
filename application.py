@@ -21,7 +21,7 @@ from application_control import (
     discard_exit_request,
     unbind_application_task,
 )
-from agent import flush_pending_delivery, repair_interrupted_root_turn
+from raptor.agent.agent import flush_pending_delivery, repair_interrupted_root_turn
 from raptor.chat.chat_provider import ChatEvent, ChatProvider
 from raptor.chat.chat_runtime import load_chat_providers, send, set_chat_provider
 from raptor.state.chat_store import chat_path, ensure_chat_dirs
@@ -37,9 +37,9 @@ from config import (
     STATE_PATH,
     model_context_input_budget,
 )
-from controller import ensure_root_session, interrupt_root_turn
+from raptor.agent.controller import ensure_root_session, interrupt_root_turn
 from raptor.shell.console_follow import close_follow_console
-from goals import goal_is_active, pause_goal, prepare_goal_on_startup
+from raptor.agent.goals import goal_is_active, pause_goal, prepare_goal_on_startup
 from raptor.chat.loop import COMMANDS, accepts_event, handle_event
 from network import outbound_http_client
 from observability import log_event, log_exception
@@ -47,17 +47,17 @@ from raptor.model.model_providers import MODEL_CONFIGURATION
 from raptor.model.responses import ensure_target
 from raptor.state.session import bootstrap_runtime_storage, rehydrate_pending_inputs, state
 from raptor.shell.shell_sessions import cancel_shell_sessions
-from skills import (
+from raptor.agent.skills import (
     close_skill_discovery,
     initialize_builtin_skills,
     start_skill_discovery,
 )
-from subagents import (
+from raptor.agent.subagents import (
     cancel_background_subagents,
     restore_pending_subagent_completions,
 )
-from thread_state import thread_active
-from thread_status import ensure_thread_status
+from raptor.agent.thread_state import thread_active
+from raptor.agent.thread_status import ensure_thread_status
 from workspace_identity import initialize_workspace_identity
 
 

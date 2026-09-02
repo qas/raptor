@@ -12,7 +12,7 @@ from raptor.shell.filesystem_permissions import (
 )
 from runtime_paths import AGENT_WORKDIR, CHAT_DIR, LOG_PATH, RAPTOR_HOME, STATE_PATH
 
-from todos import (
+from raptor.agent.todos import (
     MAX_TODO_EXPLANATION_CHARS,
     MAX_TODO_ITEMS,
     MAX_TODO_STEP_CHARS,

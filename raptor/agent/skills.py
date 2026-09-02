@@ -25,7 +25,11 @@ MAX_DISCOVERED_SKILLS = 256
 MAX_FRONTMATTER_CHARS = 16 * 1024
 MAX_BUILTIN_SKILL_BYTES = 32 * 1024
 BUILTIN_CREATE_SKILL = (
-    Path(__file__).parent / "assets" / "skills" / "create-skill" / "SKILL.md"
+    Path(__file__).resolve().parents[2]
+    / "assets"
+    / "skills"
+    / "create-skill"
+    / "SKILL.md"
 )
 
 

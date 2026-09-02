@@ -20,15 +20,15 @@ os.environ["MODEL_CONTEXT_TOKENS"] = "131072"
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-import agent as agent_mod
+from raptor.agent import agent as agent_mod
 from raptor.state import chat_store
-import context
-import controller
+from raptor.agent import context
+from raptor.agent import controller
 from raptor.model import responses
 from raptor.model.response_errors import MalformedToolCallError
 from raptor.state import session
-from turn_runtime import turns
-import subagents
+from raptor.agent.turn_runtime import turns
+from raptor.agent import subagents
 from raptor.model.model_providers import ModelConfiguration, ModelProvider, ModelTarget
 
 

@@ -6,7 +6,7 @@ from raptor.chat.chat_provider import IncomingAction
 from raptor.chat.chat_runtime import bound_delivery_context, get_chat_provider, send
 from raptor.state import session
 from raptor.chat.presentation import clear_steering_indicator
-from controller import (
+from raptor.agent.controller import (
     ensure_root_session,
     interrupt_root_turn,
     start_root_session,

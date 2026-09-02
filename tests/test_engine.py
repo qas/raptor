@@ -4,7 +4,7 @@ import unittest
 from unittest.mock import patch
 
 from config import MAX_TOOL_OUTPUT
-from engine import function_call_output, run_agent
+from raptor.agent.engine import function_call_output, run_agent
 
 
 class AgentEngineTests(unittest.IsolatedAsyncioTestCase):
@@ -127,7 +127,7 @@ class AgentEngineTests(unittest.IsolatedAsyncioTestCase):
         async def execute_call(_call):
             return {"ok": True, "text": "private tool payload"}
 
-        with patch("engine.log_event") as logged:
+        with patch("raptor.agent.engine.log_event") as logged:
             await run_agent(
                 work=[],
                 create_response=create_response,
@@ -169,7 +169,7 @@ class AgentEngineTests(unittest.IsolatedAsyncioTestCase):
         def record_items(items, _source):
             recorded.extend(items)
 
-        with patch("engine.log_event"):
+        with patch("raptor.agent.engine.log_event"):
             task = asyncio.create_task(
                 run_agent(
                     work=[],
