@@ -11,7 +11,7 @@ from unittest.mock import patch
 os.environ["RAPTOR_HOME"] = tempfile.mkdtemp(prefix="raptor-version-home-")
 os.environ["AGENT_WORKDIR"] = os.environ["RAPTOR_HOME"]
 
-import raptor
+from raptor import entrypoint
 from version import display_version
 
 
@@ -20,11 +20,11 @@ class VersionCliTests(unittest.TestCase):
         output = io.StringIO()
         with (
             patch.object(sys, "argv", ["raptor", "--version"]),
-            patch("raptor.acquire_runtime_lock") as acquire,
+            patch("raptor.entrypoint.acquire_runtime_lock") as acquire,
             patch.dict(sys.modules, {"application": None}),
             contextlib.redirect_stdout(output),
         ):
-            result = raptor.run()
+            result = entrypoint.run()
         self.assertEqual(result, 0)
         self.assertEqual(
             output.getvalue().strip(),
@@ -38,7 +38,7 @@ class VersionCliTests(unittest.TestCase):
             patch.object(sys, "argv", ["raptor", "-V"]),
             contextlib.redirect_stdout(output),
         ):
-            result = raptor.run()
+            result = entrypoint.run()
         self.assertEqual(result, 0)
         self.assertIn(display_version(), output.getvalue())
 
@@ -48,7 +48,7 @@ class VersionCliTests(unittest.TestCase):
             contextlib.redirect_stderr(io.StringIO()),
         ):
             with self.assertRaises(SystemExit) as stopped:
-                raptor.run()
+                entrypoint.run()
         self.assertEqual(stopped.exception.code, 2)
 
 

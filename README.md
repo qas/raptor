@@ -251,7 +251,8 @@ history remains available in the archived transcript as an audit record.
 | `pyproject.toml` | Python runtime requirements for development and tests |
 | `raptor.spec` | Frozen onedir release bundle for GitHub Releases |
 | `install.sh` | Unix installer and uninstaller for published Linux and macOS binaries |
-| `raptor.py` | Ownership-first process entry point and CLI |
+| `raptor.py` | Thin source and frozen executable launcher |
+| `raptor/entrypoint.py` | Ownership-first process entry point and CLI |
 | `application.py` | Long-running provider and agent application lifecycle |
 | `application_control.py` | Application-task shutdown and restart requests |
 | `workspace_identity.py` | Workspace identity bootstrap and bounded loading |

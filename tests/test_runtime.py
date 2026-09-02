@@ -19,7 +19,7 @@ os.environ["RAPTOR_HOME"] = str(_HOME)
 os.environ["AGENT_WORKDIR"] = str(_HOME)
 
 import process_lock
-import raptor
+from raptor import entrypoint
 import runtime
 import session
 from application_control import ExitRequest
@@ -267,8 +267,8 @@ finally:
 
         with (
             patch.object(sys, "argv", ["raptor.py"]),
-            patch.object(raptor, "acquire_runtime_lock", side_effect=acquire),
-            patch.object(raptor, "release_runtime_lock"),
+            patch.object(entrypoint, "acquire_runtime_lock", side_effect=acquire),
+            patch.object(entrypoint, "release_runtime_lock"),
             patch.dict(
                 sys.modules,
                 {
@@ -278,7 +278,7 @@ finally:
                 },
             ),
         ):
-            result = raptor.run()
+            result = entrypoint.run()
 
         self.assertEqual(result, 0)
         self.assertEqual(
@@ -312,14 +312,14 @@ finally:
 
         with (
             patch.object(sys, "argv", ["raptor.py"]),
-            patch.object(raptor, "acquire_runtime_lock", return_value=True),
+            patch.object(entrypoint, "acquire_runtime_lock", return_value=True),
             patch.object(
-                raptor,
+                entrypoint,
                 "release_runtime_lock",
                 side_effect=lambda: order.append("release"),
             ),
             patch.object(
-                raptor.os,
+                entrypoint.os,
                 "execv",
                 side_effect=lambda *_args: order.append("exec"),
             ) as execv,
@@ -336,7 +336,7 @@ finally:
                 },
             ),
         ):
-            result = raptor.run()
+            result = entrypoint.run()
 
         self.assertEqual(result, 0)
         self.assertEqual(
@@ -347,7 +347,7 @@ finally:
             os.path.realpath(sys.executable),
             [
                 os.path.realpath(sys.executable),
-                os.path.realpath(raptor.__file__),
+                str(Path(entrypoint.__file__).resolve().parent.parent / "raptor.py"),
             ],
         )
 
@@ -357,7 +357,7 @@ finally:
             patch.object(sys, "executable", "/opt/raptor/raptor"),
             patch.object(sys, "argv", ["raptor", "--daemon"]),
         ):
-            argv = raptor._restart_argv()
+            argv = entrypoint._restart_argv()
 
         self.assertEqual(argv, ["/opt/raptor/raptor", "--daemon"])
 
@@ -392,8 +392,8 @@ finally:
 
         with (
             patch.object(sys, "argv", ["raptor.py", "--daemon"]),
-            patch.object(raptor, "acquire_runtime_lock", return_value=True),
-            patch.object(raptor, "release_runtime_lock"),
+            patch.object(entrypoint, "acquire_runtime_lock", return_value=True),
+            patch.object(entrypoint, "release_runtime_lock"),
             patch.dict(
                 sys.modules,
                 {
@@ -403,7 +403,7 @@ finally:
                 },
             ),
         ):
-            result = raptor.run()
+            result = entrypoint.run()
 
         self.assertEqual(result, 0)
         self.assertEqual(
@@ -448,9 +448,9 @@ finally:
 
         with (
             patch.object(sys, "argv", ["raptor.py", "--daemon"]),
-            patch.object(raptor, "acquire_runtime_lock", return_value=True),
-            patch.object(raptor, "release_runtime_lock"),
-            patch.object(raptor.os, "close") as close,
+            patch.object(entrypoint, "acquire_runtime_lock", return_value=True),
+            patch.object(entrypoint, "release_runtime_lock"),
+            patch.object(entrypoint.os, "close") as close,
             patch.dict(
                 sys.modules,
                 {
@@ -461,7 +461,7 @@ finally:
             ),
         ):
             with self.assertRaises(BrokenPipeError):
-                raptor.run()
+                entrypoint.run()
 
         close.assert_not_called()
 
@@ -480,10 +480,10 @@ finally:
                     "true",
                 ],
             ),
-            patch.object(raptor, "acquire_runtime_lock") as acquire,
+            patch.object(entrypoint, "acquire_runtime_lock") as acquire,
             patch("shell_supervisor.main", return_value=9) as supervisor,
         ):
-            result = raptor.run()
+            result = entrypoint.run()
         self.assertEqual(result, 9)
         acquire.assert_not_called()
         supervisor.assert_called_once_with(
@@ -576,10 +576,10 @@ finally:
         runtime_module.clear_runtime_if_ours = lambda: None
         with (
             patch.object(sys, "argv", ["raptor.py", "--status"]),
-            patch.object(raptor, "acquire_runtime_lock") as acquire,
+            patch.object(entrypoint, "acquire_runtime_lock") as acquire,
             patch.dict(sys.modules, {"runtime": runtime_module}),
         ):
-            result = raptor.run()
+            result = entrypoint.run()
 
         self.assertEqual(result, 7)
         acquire.assert_not_called()
@@ -602,7 +602,7 @@ finally:
         checked: list[bool] = []
         sandbox_module.probe_linux_shell_sandbox = lambda: checked.append(True)
         with (
-            patch.object(raptor, "acquire_runtime_lock") as acquire,
+            patch.object(entrypoint, "acquire_runtime_lock") as acquire,
             patch.dict(
                 sys.modules,
                 {
@@ -612,7 +612,7 @@ finally:
             ),
             redirect_stdout(io.StringIO()) as output,
         ):
-            result = raptor.run()
+            result = entrypoint.run()
 
         self.assertEqual(result, 0)
         self.assertEqual(checked, [True])
@@ -642,7 +642,7 @@ finally:
 
         sandbox_module.probe_linux_shell_sandbox = fail_probe
         with (
-            patch.object(raptor, "acquire_runtime_lock") as acquire,
+            patch.object(entrypoint, "acquire_runtime_lock") as acquire,
             patch.dict(
                 sys.modules,
                 {
@@ -652,7 +652,7 @@ finally:
             ),
             redirect_stderr(io.StringIO()) as error,
         ):
-            result = raptor.run()
+            result = entrypoint.run()
 
         self.assertEqual(result, 1)
         self.assertEqual(error.getvalue(), "permission denied\n")
@@ -682,14 +682,14 @@ finally:
             return "203.0.113.10"
         network_module.proxy_egress_ip = proxy_egress_ip
         with (
-            patch.object(raptor, "acquire_runtime_lock") as acquire,
+            patch.object(entrypoint, "acquire_runtime_lock") as acquire,
             patch.dict(
                 sys.modules,
                 {"runtime": runtime_module, "network": network_module},
             ),
             redirect_stdout(io.StringIO()) as output,
         ):
-            result = raptor.run()
+            result = entrypoint.run()
         self.assertEqual(result, 0)
         self.assertEqual(
             output.getvalue(),
@@ -721,14 +721,14 @@ finally:
             raise RuntimeError("proxy-secret")
         network_module.proxy_egress_ip = proxy_egress_ip
         with (
-            patch.object(raptor, "acquire_runtime_lock") as acquire,
+            patch.object(entrypoint, "acquire_runtime_lock") as acquire,
             patch.dict(
                 sys.modules,
                 {"runtime": runtime_module, "network": network_module},
             ),
             redirect_stderr(io.StringIO()) as error,
         ):
-            result = raptor.run()
+            result = entrypoint.run()
         self.assertEqual(result, 1)
         self.assertEqual(error.getvalue(), "Proxy: unreachable\n")
         self.assertNotIn("proxy-secret", error.getvalue())
