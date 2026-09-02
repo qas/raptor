@@ -9,7 +9,7 @@ import time
 from typing import Any
 
 from config_document import config_section, load_config_document
-from process_lock import (
+from raptor.app.process_lock import (
     detach_runtime_lock,
     refresh_runtime_lock_owner,
     release_runtime_lock,

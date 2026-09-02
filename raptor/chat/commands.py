@@ -6,7 +6,7 @@ import re
 from datetime import datetime, timezone
 from typing import Any
 
-from application_control import (
+from raptor.app.application_control import (
     ExitRequest,
     application_control_available,
     request_application_exit,
@@ -68,7 +68,7 @@ from raptor.agent.goals import (
     resume_goal,
     todo_store_for_display,
 )
-from runtime import runtime_uptime
+from raptor.app.runtime import runtime_uptime
 from raptor.chat.chat_runtime import (
     bound_delivery_context,
     capture_delivery_context,

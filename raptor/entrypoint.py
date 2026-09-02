@@ -1,11 +1,12 @@
 """Raptor process entry point."""
 
 import asyncio
+import importlib
 import os
 import sys
 from pathlib import Path
 
-from process_lock import acquire_runtime_lock, release_runtime_lock
+from raptor.app.process_lock import acquire_runtime_lock, release_runtime_lock
 from raptor.shell.shell_supervisor import SUPERVISOR_MODE
 
 
@@ -22,7 +23,7 @@ def run() -> int:
     if len(sys.argv) > 1 and sys.argv[1] == SUPERVISOR_MODE:
         from raptor.shell.shell_supervisor import main
         return main([sys.argv[0], *sys.argv[2:]])
-    from runtime import (
+    from raptor.app.runtime import (
         clear_runtime_if_ours,
         cli_runtime_status,
         daemonize,
@@ -74,7 +75,7 @@ def run() -> int:
         if args.stop_daemon:
             return stop_daemon()
 
-        from workspace_identity import initialize_workspace_identity
+        from raptor.app.workspace_identity import initialize_workspace_identity
 
         initialize_workspace_identity()
         ready_fd: int | None = None
@@ -83,15 +84,15 @@ def run() -> int:
         set_runtime(daemon=args.daemon)
         restart_requested = False
         try:
-            import application
-            from raptor.state import session
+            application = importlib.import_module("raptor.app.application")
+            session = importlib.import_module("raptor.state.session")
 
             session.DAEMON_MODE = args.daemon
             try:
                 if ready_fd is None:
                     asyncio.run(application.main())
                 else:
-                    from runtime import signal_daemon_ready
+                    from raptor.app.runtime import signal_daemon_ready
 
                     def on_ready() -> None:
                         nonlocal ready_fd
@@ -103,7 +104,7 @@ def run() -> int:
                     asyncio.run(application.main(on_ready=on_ready))
             except (KeyboardInterrupt, asyncio.CancelledError):
                 pass
-            from application_control import ExitRequest, take_exit_request
+            from raptor.app.application_control import ExitRequest, take_exit_request
             restart_requested = take_exit_request() is ExitRequest.RESTART
         finally:
             if ready_fd is not None:

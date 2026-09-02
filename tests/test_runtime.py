@@ -18,11 +18,11 @@ _HOME = Path(tempfile.mkdtemp(prefix="raptor-runtime-tests-"))
 os.environ["RAPTOR_HOME"] = str(_HOME)
 os.environ["AGENT_WORKDIR"] = str(_HOME)
 
-import process_lock
+from raptor.app import process_lock
 from raptor import entrypoint
-import runtime
+from raptor.app import runtime
 from raptor.state import session
-from application_control import ExitRequest
+from raptor.app.application_control import ExitRequest
 
 
 class RuntimeLockTests(unittest.TestCase):
@@ -30,7 +30,7 @@ class RuntimeLockTests(unittest.TestCase):
         self.runtime_state = copy.deepcopy(session.state.get("runtime"))
         process_lock.release_runtime_lock()
         self.temp_dir = tempfile.TemporaryDirectory()
-        self.lock_path = Path(self.temp_dir.name) / "runtime.lock"
+        self.lock_path = Path(self.temp_dir.name) / "raptor.app.runtime.lock"
         self.path_patch = patch.object(
             process_lock,
             "RUNTIME_LOCK_PATH",
@@ -71,7 +71,7 @@ class RuntimeLockTests(unittest.TestCase):
         environment["RESPONSES_SERVER_PORT"] = "invalid"
         environment["RAPTOR_HOME"] = str(self.lock_path.parent / "home")
         command = (
-            "import sys; import runtime; "
+            "import sys; from raptor.app import runtime; "
             "runtime.runtime_info(); "
             "assert 'config' not in sys.modules; "
             "assert 'raptor.state.session' not in sys.modules"
@@ -115,8 +115,8 @@ import os
 import signal
 from pathlib import Path
 
-from process_lock import acquire_runtime_lock, release_runtime_lock
-from runtime import daemonize, signal_daemon_ready
+from raptor.app.process_lock import acquire_runtime_lock, release_runtime_lock
+from raptor.app.runtime import daemonize, signal_daemon_ready
 
 def raise_exit():
     raise SystemExit(0)
@@ -164,21 +164,22 @@ finally:
             daemon_pid = int(marker.read_text())
 
             status = run_control(
-                "import runtime; "
+                "from raptor.app import runtime; "
                 "raise SystemExit(runtime.cli_runtime_status())"
             )
             self.assertEqual(status.returncode, 0, status.stderr)
             self.assertIn(f"pid={daemon_pid}", status.stdout)
 
             stopped = run_control(
-                "import runtime; raise SystemExit(runtime.stop_daemon())"
+                "from raptor.app import runtime; "
+                "raise SystemExit(runtime.stop_daemon())"
             )
             self.assertEqual(stopped.returncode, 0, stopped.stderr)
 
             deadline = time.monotonic() + 2
             while time.monotonic() < deadline:
                 probe = run_control(
-                    "import runtime; "
+                    "from raptor.app import runtime; "
                     "raise SystemExit(runtime.cli_runtime_status())"
                 )
                 if probe.returncode == 1:
@@ -189,7 +190,7 @@ finally:
                 self.fail("daemon ownership was not released")
         finally:
             if daemon_pid is None:
-                lock_path = home / "runtime.lock"
+                lock_path = home / "raptor.app.runtime.lock"
                 if lock_path.exists():
                     raw_pid = lock_path.read_text().strip()
                     daemon_pid = int(raw_pid) if raw_pid else None
@@ -236,7 +237,7 @@ finally:
 
     def test_entrypoint_acquires_ownership_before_application_import(self) -> None:
         order: list[str] = []
-        runtime_module = types.ModuleType("runtime")
+        runtime_module = types.ModuleType("raptor.app.runtime")
         runtime_module.parse_args = lambda: (
             order.append("parse")
             or Namespace(
@@ -252,7 +253,7 @@ finally:
         runtime_module.daemonize = lambda: None
         runtime_module.set_runtime = lambda **_kw: order.append("publish")
         runtime_module.clear_runtime_if_ours = lambda: order.append("clear")
-        application_module = types.ModuleType("application")
+        application_module = types.ModuleType("raptor.app.application")
 
         async def application_main() -> None:
             order.append("application")
@@ -272,8 +273,8 @@ finally:
             patch.dict(
                 sys.modules,
                 {
-                    "runtime": runtime_module,
-                    "application": application_module,
+                    "raptor.app.runtime": runtime_module,
+                    "raptor.app.application": application_module,
                     "raptor.state.session": session_module,
                 },
             ),
@@ -288,7 +289,7 @@ finally:
 
     def test_restart_executes_only_after_runtime_state_is_cleared(self) -> None:
         order: list[str] = []
-        runtime_module = types.ModuleType("runtime")
+        runtime_module = types.ModuleType("raptor.app.runtime")
         runtime_module.parse_args = lambda: Namespace(
             status=False,
             stop_daemon=False,
@@ -301,7 +302,7 @@ finally:
         runtime_module.daemonize = lambda: None
         runtime_module.set_runtime = lambda **_kw: order.append("publish")
         runtime_module.clear_runtime_if_ours = lambda: order.append("clear")
-        application_module = types.ModuleType("application")
+        application_module = types.ModuleType("raptor.app.application")
 
         async def application_main() -> None:
             order.append("application")
@@ -324,14 +325,14 @@ finally:
                 side_effect=lambda *_args: order.append("exec"),
             ) as execv,
             patch(
-                "application_control.take_exit_request",
+                "raptor.app.application_control.take_exit_request",
                 return_value=ExitRequest.RESTART,
             ),
             patch.dict(
                 sys.modules,
                 {
-                    "runtime": runtime_module,
-                    "application": application_module,
+                    "raptor.app.runtime": runtime_module,
+                    "raptor.app.application": application_module,
                     "raptor.state.session": session_module,
                 },
             ),
@@ -363,7 +364,7 @@ finally:
 
     def test_daemon_entrypoint_signals_after_application_ready(self) -> None:
         order: list[str] = []
-        runtime_module = types.ModuleType("runtime")
+        runtime_module = types.ModuleType("raptor.app.runtime")
         runtime_module.parse_args = lambda: Namespace(
             status=False,
             stop_daemon=False,
@@ -379,7 +380,7 @@ finally:
         runtime_module.signal_daemon_ready = (
             lambda fd: order.append(f"ready:{fd}")
         )
-        application_module = types.ModuleType("application")
+        application_module = types.ModuleType("raptor.app.application")
 
         async def application_main(*, on_ready) -> None:
             order.append("initialized")
@@ -397,8 +398,8 @@ finally:
             patch.dict(
                 sys.modules,
                 {
-                    "runtime": runtime_module,
-                    "application": application_module,
+                    "raptor.app.runtime": runtime_module,
+                    "raptor.app.application": application_module,
                     "raptor.state.session": session_module,
                 },
             ),
@@ -419,7 +420,7 @@ finally:
         )
 
     def test_daemon_entrypoint_transfers_readiness_fd_ownership(self) -> None:
-        runtime_module = types.ModuleType("runtime")
+        runtime_module = types.ModuleType("raptor.app.runtime")
         runtime_module.parse_args = lambda: Namespace(
             status=False,
             stop_daemon=False,
@@ -437,7 +438,7 @@ finally:
             raise BrokenPipeError("launcher exited")
 
         runtime_module.signal_daemon_ready = fail_ready
-        application_module = types.ModuleType("application")
+        application_module = types.ModuleType("raptor.app.application")
 
         async def application_main(*, on_ready) -> None:
             on_ready()
@@ -454,8 +455,8 @@ finally:
             patch.dict(
                 sys.modules,
                 {
-                    "runtime": runtime_module,
-                    "application": application_module,
+                    "raptor.app.runtime": runtime_module,
+                    "raptor.app.application": application_module,
                     "raptor.state.session": session_module,
                 },
             ),
@@ -561,7 +562,7 @@ finally:
         self.assertEqual(stdout, b"ok")
 
     def test_status_does_not_acquire_application_ownership(self) -> None:
-        runtime_module = types.ModuleType("runtime")
+        runtime_module = types.ModuleType("raptor.app.runtime")
         runtime_module.parse_args = lambda: Namespace(
             status=True,
             stop_daemon=False,
@@ -577,7 +578,7 @@ finally:
         with (
             patch.object(sys, "argv", ["raptor.py", "--status"]),
             patch.object(entrypoint, "acquire_runtime_lock") as acquire,
-            patch.dict(sys.modules, {"runtime": runtime_module}),
+            patch.dict(sys.modules, {"raptor.app.runtime": runtime_module}),
         ):
             result = entrypoint.run()
 
@@ -585,7 +586,7 @@ finally:
         acquire.assert_not_called()
 
     def test_sandbox_check_runs_without_runtime_ownership(self) -> None:
-        runtime_module = types.ModuleType("runtime")
+        runtime_module = types.ModuleType("raptor.app.runtime")
         runtime_module.parse_args = lambda: Namespace(
             status=False,
             stop_daemon=False,
@@ -606,7 +607,7 @@ finally:
             patch.dict(
                 sys.modules,
                 {
-                    "runtime": runtime_module,
+                    "raptor.app.runtime": runtime_module,
                     "raptor.shell.shell_sandbox": sandbox_module,
                 },
             ),
@@ -622,7 +623,7 @@ finally:
     def test_sandbox_check_reports_failure_without_runtime_ownership(
         self,
     ) -> None:
-        runtime_module = types.ModuleType("runtime")
+        runtime_module = types.ModuleType("raptor.app.runtime")
         runtime_module.parse_args = lambda: Namespace(
             status=False,
             stop_daemon=False,
@@ -646,7 +647,7 @@ finally:
             patch.dict(
                 sys.modules,
                 {
-                    "runtime": runtime_module,
+                    "raptor.app.runtime": runtime_module,
                     "raptor.shell.shell_sandbox": sandbox_module,
                 },
             ),
@@ -659,7 +660,7 @@ finally:
         acquire.assert_not_called()
 
     def test_proxy_check_reports_egress_without_runtime_ownership(self) -> None:
-        runtime_module = types.ModuleType("runtime")
+        runtime_module = types.ModuleType("raptor.app.runtime")
         runtime_module.parse_args = lambda: Namespace(
             status=False,
             stop_daemon=False,
@@ -685,7 +686,7 @@ finally:
             patch.object(entrypoint, "acquire_runtime_lock") as acquire,
             patch.dict(
                 sys.modules,
-                {"runtime": runtime_module, "network": network_module},
+                {"raptor.app.runtime": runtime_module, "network": network_module},
             ),
             redirect_stdout(io.StringIO()) as output,
         ):
@@ -698,7 +699,7 @@ finally:
         acquire.assert_not_called()
 
     def test_proxy_check_redacts_connection_failures(self) -> None:
-        runtime_module = types.ModuleType("runtime")
+        runtime_module = types.ModuleType("raptor.app.runtime")
         runtime_module.parse_args = lambda: Namespace(
             status=False,
             stop_daemon=False,
@@ -724,7 +725,7 @@ finally:
             patch.object(entrypoint, "acquire_runtime_lock") as acquire,
             patch.dict(
                 sys.modules,
-                {"runtime": runtime_module, "network": network_module},
+                {"raptor.app.runtime": runtime_module, "network": network_module},
             ),
             redirect_stderr(io.StringIO()) as error,
         ):

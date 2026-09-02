@@ -17,8 +17,8 @@ os.environ.setdefault("TG_USER_ID", "1")
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-import application
-from application_control import ExitRequest
+from raptor.app import application
+from raptor.app.application_control import ExitRequest
 from raptor.chat.chat_provider import IncomingMessage, ProviderCapabilities
 from raptor.chat.chat_runtime import get_chat_provider, set_chat_provider
 from raptor.model.model_providers import ModelTarget

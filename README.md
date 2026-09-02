@@ -253,11 +253,11 @@ history remains available in the archived transcript as an audit record.
 | `install.sh` | Unix installer and uninstaller for published Linux and macOS binaries |
 | `raptor.py` | Thin source and frozen executable launcher |
 | `raptor/entrypoint.py` | Ownership-first process entry point and CLI |
-| `application.py` | Long-running provider and agent application lifecycle |
-| `application_control.py` | Application-task shutdown and restart requests |
-| `workspace_identity.py` | Workspace identity bootstrap and bounded loading |
-| `process_lock.py` | State-independent atomic process ownership |
-| `runtime.py` | Process metadata and daemon controls |
+| `raptor/app/application.py` | Provider and agent application lifecycle |
+| `raptor/app/application_control.py` | Shutdown and restart requests |
+| `raptor/app/workspace_identity.py` | Workspace identity bootstrap and loading |
+| `raptor/app/process_lock.py` | State-independent atomic process ownership |
+| `raptor/app/runtime.py` | Process metadata and daemon controls |
 | `runtime_paths.py` | Dependency-free runtime filesystem locations |
 | `raptor/agent/agent.py` | Root turn execution and compaction integration |
 | `raptor/agent/engine.py` | Tool-round engine and response parsing |

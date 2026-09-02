@@ -11,7 +11,7 @@ os.environ["AGENT_WORKDIR"] = str(_HOME)
 os.environ.setdefault("TG_BOT_TOKEN", "test-token")
 os.environ.setdefault("TG_USER_ID", "1")
 
-import application_control
+from raptor.app import application_control
 from raptor.chat import commands
 
 

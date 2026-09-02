@@ -13,7 +13,7 @@ from raptor.chat.activity import (
     close_activity_projections,
     reconcile_activity_surfaces,
 )
-from application_control import (
+from raptor.app.application_control import (
     ExitRequest,
     activate_application_exit,
     bind_application_task,
@@ -58,7 +58,7 @@ from raptor.agent.subagents import (
 )
 from raptor.agent.thread_state import thread_active
 from raptor.agent.thread_status import ensure_thread_status
-from workspace_identity import initialize_workspace_identity
+from raptor.app.workspace_identity import initialize_workspace_identity
 
 
 async def dispatch_event(provider: ChatProvider, event: ChatEvent) -> None:

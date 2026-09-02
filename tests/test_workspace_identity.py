@@ -11,7 +11,7 @@ os.environ["RAPTOR_HOME"] = str(_HOME / ".raptor")
 os.environ["AGENT_WORKDIR"] = str(_HOME)
 
 from raptor.model import responses
-import workspace_identity
+from raptor.app import workspace_identity
 
 
 class WorkspaceIdentityTests(unittest.TestCase):

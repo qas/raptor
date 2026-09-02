@@ -21,7 +21,7 @@ class VersionCliTests(unittest.TestCase):
         with (
             patch.object(sys, "argv", ["raptor", "--version"]),
             patch("raptor.entrypoint.acquire_runtime_lock") as acquire,
-            patch.dict(sys.modules, {"application": None}),
+            patch.dict(sys.modules, {"raptor.app.application": None}),
             contextlib.redirect_stdout(output),
         ):
             result = entrypoint.run()
