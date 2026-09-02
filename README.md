@@ -532,7 +532,7 @@ be a provider instance, a zero-argument class, or a zero-argument factory. The
 result must satisfy `ChatProvider`.
 
 ```python
-from chat_provider import PollResult, ProviderCapabilities
+from raptor.chat.chat_provider import PollResult, ProviderCapabilities
 
 
 class MatrixProvider:

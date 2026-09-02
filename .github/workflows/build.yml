@@ -87,7 +87,7 @@ jobs:
           mkdir -p "$AGENT_WORKDIR"
           ./dist/raptor/raptor --help
           expected="$(uv run python -c \
-            'from version import display_version; print(display_version())')"
+            'from raptor.version import display_version; print(display_version())')"
           test "$(./dist/raptor/raptor --version)" = "raptor $expected"
           set +e
           ./dist/raptor/raptor --status
