@@ -4,8 +4,8 @@ import json
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from config import MAX_TOOL_OUTPUT
-from observability import log_event, tool_activity
+from raptor.config import MAX_TOOL_OUTPUT
+from raptor.observability import log_event, tool_activity
 
 
 def interrupted_tool_result() -> dict[str, Any]:

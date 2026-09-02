@@ -83,7 +83,7 @@ Use minimal deterministic fakes at provider and transport boundaries.
 
 Update `README.md` whenever a user-visible command, environment variable,
 default, storage path, operational behavior, or extension contract changes.
-Document every environment variable defined by `config.py`, including its
+Document every environment variable defined by `raptor/config.py`, including its
 default and purpose. Examples must be runnable and must not contain real
 credentials.
 

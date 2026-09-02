@@ -4,7 +4,7 @@ import fcntl
 import os
 from dataclasses import dataclass
 
-from runtime_paths import RAPTOR_HOME
+from raptor.runtime_paths import RAPTOR_HOME
 from raptor.state.storage import ensure_private_directory
 
 

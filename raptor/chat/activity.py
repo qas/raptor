@@ -7,8 +7,8 @@ from typing import Any, Protocol, runtime_checkable
 from raptor.state import session
 from raptor.chat.chat_provider import ConversationId
 from raptor.chat.chat_runtime import get_chat_provider
-from config import MAX_TOOL_OUTPUT
-from observability import log_exception
+from raptor.config import MAX_TOOL_OUTPUT
+from raptor.observability import log_exception
 
 ACTIVITY_UPDATE_INTERVAL_SECONDS = 1.5
 MAX_ACTIVITY_FIELD_CHARS = 600

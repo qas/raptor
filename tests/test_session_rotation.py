@@ -26,7 +26,7 @@ from raptor.state.session import pending_approvals
 from raptor.agent.turn_runtime import turns
 from raptor.chat.commands import command
 from raptor.agent.goals import replace_goal
-from tools import chat_history_tool
+from raptor.tools import chat_history_tool
 from raptor.model.model_providers import ModelProvider, ModelTarget
 
 TEST_MODEL_TARGET = {"provider_id": "local", "model": "test-model"}

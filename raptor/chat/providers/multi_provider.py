@@ -18,7 +18,7 @@ from raptor.chat.chat_provider import (
     ProviderCapabilities,
     ToolConsoleProvider,
 )
-from observability import log_exception
+from raptor.observability import log_exception
 from raptor.chat.activity import (
     ActivityConversationProvider,
     ActivityFinishResult,

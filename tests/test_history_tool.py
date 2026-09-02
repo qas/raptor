@@ -18,7 +18,7 @@ if str(_ROOT) not in sys.path:
 
 from raptor.state import chat_store
 from raptor.state import session
-from tools import chat_history_tool
+from raptor.tools import chat_history_tool
 
 TEST_MODEL_TARGET = {"provider_id": "local", "model": "test-model"}
 
@@ -102,7 +102,7 @@ class HistoryToolTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("second", result["records"][0]["text"])
 
     def test_tool_output_respects_max_tool_output(self) -> None:
-        import tools as tools_mod
+        from raptor import tools as tools_mod
         for i in range(30):
             chat_store.append_item(
                 self.main,
@@ -156,7 +156,7 @@ class HistoryToolTests(unittest.IsolatedAsyncioTestCase):
     async def test_subagent_execute_tool_passes_session_context(
         self,
     ) -> None:
-        from tools import execute_tool
+        from raptor.tools import execute_tool
 
         child = chat_store.create_session(model_target=TEST_MODEL_TARGET,
             kind="subagent",
@@ -202,7 +202,7 @@ class HistoryToolTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("invalid session_id", result["error"])
 
     def test_list_sessions_payload_fits_max_output(self) -> None:
-        import tools as tools_mod
+        from raptor import tools as tools_mod
         for _ in range(40):
             chat_store.create_session(model_target=TEST_MODEL_TARGET,
                 kind="main",
@@ -218,7 +218,7 @@ class HistoryToolTests(unittest.IsolatedAsyncioTestCase):
     def test_final_content_truncation_stays_within_budget(
         self,
     ) -> None:
-        import tools as tools_mod
+        from raptor import tools as tools_mod
         # One oversized record exercises final whole-payload truncation.
         chat_store.append_item(
             self.main,

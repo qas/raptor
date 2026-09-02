@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from build_info import (
+from raptor.build_info import (
     BuildInfo,
     load_build_info,
     nightly_build_info,

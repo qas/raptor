@@ -14,7 +14,7 @@ os.environ["AGENT_WORKDIR"] = str(_HOME)
 from raptor.state import session
 from raptor.shell import shell_sessions
 from raptor.chat.chat_provider import ProcessOutputChunk
-from config import TOOLS
+from raptor.config import TOOLS
 from raptor.model.model_providers import ModelTarget
 from raptor.shell.shell_sessions import (
     HeadTailBuffer,
@@ -27,7 +27,7 @@ from raptor.shell.shell_sessions import (
     write_stdin,
     write_stdin_wait_ms,
 )
-from tools import shell_tool
+from raptor.tools import shell_tool
 
 
 class ShellSessionTests(unittest.IsolatedAsyncioTestCase):

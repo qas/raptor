@@ -5,12 +5,12 @@ import os
 import re
 from urllib.parse import urlsplit
 
-from config_document import config_section, load_config_document
+from raptor.config_document import config_section, load_config_document
 from raptor.shell.filesystem_permissions import (
     DEFAULT_GLOB_SCAN_MAX_DEPTH,
     FileAccessPolicy,
 )
-from runtime_paths import AGENT_WORKDIR, CHAT_DIR, LOG_PATH, RAPTOR_HOME, STATE_PATH
+from raptor.runtime_paths import AGENT_WORKDIR, CHAT_DIR, LOG_PATH, RAPTOR_HOME, STATE_PATH
 
 from raptor.agent.todos import (
     MAX_TODO_EXPLANATION_CHARS,

@@ -8,7 +8,7 @@ from enum import StrEnum
 from collections.abc import Callable, Coroutine
 from typing import Any
 
-from observability import log_event
+from raptor.observability import log_event
 
 
 INTERRUPT_GRACE_SECONDS = 3.0

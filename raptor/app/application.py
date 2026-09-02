@@ -25,7 +25,7 @@ from raptor.agent.agent import flush_pending_delivery, repair_interrupted_root_t
 from raptor.chat.chat_provider import ChatEvent, ChatProvider
 from raptor.chat.chat_runtime import load_chat_providers, send, set_chat_provider
 from raptor.state.chat_store import chat_path, ensure_chat_dirs
-from config import (
+from raptor.config import (
     CHAT_DIR,
     CHAT_PROVIDERS,
     CHAT_STREAMING,
@@ -41,8 +41,8 @@ from raptor.agent.controller import ensure_root_session, interrupt_root_turn
 from raptor.shell.console_follow import close_follow_console
 from raptor.agent.goals import goal_is_active, pause_goal, prepare_goal_on_startup
 from raptor.chat.loop import COMMANDS, accepts_event, handle_event
-from network import outbound_http_client
-from observability import log_event, log_exception
+from raptor.network import outbound_http_client
+from raptor.observability import log_event, log_exception
 from raptor.model.model_providers import MODEL_CONFIGURATION
 from raptor.model.responses import ensure_target
 from raptor.state.session import bootstrap_runtime_storage, rehydrate_pending_inputs, state

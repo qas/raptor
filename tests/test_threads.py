@@ -33,7 +33,7 @@ from raptor.agent.threads import (
     start_thread,
     thread_active,
 )
-from tools import chat_history_tool
+from raptor.tools import chat_history_tool
 from raptor.agent.turn_runtime import TurnKind, turns
 
 

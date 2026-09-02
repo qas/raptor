@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
-from config_document import CONFIG_PATH, load_config_document
+from raptor.config_document import CONFIG_PATH, load_config_document
 
 
 _PROVIDER_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")

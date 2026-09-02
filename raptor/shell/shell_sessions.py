@@ -25,8 +25,8 @@ from raptor.chat.chat_provider import (
     ProcessOutputChunk,
     ProcessOutputStream,
 )
-from config import AGENT_WORKDIR, FILESYSTEM_POLICY, MAX_TOOL_OUTPUT, SHELL_TIMEOUT
-from observability import log_event, log_shell_start
+from raptor.config import AGENT_WORKDIR, FILESYSTEM_POLICY, MAX_TOOL_OUTPUT, SHELL_TIMEOUT
+from raptor.observability import log_event, log_shell_start
 from raptor.shell.shell_supervisor import SUPERVISOR_MODE
 
 MAX_YIELD_TIME_MS = 30_000

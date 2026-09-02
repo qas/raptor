@@ -16,7 +16,7 @@ from raptor.state.chat_store import (
     reset_model_context,
     session_exists,
 )
-from config import (
+from raptor.config import (
     COMPACTION_REASONING_EFFORT,
     MAX_TOOL_ROUNDS,
     model_compaction_generation_budget,
@@ -56,7 +56,7 @@ from raptor.chat.presentation import (
     compacting_indicator,
     typing_loop,
 )
-from observability import log_agent_activity, log_event
+from raptor.observability import log_agent_activity, log_event
 from raptor.model.responses import (
     estimate_response_request_tokens,
     model_provider,

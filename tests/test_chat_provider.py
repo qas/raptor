@@ -1312,7 +1312,7 @@ class ChatProviderContractTests(unittest.IsolatedAsyncioTestCase):
         )
 
     def test_configured_providers_are_composed_by_default(self) -> None:
-        from config import CHAT_PROVIDERS
+        from raptor.config import CHAT_PROVIDERS
         from raptor.chat.providers.multi_provider import MultiProvider
 
         self.assertEqual(CHAT_PROVIDERS, ("telegram", "responses_api"))

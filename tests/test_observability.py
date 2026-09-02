@@ -2,7 +2,7 @@ import json
 import unittest
 from unittest.mock import patch
 
-from observability import log_event, log_shell_start, redact_sensitive
+from raptor.observability import log_event, log_shell_start, redact_sensitive
 
 
 class ObservabilityTests(unittest.TestCase):
@@ -66,7 +66,7 @@ class ObservabilityTests(unittest.TestCase):
         self.assertEqual(record["data"]["command"], command)
 
     def test_shell_audit_rejects_oversized_command(self) -> None:
-        with patch("observability.MAX_TOOL_OUTPUT", 10):
+        with patch("raptor.observability.MAX_TOOL_OUTPUT", 10):
             with self.assertRaisesRegex(ValueError, "exceeds 10"):
                 log_shell_start(
                     session_id="shell-1",

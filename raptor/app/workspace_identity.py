@@ -4,7 +4,7 @@ import os
 import stat
 from pathlib import Path
 
-from runtime_paths import AGENT_WORKDIR
+from raptor.runtime_paths import AGENT_WORKDIR
 from raptor.state.storage import FileTooLargeError, fsync_directory
 
 

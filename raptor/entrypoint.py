@@ -34,7 +34,7 @@ def run() -> int:
 
     args = parse_args()
     if getattr(args, "version", False):
-        from version import display_version
+        from raptor.version import display_version
 
         print(f"raptor {display_version()}")
         return 0
@@ -49,7 +49,7 @@ def run() -> int:
         return 1
     try:
         if args.check_proxy:
-            from network import ProxyNotConfiguredError, proxy_egress_ip
+            from raptor.network import ProxyNotConfiguredError, proxy_egress_ip
             try:
                 address = asyncio.run(proxy_egress_ip())
             except ProxyNotConfiguredError:

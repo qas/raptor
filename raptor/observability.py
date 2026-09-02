@@ -5,7 +5,7 @@ import re
 import time
 from typing import Any
 
-from config import MAX_TOOL_OUTPUT
+from raptor.config import MAX_TOOL_OUTPUT
 
 
 _REDACTED = "[REDACTED]"

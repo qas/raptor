@@ -3,7 +3,7 @@ import json
 import unittest
 from unittest.mock import patch
 
-from config import MAX_TOOL_OUTPUT
+from raptor.config import MAX_TOOL_OUTPUT
 from raptor.agent.engine import function_call_output, run_agent
 
 

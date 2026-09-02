@@ -11,7 +11,7 @@ from raptor.agent.controller import (
     interrupt_root_turn,
     start_root_session,
 )
-from observability import log_event, log_exception
+from raptor.observability import log_event, log_exception
 
 
 async def answer_action(

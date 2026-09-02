@@ -11,8 +11,8 @@ os.environ["AGENT_WORKDIR"] = str(_HOME)
 os.environ.setdefault("TG_BOT_TOKEN", "test-token")
 os.environ.setdefault("TG_USER_ID", "1")
 
-import tools
-from config import TOOLS
+from raptor import tools
+from raptor.config import TOOLS
 from raptor.shell.filesystem_permissions import FileAccessPolicy
 
 

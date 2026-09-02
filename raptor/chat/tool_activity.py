@@ -20,8 +20,8 @@ from raptor.chat.chat_provider import (
     ToolConsoleProvider,
 )
 from raptor.chat.chat_runtime import get_chat_provider
-from config import CHAT_STREAM_INTERVAL, CHAT_TOOL_ACTIVITY, MAX_TOOL_OUTPUT
-from observability import log_exception
+from raptor.config import CHAT_STREAM_INTERVAL, CHAT_TOOL_ACTIVITY, MAX_TOOL_OUTPUT
+from raptor.observability import log_exception
 
 
 MAX_RETAINED_TOOL_BUBBLES = 64

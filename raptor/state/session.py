@@ -29,7 +29,7 @@ from raptor.state.chat_store import (
     steer_is_recorded,
     validate_session_id,
 )
-from config import (
+from raptor.config import (
     MAX_CHAT_RUNTIMES,
     MAX_PENDING_STEERS,
     MAX_STATE_LOAD_BYTES,

@@ -6,7 +6,7 @@ from typing import Any
 
 import httpx
 
-from config import RAPTOR_NO_PROXY, RAPTOR_PROXY
+from raptor.config import RAPTOR_NO_PROXY, RAPTOR_PROXY
 
 
 PROXY_CHECK_TIMEOUT_SECONDS = 10.0

@@ -24,7 +24,7 @@ from raptor.agent.goals import (
     pause_goal,
     sync_goal_pin,
 )
-from observability import log_event
+from raptor.observability import log_event
 from raptor.chat.presentation import clear_steering_indicator
 from raptor.agent.runtime_events import RuntimeEvent, RuntimeEventKind
 from raptor.state.session import save_state

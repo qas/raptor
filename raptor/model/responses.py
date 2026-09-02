@@ -11,7 +11,7 @@ from typing import Any, TypeVar
 import httpx
 from raptor.chat.chat_provider import ConversationId
 
-from config import (
+from raptor.config import (
     BASE_INSTRUCTIONS,
     CHAT_STREAM_INTERVAL,
     CHAT_STREAMING,
@@ -20,7 +20,7 @@ from config import (
 from raptor.model.model_providers import MODEL_CONFIGURATION, ModelProvider, ModelTarget
 from raptor.state import session
 from raptor.chat.chat_runtime import send_draft, send_reasoning_summary
-from observability import log_event
+from raptor.observability import log_event
 from raptor.agent.engine import estimate_tokens
 from raptor.model.response_errors import (
     ContextLengthError,

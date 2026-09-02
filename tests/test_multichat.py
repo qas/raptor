@@ -16,7 +16,7 @@ os.environ["AGENT_WORKDIR"] = str(_HOME)
 from raptor.state import session
 from raptor.state.chat_store import append_item, list_sessions, session_chat_key
 from raptor.agent.engine import assistant_message
-from tools import chat_history_tool
+from raptor.tools import chat_history_tool
 from raptor.agent.turn_runtime import TurnKind, turns
 
 

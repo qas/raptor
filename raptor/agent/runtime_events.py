@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 
 from raptor.chat.chat_provider import ConversationId
-from config import MAX_TOOL_OUTPUT
+from raptor.config import MAX_TOOL_OUTPUT
 
 _TRUNCATION_MARKER = "\n... [runtime event truncated] ...\n"
 

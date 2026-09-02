@@ -12,7 +12,7 @@ os.environ["RAPTOR_HOME"] = tempfile.mkdtemp(prefix="raptor-version-home-")
 os.environ["AGENT_WORKDIR"] = os.environ["RAPTOR_HOME"]
 
 from raptor import entrypoint
-from version import display_version
+from raptor.version import display_version
 
 
 class VersionCliTests(unittest.TestCase):

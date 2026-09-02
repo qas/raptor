@@ -18,7 +18,7 @@ from raptor.chat.chat_provider import (
     PollResult,
     ProviderCapabilities,
 )
-from config import (
+from raptor.config import (
     TELEGRAM_MARKDOWN,
     TELEGRAM_SUBAGENT_TOPICS_SILENT,
     TG_API,
@@ -27,9 +27,9 @@ from config import (
     TG_MAX_RETRIES,
     TG_USER_ID,
 )
-from network import outbound_http_client
-from observability import log_event, log_exception
-from runtime_paths import RAPTOR_HOME
+from raptor.network import outbound_http_client
+from raptor.observability import log_event, log_exception
+from raptor.runtime_paths import RAPTOR_HOME
 from raptor.state.storage import FileTooLargeError, read_text_bounded, write_text_atomic
 
 _client: httpx.AsyncClient | None = None

@@ -28,7 +28,7 @@ from raptor.state.chat_store import (
     session_exists,
     session_summary,
 )
-from config import (
+from raptor.config import (
     AGENT_WORKDIR,
     CONTEXT_COMPACT_RATIO,
     CONTEXT_SAFETY_TOKENS,
@@ -39,7 +39,7 @@ from config import (
 )
 from raptor.state.session import pending_approvals, save_state, state
 from raptor.state import session
-from observability import log_exception
+from raptor.observability import log_exception
 from raptor.agent.agent import context_tokens
 from raptor.agent.context import session_context_stats
 from raptor.agent.controller import (
@@ -114,7 +114,7 @@ from raptor.agent.threads import (
 from raptor.agent.thread_state import current_thread, thread_active
 from raptor.agent.turn_runtime import TurnKind, turns
 from raptor.agent.todos import validate_plan
-from version import display_version
+from raptor.version import display_version
 from raptor.chat.tool_activity import ToolActivitySurface
 
 # ---------------------------------------------------------------------------

@@ -19,7 +19,7 @@ from raptor.chat import commands
 from raptor.state import session
 from raptor.model.model_providers import ModelConfiguration, ModelProvider, ModelTarget
 from raptor.agent.turn_runtime import turns
-from version import display_version
+from raptor.version import display_version
 
 
 class ModelCommandTests(unittest.IsolatedAsyncioTestCase):

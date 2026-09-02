@@ -10,7 +10,7 @@ from raptor.chat.chat_provider import (
     MessageId,
 )
 from raptor.chat.chat_runtime import get_chat_provider
-from observability import log_exception
+from raptor.observability import log_exception
 from raptor.state import session
 
 def _pinned_status_lock() -> asyncio.Lock:

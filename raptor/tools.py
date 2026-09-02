@@ -16,7 +16,7 @@ from raptor.state.chat_store import (
     session_summary,
     validate_session_id,
 )
-from config import AGENT_WORKDIR, FILESYSTEM_POLICY, MAX_TOOL_OUTPUT, TOOLS
+from raptor.config import AGENT_WORKDIR, FILESYSTEM_POLICY, MAX_TOOL_OUTPUT, TOOLS
 from raptor.state import session
 from raptor.state.session import save_state, state
 from raptor.state.storage import FileTooLargeError, read_bytes_bounded, write_text_atomic

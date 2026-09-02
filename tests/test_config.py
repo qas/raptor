@@ -9,8 +9,8 @@ os.environ.setdefault("TG_BOT_TOKEN", "test-token")
 os.environ.setdefault("TG_USER_ID", "1")
 os.environ.setdefault("TG_CHAT_IDS", "1")
 
-import config
-import config_document
+from raptor import config
+from raptor import config_document
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -23,13 +23,13 @@ class TelegramConfigurationTests(unittest.TestCase):
             {"TG_USER_ID": "7", "TG_CHAT_IDS": "-1002, 7, -1001"},
             clear=True,
         ):
-            values = runpy.run_path(str(ROOT / "config.py"))
+            values = runpy.run_path(str(ROOT / "raptor/config.py"))
 
         self.assertEqual(values["TG_CHAT_IDS"], (-1002, 7, -1001))
 
     def test_telegram_chat_ids_default_to_authorized_user(self) -> None:
         with patch.dict(os.environ, {"TG_USER_ID": "7"}, clear=True):
-            values = runpy.run_path(str(ROOT / "config.py"))
+            values = runpy.run_path(str(ROOT / "raptor/config.py"))
 
         self.assertEqual(values["TG_CHAT_IDS"], (7,))
 
@@ -43,7 +43,7 @@ class TelegramConfigurationTests(unittest.TestCase):
                 ValueError,
                 "TG_CHAT_IDS entries must be unique",
             ):
-                runpy.run_path(str(ROOT / "config.py"))
+                runpy.run_path(str(ROOT / "raptor/config.py"))
 
     def test_rejects_invalid_telegram_chat_ids(self) -> None:
         for value in ("", "7,,8", "7,chat", "7,0"):
@@ -53,13 +53,13 @@ class TelegramConfigurationTests(unittest.TestCase):
                 clear=True,
             ):
                 with self.assertRaises(ValueError):
-                    runpy.run_path(str(ROOT / "config.py"))
+                    runpy.run_path(str(ROOT / "raptor/config.py"))
 
 
 class ResponsesServerConfigurationTests(unittest.TestCase):
     def test_inbound_api_defaults_to_unauthenticated_loopback(self) -> None:
         with patch.dict(os.environ, {}, clear=True):
-            values = runpy.run_path(str(ROOT / "config.py"))
+            values = runpy.run_path(str(ROOT / "raptor/config.py"))
 
         self.assertEqual(values["RESPONSES_SERVER_HOST"], "127.0.0.1")
         self.assertEqual(values["RESPONSES_SERVER_API_KEY"], "")
@@ -76,7 +76,7 @@ class TomlConfigurationTests(unittest.TestCase):
             ),
             patch.dict(os.environ, environment or {}, clear=True),
         ):
-            return runpy.run_path(str(ROOT / "config.py"))
+            return runpy.run_path(str(ROOT / "raptor/config.py"))
 
     def test_non_secret_toml_settings_are_loaded(self) -> None:
         values = self._load(
@@ -247,7 +247,7 @@ class ProxyConfigurationTests(unittest.TestCase):
                 {"RAPTOR_PROXY": proxy},
                 clear=True,
             ):
-                values = runpy.run_path(str(ROOT / "config.py"))
+                values = runpy.run_path(str(ROOT / "raptor/config.py"))
             self.assertEqual(values["RAPTOR_PROXY"], proxy)
 
     def test_rejects_proxy_schemes_that_can_bypass_remote_dns(self) -> None:
@@ -262,7 +262,7 @@ class ProxyConfigurationTests(unittest.TestCase):
                 clear=True,
             ):
                 with self.assertRaisesRegex(ValueError, "RAPTOR_PROXY"):
-                    runpy.run_path(str(ROOT / "config.py"))
+                    runpy.run_path(str(ROOT / "raptor/config.py"))
 
     def test_rejects_proxy_url_suffixes(self) -> None:
         for proxy in (
@@ -276,7 +276,7 @@ class ProxyConfigurationTests(unittest.TestCase):
                 clear=True,
             ):
                 with self.assertRaisesRegex(ValueError, "RAPTOR_PROXY"):
-                    runpy.run_path(str(ROOT / "config.py"))
+                    runpy.run_path(str(ROOT / "raptor/config.py"))
 
     def test_accepts_exact_and_wildcard_proxy_bypasses(self) -> None:
         with patch.dict(
@@ -287,7 +287,7 @@ class ProxyConfigurationTests(unittest.TestCase):
             },
             clear=True,
         ):
-            values = runpy.run_path(str(ROOT / "config.py"))
+            values = runpy.run_path(str(ROOT / "raptor/config.py"))
         self.assertEqual(
             values["RAPTOR_NO_PROXY"],
             ("127.0.0.1", "models.example", "*.google.com"),
@@ -313,7 +313,7 @@ class ProxyConfigurationTests(unittest.TestCase):
                 clear=True,
             ):
                 with self.assertRaisesRegex(ValueError, "RAPTOR_NO_PROXY"):
-                    runpy.run_path(str(ROOT / "config.py"))
+                    runpy.run_path(str(ROOT / "raptor/config.py"))
 
     def test_proxy_bypasses_require_a_proxy(self) -> None:
         with patch.dict(
@@ -325,19 +325,19 @@ class ProxyConfigurationTests(unittest.TestCase):
                 ValueError,
                 "RAPTOR_NO_PROXY requires RAPTOR_PROXY",
             ):
-                runpy.run_path(str(ROOT / "config.py"))
+                runpy.run_path(str(ROOT / "raptor/config.py"))
 
 
 class ShellConfigurationTests(unittest.TestCase):
     def test_shell_timeout_defaults_to_unlimited(self) -> None:
         with patch.dict(os.environ, {}, clear=True):
-            values = runpy.run_path(str(ROOT / "config.py"))
+            values = runpy.run_path(str(ROOT / "raptor/config.py"))
 
         self.assertEqual(values["SHELL_TIMEOUT"], 0)
 
     def test_shell_timeout_accepts_a_positive_deadline(self) -> None:
         with patch.dict(os.environ, {"SHELL_TIMEOUT": "900"}, clear=True):
-            values = runpy.run_path(str(ROOT / "config.py"))
+            values = runpy.run_path(str(ROOT / "raptor/config.py"))
 
         self.assertEqual(values["SHELL_TIMEOUT"], 900)
 
@@ -358,7 +358,7 @@ class ContextBudgetTests(unittest.TestCase):
             },
             clear=True,
         ):
-            values = runpy.run_path(str(ROOT / "config.py"))
+            values = runpy.run_path(str(ROOT / "raptor/config.py"))
 
         self.assertNotIn("MODEL_CONTEXT_TOKENS", values)
         self.assertNotIn("RESPONSES_BASE_URL", values)
@@ -378,7 +378,7 @@ class ContextBudgetTests(unittest.TestCase):
             {"RESPONSES_MAX_RETRIES": "-1"},
             clear=True,
         ):
-            values = runpy.run_path(str(ROOT / "config.py"))
+            values = runpy.run_path(str(ROOT / "raptor/config.py"))
         self.assertNotIn("RESPONSES_MAX_RETRIES", values)
 
     def test_rejects_unknown_boolean_environment_values(self) -> None:
@@ -391,7 +391,7 @@ class ContextBudgetTests(unittest.TestCase):
                 ValueError,
                 "CHAT_STREAMING must be a boolean",
             ):
-                runpy.run_path(str(ROOT / "config.py"))
+                runpy.run_path(str(ROOT / "raptor/config.py"))
 
     def test_rejects_invalid_tool_activity_environment_value(self) -> None:
         with patch.dict(
@@ -403,7 +403,7 @@ class ContextBudgetTests(unittest.TestCase):
                 ValueError,
                 "CHAT_TOOL_ACTIVITY must be a boolean",
             ):
-                runpy.run_path(str(ROOT / "config.py"))
+                runpy.run_path(str(ROOT / "raptor/config.py"))
 
     def test_rejects_nonfinite_float_environment_values(self) -> None:
         with patch.dict(
@@ -415,12 +415,12 @@ class ContextBudgetTests(unittest.TestCase):
                 ValueError,
                 "CHAT_STREAM_INTERVAL must be finite",
             ):
-                runpy.run_path(str(ROOT / "config.py"))
+                runpy.run_path(str(ROOT / "raptor/config.py"))
 
 
 class ReadmeEnvironmentTests(unittest.TestCase):
     def test_every_config_environment_variable_is_documented(self) -> None:
-        source = (ROOT / "config.py").read_text()
+        source = (ROOT / "raptor/config.py").read_text()
         readme = (ROOT / "README.md").read_text()
         names = set(
             re.findall(

@@ -1,7 +1,7 @@
 import unittest
 from unittest.mock import AsyncMock, Mock, call, patch
 
-import network
+from raptor import network
 
 
 class OutboundHttpClientTests(unittest.TestCase):

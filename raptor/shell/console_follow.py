@@ -17,8 +17,8 @@ from raptor.chat.chat_provider import (
     ProcessOutputChunk,
 )
 from raptor.chat.chat_runtime import detached_delivery_context, get_chat_provider
-from config import CHAT_STREAM_INTERVAL
-from observability import log_exception
+from raptor.config import CHAT_STREAM_INTERVAL
+from raptor.observability import log_exception
 from raptor.shell.shell_sessions import (
     cancel_shell_session,
     run_shell,

@@ -7,7 +7,7 @@ import tomllib
 from pathlib import Path
 from typing import Any
 
-from runtime_paths import RAPTOR_HOME
+from raptor.runtime_paths import RAPTOR_HOME
 
 
 CONFIG_PATH = Path(

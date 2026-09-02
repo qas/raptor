@@ -21,7 +21,7 @@ if str(_ROOT) not in sys.path:
 from raptor.state import session
 from raptor.chat.commands import format_todos
 from raptor.agent.todos import MAX_TODO_ITEMS, validate_plan
-from tools import (
+from raptor.tools import (
     TOOL_HANDLERS,
     execute_tool,
     list_dir_tool,
@@ -44,7 +44,7 @@ class UpdatePlanTests(unittest.TestCase):
         session.state.update(copy.deepcopy(session.DEFAULT_STATE))
 
     def test_every_tool_schema_has_exactly_one_handler(self) -> None:
-        from config import TOOLS
+        from raptor.config import TOOLS
 
         self.assertEqual(
             {tool["name"] for tool in TOOLS},
@@ -52,7 +52,7 @@ class UpdatePlanTests(unittest.TestCase):
         )
 
     def test_text_and_directory_results_respect_output_budget(self) -> None:
-        with patch("tools.MAX_TOOL_OUTPUT", 1024):
+        with patch("raptor.tools.MAX_TOOL_OUTPUT", 1024):
             text, truncated = truncate_tool_output("x" * 2000)
             result = list_dir_tool({"path": ".", "max_entries": 2000})
 
@@ -66,7 +66,7 @@ class UpdatePlanTests(unittest.TestCase):
             {"step": "Fix", "status": "in_progress"},
             {"step": "Test", "status": "pending"},
         ]
-        with patch("tools.save_state") as save:
+        with patch("raptor.tools.save_state") as save:
             result = update_plan_tool({"plan": plan}, session.state)
 
         self.assertTrue(result["ok"])
@@ -77,7 +77,7 @@ class UpdatePlanTests(unittest.TestCase):
         replacement = [
             {"step": "Test", "status": "completed"},
         ]
-        with patch("tools.save_state"):
+        with patch("raptor.tools.save_state"):
             update_plan_tool({"plan": replacement}, session.state)
         self.assertEqual(session.state["todos"], replacement)
 
@@ -85,7 +85,7 @@ class UpdatePlanTests(unittest.TestCase):
         session.state["todos"] = [
             {"step": "Old", "status": "pending"},
         ]
-        with patch("tools.save_state"):
+        with patch("raptor.tools.save_state"):
             result = update_plan_tool({"plan": []}, session.state)
         self.assertTrue(result["ok"])
         self.assertEqual(session.state["todos"], [])
@@ -93,7 +93,7 @@ class UpdatePlanTests(unittest.TestCase):
     def test_rejects_multiple_in_progress_atomically(self) -> None:
         original = [{"step": "Old", "status": "pending"}]
         session.state["todos"] = copy.deepcopy(original)
-        with patch("tools.save_state") as save:
+        with patch("raptor.tools.save_state") as save:
             result = update_plan_tool(
                 {
                     "plan": [
@@ -109,7 +109,7 @@ class UpdatePlanTests(unittest.TestCase):
 
     def test_root_and_subagent_plans_are_isolated(self) -> None:
         child = {"todos": []}
-        with patch("tools.save_state"):
+        with patch("raptor.tools.save_state"):
             update_plan_tool(
                 {"plan": [{"step": "Root", "status": "pending"}]},
                 session.state,
@@ -131,7 +131,7 @@ class UpdatePlanTests(unittest.TestCase):
                 {"plan": [{"step": "Owned", "status": "pending"}]}
             ),
         }
-        with patch("tools.save_state"):
+        with patch("raptor.tools.save_state"):
             result = asyncio.run(
                 execute_tool(call, execution_context=context)
             )
@@ -151,7 +151,7 @@ class UpdatePlanTests(unittest.TestCase):
             )
 
     def test_rejects_unknown_fields_and_oversized_plans(self) -> None:
-        with patch("tools.save_state") as save:
+        with patch("raptor.tools.save_state") as save:
             unknown = update_plan_tool(
                 {
                     "plan": [
@@ -181,7 +181,7 @@ class UpdatePlanTests(unittest.TestCase):
         original = [{"step": "Old", "status": "pending"}]
         session.state["todos"] = copy.deepcopy(original)
         with (
-            patch("tools.save_state", side_effect=OSError("disk full")),
+            patch("raptor.tools.save_state", side_effect=OSError("disk full")),
             self.assertRaises(OSError),
         ):
             update_plan_tool(

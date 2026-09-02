@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from config import CHAT_DIR, COMPACTION_MAX_RECORD_CHARS, RAPTOR_HOME
+from raptor.config import CHAT_DIR, COMPACTION_MAX_RECORD_CHARS, RAPTOR_HOME
 from raptor.state.storage import (
     ensure_private_directory,
     fsync_directory,

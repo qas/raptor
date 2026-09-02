@@ -3,7 +3,7 @@ import copy
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from observability import log_event
+from raptor.observability import log_event
 
 from raptor.state.chat_store import (
     active_checkpoint,
@@ -13,7 +13,7 @@ from raptor.state.chat_store import (
     append_meta,
     render_compaction_records,
 )
-from config import (
+from raptor.config import (
     COMPACT_KEEP_RECENT_TOKENS,
     COMPACTION_MAX_RECORD_CHARS,
     COMPACTION_OUTPUT_TOKENS,

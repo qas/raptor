@@ -9,7 +9,7 @@ from raptor.chat import chat_runtime
 from raptor.chat import presentation
 from raptor.state.session import save_state, state
 from raptor.state import session
-from observability import log_event, log_exception
+from raptor.observability import log_event, log_exception
 from raptor.agent.thread_state import thread_active
 from raptor.agent.thread_status import ensure_thread_status
 

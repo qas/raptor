@@ -8,14 +8,14 @@ import sys
 import time
 from typing import Any
 
-from config_document import config_section, load_config_document
+from raptor.config_document import config_section, load_config_document
 from raptor.app.process_lock import (
     detach_runtime_lock,
     refresh_runtime_lock_owner,
     release_runtime_lock,
     runtime_lock_status,
 )
-from runtime_paths import AGENT_WORKDIR, LOG_PATH, STATE_PATH
+from raptor.runtime_paths import AGENT_WORKDIR, LOG_PATH, STATE_PATH
 from raptor.state.storage import (
     FileTooLargeError,
     ensure_private_directory,

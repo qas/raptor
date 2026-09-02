@@ -673,7 +673,7 @@ finally:
         runtime_module.daemonize = lambda: None
         runtime_module.set_runtime = lambda **_kw: None
         runtime_module.clear_runtime_if_ours = lambda: None
-        network_module = types.ModuleType("network")
+        network_module = types.ModuleType("raptor.network")
         network_module.ProxyNotConfiguredError = type(
             "ProxyNotConfiguredError",
             (RuntimeError,),
@@ -686,7 +686,7 @@ finally:
             patch.object(entrypoint, "acquire_runtime_lock") as acquire,
             patch.dict(
                 sys.modules,
-                {"raptor.app.runtime": runtime_module, "network": network_module},
+                {"raptor.app.runtime": runtime_module, "raptor.network": network_module},
             ),
             redirect_stdout(io.StringIO()) as output,
         ):
@@ -712,7 +712,7 @@ finally:
         runtime_module.daemonize = lambda: None
         runtime_module.set_runtime = lambda **_kw: None
         runtime_module.clear_runtime_if_ours = lambda: None
-        network_module = types.ModuleType("network")
+        network_module = types.ModuleType("raptor.network")
         network_module.ProxyNotConfiguredError = type(
             "ProxyNotConfiguredError",
             (RuntimeError,),
@@ -725,7 +725,7 @@ finally:
             patch.object(entrypoint, "acquire_runtime_lock") as acquire,
             patch.dict(
                 sys.modules,
-                {"raptor.app.runtime": runtime_module, "network": network_module},
+                {"raptor.app.runtime": runtime_module, "raptor.network": network_module},
             ),
             redirect_stderr(io.StringIO()) as error,
         ):

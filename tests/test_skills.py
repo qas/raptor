@@ -11,8 +11,8 @@ os.environ["AGENT_WORKDIR"] = str(_HOME)
 
 from raptor.agent import skills
 from raptor.shell.filesystem_permissions import FileAccessPolicy
-from config import TOOLS
-from tools import execute_tool
+from raptor.config import TOOLS
+from raptor.tools import execute_tool
 
 
 class SkillsTests(unittest.IsolatedAsyncioTestCase):

@@ -19,7 +19,7 @@ from raptor.chat.chat_provider import (
     PollResult,
     ProviderCapabilities,
 )
-from config import (
+from raptor.config import (
     RESPONSES_SERVER_API_KEY,
     RESPONSES_SERVER_HOST,
     RESPONSES_SERVER_MAX_BODY,
@@ -30,7 +30,7 @@ from config import (
     RESPONSES_SERVER_PORT,
     RESPONSES_SERVER_READ_TIMEOUT,
 )
-from observability import log_exception
+from raptor.observability import log_exception
 
 SSE_HEARTBEAT_SECONDS = 10.0
 CONVERSATION_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")

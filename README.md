@@ -258,13 +258,13 @@ history remains available in the archived transcript as an audit record.
 | `raptor/app/workspace_identity.py` | Workspace identity bootstrap and loading |
 | `raptor/app/process_lock.py` | State-independent atomic process ownership |
 | `raptor/app/runtime.py` | Process metadata and daemon controls |
-| `runtime_paths.py` | Dependency-free runtime filesystem locations |
+| `raptor/runtime_paths.py` | Dependency-free runtime filesystem locations |
 | `raptor/agent/agent.py` | Root turn execution and compaction integration |
 | `raptor/agent/engine.py` | Tool-round engine and response parsing |
 | `raptor/agent/controller.py` | Single-owner root scheduling and goal continuation |
 | `raptor/agent/turn_runtime.py` | Root-turn ownership and bounded interruption |
 | `raptor/agent/runtime_events.py` | Typed background-completion events |
-| `observability.py` | Structured runtime events and activity labels |
+| `raptor/observability.py` | Structured runtime events and activity labels |
 | `raptor/model/responses.py` | Outbound Responses client, streaming, and retry policy |
 | `raptor/model/model_providers.py` | Model-provider registry and target selection |
 | `raptor/model/response_errors.py` | Shared Responses protocol errors |

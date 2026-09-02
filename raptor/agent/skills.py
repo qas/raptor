@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from config import AGENT_WORKDIR, FILESYSTEM_POLICY, MAX_TOOL_OUTPUT
+from raptor.config import AGENT_WORKDIR, FILESYSTEM_POLICY, MAX_TOOL_OUTPUT
 from raptor.state.storage import (
     FileTooLargeError,
     read_bytes_bounded,

@@ -1156,7 +1156,7 @@ class GoalTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(calls[1], goal_continuation_input())
 
     async def test_runtime_event_prompt_has_one_total_context_cap(self) -> None:
-        from config import MAX_TOOL_OUTPUT
+        from raptor.config import MAX_TOOL_OUTPUT
 
         event = _runtime_event("head" + "x" * MAX_TOOL_OUTPUT + "tail")
         prompt = event.prompt()
@@ -2433,7 +2433,7 @@ class SetGoalToolTests(unittest.IsolatedAsyncioTestCase):
         enforced by the set_goal tool description, not text matching.
         """
         from raptor.agent import goals as goals_mod
-        from config import TOOLS
+        from raptor.config import TOOLS
         self.assertFalse(
             hasattr(goals_mod, "user_requests_goal_creation")
         )

@@ -68,7 +68,7 @@ class _Response:
 class ModelProviderTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         directory = Path(tempfile.mkdtemp(prefix="raptor-provider-tests-"))
-        self.path = directory / "config.toml"
+        self.path = directory / "raptor.config.toml"
         self.path.write_text(CONFIG, encoding="utf-8")
         self.configuration = load_model_configuration(self.path)
 

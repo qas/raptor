@@ -7,8 +7,8 @@ from typing import Any
 from raptor.chat.chat_provider import ActionButton, ConversationId, IncomingAction
 from raptor.chat.chat_runtime import get_chat_provider
 from raptor.state.session import APPROVAL_TOOLS, pending_approvals, state
-from observability import log_agent_activity, log_exception
-from tools import execute_tool
+from raptor.observability import log_agent_activity, log_exception
+from raptor.tools import execute_tool
 from raptor.chat.tool_activity import ToolActivitySurface
 
 

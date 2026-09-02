@@ -22,7 +22,7 @@ from raptor.state.chat_store import (
     create_session,
     reset_model_context,
 )
-from config import (
+from raptor.config import (
     BASE_INSTRUCTIONS,
     COMPACTION_REASONING_EFFORT,
     MAX_BACKGROUND_SUBAGENTS,
@@ -44,7 +44,7 @@ from raptor.agent.context import (
     request_with_checkpoint_retry,
 )
 from raptor.agent.engine import assistant_message, estimate_tokens, run_agent
-from observability import log_event
+from raptor.observability import log_event
 from raptor.model.response_errors import (
     ContextLengthError,
     MalformedToolCallError,
