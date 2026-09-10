@@ -1,7 +1,29 @@
 # -*- mode: python ; coding: utf-8 -*-
+import os
+import tempfile
 from pathlib import Path
 
-from PyInstaller.utils.hooks import collect_data_files, collect_submodules
+from PyInstaller.utils.hooks import collect_data_files
+
+
+# Analysis imports application, which loads state at import time.
+os.environ["RAPTOR_HOME"] = tempfile.mkdtemp(prefix="raptor-pyi-home-")
+os.environ["AGENT_WORKDIR"] = tempfile.mkdtemp(prefix="raptor-pyi-work-")
+
+
+def _package_modules(package_dir: Path) -> list[str]:
+    root = package_dir.parent
+    names: list[str] = []
+    for path in sorted(package_dir.rglob("*.py")):
+        relative = path.relative_to(root)
+        parts = (
+            relative.parent.parts
+            if path.name == "__init__.py"
+            else relative.with_suffix("").parts
+        )
+        if parts:
+            names.append(".".join(parts))
+    return names
 
 
 build_data = [
@@ -16,7 +38,7 @@ a = Analysis(
     pathex=[],
     binaries=[],
     datas=collect_data_files("certifi") + build_data,
-    hiddenimports=collect_submodules("raptor") + [
+    hiddenimports=_package_modules(Path(SPECPATH) / "raptor") + [
         "socksio",
     ],
     hookspath=[],
