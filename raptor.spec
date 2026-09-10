@@ -1,7 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
 from pathlib import Path
 
-from PyInstaller.utils.hooks import collect_data_files
+from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
 
 build_data = [
@@ -16,11 +16,7 @@ a = Analysis(
     pathex=[],
     binaries=[],
     datas=collect_data_files("certifi") + build_data,
-    hiddenimports=[
-        "raptor.chat.providers.telegram",
-        "raptor.chat.providers.responses_provider",
-        "raptor.chat.providers.multi_provider",
-        "raptor.shell.shell_supervisor",
+    hiddenimports=collect_submodules("raptor") + [
         "socksio",
     ],
     hookspath=[],

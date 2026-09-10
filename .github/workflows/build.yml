@@ -89,6 +89,27 @@ jobs:
           expected="$(uv run python -c \
             'from raptor.version import display_version; print(display_version())')"
           test "$(./dist/raptor/raptor --version)" = "raptor $expected"
+          python3 - <<'PY'
+          import ast
+          from pathlib import Path
+          toc_path = Path("build/raptor/PYZ-00.toc")
+          if not toc_path.is_file():
+              raise SystemExit(f"missing {toc_path}")
+          _name, entries = ast.literal_eval(toc_path.read_text())
+          names = {entry[0] for entry in entries}
+          missing = [
+              module
+              for module in (
+                  "raptor.app.application",
+                  "raptor.state.session",
+              )
+              if module not in names
+          ]
+          if missing:
+              raise SystemExit(
+                  "frozen bundle is missing " + ", ".join(missing)
+              )
+          PY
           set +e
           ./dist/raptor/raptor --status
           status=$?
