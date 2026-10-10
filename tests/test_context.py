@@ -1,5 +1,6 @@
 """Active context and checkpoint compaction tests."""
 import copy
+import json
 import os
 import sys
 import tempfile
@@ -1184,6 +1185,511 @@ class EnsureUnderBudgetTests(unittest.IsolatedAsyncioTestCase):
                 reason="threshold",
                 max_passes=2,
             )
+
+
+class RecentTailTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        ContextTests.setUp(self)
+
+    def _user(self, text: str) -> dict:
+        return chat_store.append_item(
+            self.session_id,
+            {"role": "user", "content": text},
+            source="user",
+        )
+
+    def _assistant(self, text: str) -> dict:
+        return chat_store.append_item(
+            self.session_id,
+            {
+                "type": "message",
+                "content": [{"type": "output_text", "text": text}],
+            },
+            source="assistant",
+        )
+
+    def _call(self, call_id: str) -> dict:
+        return chat_store.append_item(
+            self.session_id,
+            {
+                "type": "function_call",
+                "name": "shell",
+                "call_id": call_id,
+                "arguments": "{}",
+            },
+            source="assistant",
+        )
+
+    def _result(self, call_id: str, output: str) -> dict:
+        return chat_store.append_item(
+            self.session_id,
+            {
+                "type": "function_call_output",
+                "call_id": call_id,
+                "output": output,
+            },
+            source="tool",
+        )
+
+    def _texts(self, items: list[dict]) -> list[str]:
+        found: list[str] = []
+        for item in items:
+            content = item.get("content")
+            if isinstance(content, str):
+                found.append(content)
+            elif isinstance(content, list):
+                found.extend(
+                    str(part.get("text") or "")
+                    for part in content
+                    if isinstance(part, dict)
+                )
+        return found
+
+    async def _compact(self, budget: int, **kwargs) -> bool:
+        async def create(_items, _instructions):
+            return {
+                "output": [
+                    {
+                        "type": "message",
+                        "content": [
+                            {"type": "output_text", "text": "summary"}
+                        ],
+                    }
+                ]
+            }
+        with patch.object(context, "COMPACT_KEEP_RECENT_TOKENS", budget):
+            return await context.compact_session(
+                self.session_id,
+                estimate_compaction_request=lambda *_args: 10,
+                create_compaction_response=create,
+                **kwargs,
+            )
+
+    def _tail(self, active: list[dict]) -> list[dict]:
+        for index, item in enumerate(active):
+            content = str(item.get("content") or "")
+            if content.startswith("Raptor conversation checkpoint "):
+                return active[index + 1:]
+        return active
+
+    async def test_newest_groups_stay_chronological(self) -> None:
+        self._user("user-0")
+        self._assistant("assistant-0")
+        self._user("user-1")
+        newest_user = {"role": "user", "content": "user-1"}
+        newest_assistant = {
+            "type": "message",
+            "content": [{"type": "output_text", "text": "assistant-1"}],
+        }
+        self._assistant("assistant-1")
+        budget = (
+            context.estimate_tokens(newest_user)
+            + context.estimate_tokens(newest_assistant)
+        )
+        self.assertTrue(await self._compact(budget))
+        active = context.build_active_context(self.session_id)
+        self.assertEqual(active[0]["content"], "user-0")
+        self.assertEqual(
+            self._texts(self._tail(active)),
+            ["user-1", "assistant-1"],
+        )
+        checkpoint = chat_store.latest_checkpoint(self.session_id)
+        self.assertNotIn("assistant_anchor", checkpoint)
+        self.assertNotIn("assistant_reply", checkpoint)
+        self.assertNotIn("tail", checkpoint)
+
+    async def test_boundary_message_stays_exact_in_the_archive(self) -> None:
+        from raptor.model.model_providers import ModelTarget
+        from raptor.state import session
+        from raptor.tools import chat_history_tool
+        previous_target = session._default_model_target
+        previous_chat = copy.deepcopy(
+            session.CHAT_DEFAULT_STATE.get("model_target")
+        )
+        previous_default = copy.deepcopy(
+            session.DEFAULT_STATE.get("model_target")
+        )
+
+        def restore_target() -> None:
+            session._default_model_target = previous_target
+            session.CHAT_DEFAULT_STATE["model_target"] = previous_chat
+            session.DEFAULT_STATE["model_target"] = previous_default
+
+        self.addCleanup(restore_target)
+        target = ModelTarget("local", "test-model")
+        session.set_default_model_target(target)
+        with session.bound_chat("telegram:tail"):
+            runtime = session.current_runtime()
+            self.session_id = str(runtime.state["current_session_id"])
+            huge = (
+                "USER_START " + ("u" * 1800) + "USER_MIDDLE"
+                + ("u" * 1800) + " USER_END"
+            )
+            self._user("anchor-me")
+            self._user(huge)
+            assistant = {
+                "type": "message",
+                "content": [{"type": "output_text", "text": "small-note"}],
+            }
+            self._assistant("small-note")
+            later = {"role": "user", "content": "drop-turn"}
+            self._user("drop-turn")
+            budget = (
+                context.estimate_tokens(later)
+                + context.estimate_tokens(assistant)
+                + 80
+            )
+            self.assertTrue(await self._compact(budget))
+            active = json.dumps(
+                context.build_active_context(self.session_id)
+            )
+            self.assertIn("tokens truncated", active)
+            self.assertIn("USER_START", active)
+            self.assertIn("USER_END", active)
+            self.assertNotIn("USER_MIDDLE", active)
+            self.assertIn("anchor-me", active)
+            archived = [
+                event["item"] for event in chat_store.item_events(self.session_id)
+            ]
+            self.assertIn(huge, json.dumps(archived))
+            found = chat_history_tool(
+                {
+                    "action": "search",
+                    "query": "USER_MIDDLE",
+                    "session_id": self.session_id,
+                },
+                execution_context={"session_id": self.session_id},
+            )
+            self.assertTrue(found["ok"])
+            self.assertGreaterEqual(len(found["hits"]), 1)
+            forked, _copied = chat_store.fork_session_before_last_user_turns(
+                self.session_id,
+                turns=1,
+                chat_key=runtime.key,
+                model_target=target.to_dict(),
+            )
+            forked_items = [
+                event["item"] for event in chat_store.item_events(forked)
+            ]
+            self.assertIn(huge, json.dumps(forked_items))
+            self.assertNotIn("tokens truncated", json.dumps(forked_items))
+            forked_active = json.dumps(context.build_active_context(forked))
+            self.assertIn("USER_MIDDLE", forked_active)
+            self.assertNotIn("drop-turn", forked_active)
+            checkpoint = chat_store.latest_checkpoint(self.session_id)
+            self.assertIn("tail", checkpoint)
+            self.assertNotIn("assistant_anchor", checkpoint)
+
+    async def test_interleaved_tool_groups_stay_whole(self) -> None:
+        self._user("old-request " + ("o" * 500))
+        self._call("alpha")
+        self._call("beta")
+        self._result("alpha", "alpha-out")
+        self._result("beta", "beta-out")
+        keep = {"role": "user", "content": "keep-me"}
+        self._user("keep-me")
+        tool_cost = sum(
+            context.estimate_tokens(event["item"])
+            for event in chat_store.item_events(self.session_id)[1:5]
+        )
+        budget = context.estimate_tokens(keep) + tool_cost
+        self.assertTrue(await self._compact(budget))
+        tail = self._tail(context.build_active_context(self.session_id))
+        self.assertEqual(
+            [item.get("call_id") for item in tail if item.get("call_id")],
+            ["alpha", "beta", "alpha", "beta"],
+        )
+        self.assertEqual(tail[-1]["content"], "keep-me")
+        self.assertNotIn("old-request", json.dumps(tail))
+        calls = [
+            item.get("type") for item in tail
+            if str(item.get("type") or "").startswith("function_")
+        ]
+        self.assertEqual(calls.count("function_call"), 2)
+        self.assertEqual(calls.count("function_call_output"), 2)
+
+    async def test_oversized_tool_group_is_dropped_whole(self) -> None:
+        self._call("alpha")
+        self._call("beta")
+        self._result("beta", "beta-out")
+        self._result("alpha", "alpha-out")
+        keep = {"role": "user", "content": "keep-me"}
+        self._user("keep-me")
+        self.assertTrue(await self._compact(context.estimate_tokens(keep)))
+        tail = self._tail(context.build_active_context(self.session_id))
+        self.assertEqual([item.get("content") for item in tail], ["keep-me"])
+        archived = json.dumps(
+            [event["item"] for event in chat_store.item_events(self.session_id)]
+        )
+        self.assertIn("alpha-out", archived)
+        self.assertIn("beta-out", archived)
+
+    async def test_manual_and_forced_compaction_keep_no_tail(self) -> None:
+        self._user("old-bulk " + ("b" * 800))
+        self._user("manual-user")
+        self._assistant("manual-note")
+        self._call("keep")
+        self._result("keep", "KEEP_ME")
+        keep_user = {"role": "user", "content": "manual-user"}
+        note = {
+            "type": "message",
+            "content": [{"type": "output_text", "text": "manual-note"}],
+        }
+        call = {
+            "type": "function_call",
+            "name": "shell",
+            "call_id": "keep",
+            "arguments": "{}",
+        }
+        result = {
+            "type": "function_call_output",
+            "call_id": "keep",
+            "output": "KEEP_ME",
+        }
+        budget = (
+            context.estimate_tokens(keep_user)
+            + context.estimate_tokens(note)
+            + context.estimate_tokens(call)
+            + context.estimate_tokens(result)
+        )
+        self.assertTrue(await self._compact(budget))
+        self.assertIn(
+            "KEEP_ME",
+            json.dumps(self._tail(
+                context.build_active_context(self.session_id)
+            )),
+        )
+        self.assertTrue(await self._compact(budget, force=True, reason="overflow"))
+        self.assertEqual(
+            self._tail(context.build_active_context(self.session_id)),
+            [],
+        )
+        self._user("after")
+        self.assertTrue(
+            await self._compact(20_000, force=True, reason="manual")
+        )
+        checkpoint = chat_store.latest_checkpoint(self.session_id)
+        self.assertEqual(checkpoint["reason"], "manual")
+        self.assertNotIn("tail", checkpoint)
+        self.assertNotIn(
+            "after",
+            json.dumps(self._tail(
+                context.build_active_context(self.session_id)
+            )),
+        )
+        self.assertIn("manual-user", json.dumps(
+            context.build_active_context(self.session_id)
+        ))
+
+    async def test_summary_prefix_does_not_split_tool_groups(self) -> None:
+        self._call("first")
+        self._result("first", "first-out")
+        self._call("second")
+        self._result("second", "second-out")
+        self._user("later-user")
+
+        def estimate(items, _instructions):
+            text = items[0]["content"]
+            if text.count("FUNCTION_CALL") > 1 or "later-user" in text:
+                return 10_000
+            return 10
+
+        async def create(items, _instructions):
+            return {
+                "output": [
+                    {
+                        "type": "message",
+                        "content": [
+                            {"type": "output_text", "text": "summary"}
+                        ],
+                    }
+                ]
+            }
+
+        with patch.object(context, "COMPACT_KEEP_RECENT_TOKENS", 0):
+            self.assertTrue(
+                await context.compact_session(
+                    self.session_id,
+                    estimate_compaction_request=estimate,
+                    create_compaction_response=create,
+                    reason="overflow",
+                    force=True,
+                )
+            )
+        tail = self._tail(context.build_active_context(self.session_id))
+        ids = [item.get("call_id") for item in tail if item.get("call_id")]
+        self.assertEqual(ids, ["second", "second"])
+        self.assertEqual(tail[-1]["content"], "later-user")
+        self.assertNotIn("first-out", json.dumps(tail))
+
+    def _tool_ids(self, items: list[dict]) -> tuple[list[str], list[str]]:
+        calls: list[str] = []
+        outputs: list[str] = []
+        for item in items:
+            call_id = str(item.get("call_id") or "")
+            if item.get("type") == "function_call" and call_id:
+                calls.append(call_id)
+            elif item.get("type") == "function_call_output" and call_id:
+                outputs.append(call_id)
+        return calls, outputs
+
+    async def test_incomplete_tool_fragments_are_summarized(self) -> None:
+        rendered: list[str] = []
+        self._result("ghost", "ghost-only")
+        self._call("orphan")
+        self._call("paired")
+        self._result("paired", "paired-out")
+        keep = {"role": "user", "content": "keep-me"}
+        self._user("keep-me")
+        stored = chat_store.item_events(self.session_id)
+        pair_cost = (
+            context.estimate_tokens(stored[2]["item"])
+            + context.estimate_tokens(stored[3]["item"])
+        )
+        budget = context.estimate_tokens(keep) + pair_cost
+
+        async def create(items, _instructions):
+            rendered.append(items[0]["content"])
+            return {
+                "output": [
+                    {
+                        "type": "message",
+                        "content": [
+                            {"type": "output_text", "text": "summary"}
+                        ],
+                    }
+                ]
+            }
+
+        with patch.object(context, "COMPACT_KEEP_RECENT_TOKENS", budget):
+            self.assertTrue(
+                await context.compact_session(
+                    self.session_id,
+                    estimate_compaction_request=lambda *_args: 10,
+                    create_compaction_response=create,
+                    reason="threshold",
+                )
+            )
+        active = context.build_active_context(self.session_id)
+        calls, outputs = self._tool_ids(active)
+        self.assertEqual(calls, ["paired"])
+        self.assertEqual(outputs, ["paired"])
+        self.assertNotIn("orphan", json.dumps(self._tail(active)))
+        self.assertNotIn("ghost-only", json.dumps(self._tail(active)))
+        self.assertIn("call_id=orphan", rendered[0])
+        self.assertIn("ghost-only", rendered[0])
+        archived = json.dumps(
+            [event["item"] for event in chat_store.item_events(self.session_id)]
+        )
+        self.assertIn("orphan", archived)
+        progress = chat_store.create_session(
+            model_target=TEST_MODEL_TARGET,
+            kind="main",
+            chat_key="local",
+        )
+        chat_store.append_item(
+            progress,
+            {
+                "type": "function_call",
+                "name": "shell",
+                "call_id": "solo",
+                "arguments": "{}",
+            },
+            source="assistant",
+        )
+
+        async def create_progress(items, _instructions):
+            rendered.append(items[0]["content"])
+            return {
+                "output": [
+                    {
+                        "type": "message",
+                        "content": [
+                            {"type": "output_text", "text": "summary"}
+                        ],
+                    }
+                ]
+            }
+
+        with patch.object(context, "COMPACT_KEEP_RECENT_TOKENS", 20_000):
+            self.assertTrue(
+                await context.compact_session(
+                    progress,
+                    estimate_compaction_request=lambda *_args: 100_000,
+                    create_compaction_response=create_progress,
+                    reason="threshold",
+                )
+            )
+        progress_active = context.build_active_context(progress)
+        progress_calls, progress_outputs = self._tool_ids(progress_active)
+        self.assertEqual(progress_calls, [])
+        self.assertEqual(progress_outputs, [])
+        self.assertIn("call_id=solo", rendered[-1])
+
+    async def test_multipart_boundary_keeps_fitting_parts(self) -> None:
+        image = {
+            "type": "input_image",
+            "image_url": "data:image/png;base64,QQ==",
+            "detail": "low",
+        }
+        first = {
+            "type": "output_text",
+            "text": "PART_A",
+            "annotations": [{"type": "file_citation"}],
+        }
+        second_text = (
+            "PART_B_START " + ("b" * 1800) + "PART_B_MIDDLE"
+            + ("b" * 1800) + " PART_B_END"
+        )
+        message = {
+            "type": "message",
+            "role": "assistant",
+            "content": [first, image, {"type": "output_text", "text": second_text}],
+        }
+        self._user("older-anchor")
+        chat_store.append_item(self.session_id, message, source="assistant")
+        later = {"role": "user", "content": "later-user"}
+        self._user("later-user")
+        prefix = {
+            "type": "message",
+            "role": "assistant",
+            "content": [first, image],
+        }
+        budget = (
+            context.estimate_tokens(later)
+            + context.estimate_tokens(prefix)
+            + 100
+        )
+        self.assertLess(
+            budget,
+            context.estimate_tokens(later) + context.estimate_tokens(message),
+        )
+        self.assertTrue(await self._compact(budget))
+        active = context.build_active_context(self.session_id)
+        tail = self._tail(active)
+        bounded = next(item for item in tail if item.get("type") == "message")
+        parts = bounded["content"]
+        self.assertEqual(
+            [part.get("type") for part in parts],
+            ["output_text", "input_image", "output_text"],
+        )
+        self.assertEqual(parts[0]["text"], "PART_A")
+        self.assertEqual(parts[0]["annotations"], [{"type": "file_citation"}])
+        self.assertEqual(parts[1]["detail"], "low")
+        self.assertEqual(parts[1]["image_url"], image["image_url"])
+        self.assertIn("PART_B_START", parts[2]["text"])
+        self.assertIn("PART_B_END", parts[2]["text"])
+        self.assertIn("tokens truncated", parts[2]["text"])
+        self.assertNotIn("PART_B_MIDDLE", parts[2]["text"])
+        self.assertLessEqual(
+            sum(context.estimate_tokens(item) for item in tail),
+            budget,
+        )
+        archived = [
+            event["item"] for event in chat_store.item_events(self.session_id)
+        ]
+        self.assertIn(second_text, json.dumps(archived))
+        self.assertNotIn("tokens truncated", json.dumps(archived))
 
 
 if __name__ == "__main__":

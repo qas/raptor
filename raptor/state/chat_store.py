@@ -335,6 +335,7 @@ def append_checkpoint(
     input_to_seq: int | None = None,
     reason: str | None = None,
     anchors: list[dict[str, Any]] | None = None,
+    tail: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     event: dict[str, Any] = {
         "type": "checkpoint",
@@ -349,6 +350,15 @@ def append_checkpoint(
         event["reason"] = reason
     if anchors:
         event["anchors"] = anchors
+    if (
+        isinstance(tail, dict)
+        and isinstance(tail.get("item"), dict)
+        and int(tail.get("seq") or 0) > 0
+    ):
+        event["tail"] = {
+            "seq": int(tail["seq"]),
+            "item": copy.deepcopy(tail["item"]),
+        }
     return append_event(session_id, event)
 
 

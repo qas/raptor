@@ -115,6 +115,21 @@ def _checkpoint_anchors(
     ]
 
 
+def _checkpoint_bounded_tail(
+    checkpoint: dict[str, Any] | None,
+) -> tuple[int, dict[str, Any]] | None:
+    """Return the visible copy of the oldest truncated tail message."""
+    if not checkpoint:
+        return None
+    tail = checkpoint.get("tail")
+    if not isinstance(tail, dict) or not isinstance(tail.get("item"), dict):
+        return None
+    seq = int(tail.get("seq") or 0)
+    if seq <= 0:
+        return None
+    return seq, tail["item"]
+
+
 def _anchor_input_items(
     anchors: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
@@ -150,6 +165,7 @@ def build_active_context(
             if isinstance(event.get("item"), dict)
         ]
     through_seq = int(checkpoint.get("through_seq") or 0)
+    bounded = _checkpoint_bounded_tail(checkpoint)
     active = _anchor_input_items(_checkpoint_anchors(checkpoint))
     active.append(
         checkpoint_summary_item(str(checkpoint.get("summary") or ""))
@@ -159,6 +175,8 @@ def build_active_context(
         if seq <= through_seq:
             continue
         item = event.get("item")
+        if bounded is not None and seq == bounded[0]:
+            item = bounded[1]
         if isinstance(item, dict):
             active.append(_chronological_input_item(item))
     return active
@@ -187,10 +205,6 @@ def _is_user_anchor_event(event: dict[str, Any]) -> bool:
         or content == CHECKPOINT_CONTINUATION_INPUT["content"]
         or content.startswith("Continue working toward the active persistent goal.")
     )
-
-
-def _estimate_item_tokens(item: dict[str, Any]) -> int:
-    return estimate_tokens(item)
 
 
 _ANCHOR_TRUNCATION_MARKER = (
@@ -272,34 +286,256 @@ def _select_user_anchors(
     return selected
 
 
-def _choose_retain_start_index(
-    candidates: list[dict[str, Any]],
-    keep_recent_tokens: int,
-) -> int:
-    """Return index into candidates where retained native tail begins."""
-    if not candidates:
-        return 0
-    if keep_recent_tokens <= 0:
-        return len(candidates)
-    total = 0
-    retain_idx = len(candidates)
-    for idx in range(len(candidates) - 1, -1, -1):
-        item = candidates[idx].get("item")
-        if not isinstance(item, dict):
+_TOOL_ITEM_TYPES = {"function_call", "function_call_output"}
+
+
+def _complete_tool_spans(
+    events: list[dict[str, Any]],
+) -> list[tuple[int, int]]:
+    """Spans that contain both a call and a result for every included id."""
+    calls: dict[str, list[int]] = {}
+    outputs: dict[str, list[int]] = {}
+    for index, event in enumerate(events):
+        item = event.get("item")
+        if not isinstance(item, dict) or item.get("type") not in _TOOL_ITEM_TYPES:
             continue
-        total += _estimate_item_tokens(item)
-        retain_idx = idx
-        if total >= keep_recent_tokens:
+        call_id = str(item.get("call_id") or "")
+        if not call_id:
+            continue
+        bucket = calls if item.get("type") == "function_call" else outputs
+        bucket.setdefault(call_id, []).append(index)
+    spans: list[tuple[int, int]] = []
+    for call_id, call_indexes in calls.items():
+        result_indexes = outputs.get(call_id)
+        if not result_indexes:
+            continue
+        indexes = [*call_indexes, *result_indexes]
+        spans.append((min(indexes), max(indexes)))
+    spans.sort()
+    merged: list[tuple[int, int]] = []
+    for start, end in spans:
+        if merged and start <= merged[-1][1]:
+            previous = merged[-1]
+            merged[-1] = (previous[0], max(previous[1], end))
+        else:
+            merged.append((start, end))
+    return merged
+
+
+def _coherent_groups(
+    events: list[dict[str, Any]],
+) -> list[list[dict[str, Any]]]:
+    """Partition history so a complete call and its result stay together."""
+    groups: list[list[dict[str, Any]]] = []
+    cursor = 0
+    for start, end in _complete_tool_spans(events):
+        while cursor < start:
+            groups.append([events[cursor]])
+            cursor += 1
+        groups.append(events[start:end + 1])
+        cursor = end + 1
+    while cursor < len(events):
+        groups.append([events[cursor]])
+        cursor += 1
+    return groups
+
+
+def _group_is_retainable(group: list[dict[str, Any]]) -> bool:
+    """A native tool group needs a call and a result for every call id."""
+    calls: dict[str, int] = {}
+    outputs: dict[str, int] = {}
+    saw_tool = False
+    for event in group:
+        item = event.get("item")
+        if not isinstance(item, dict) or item.get("type") not in _TOOL_ITEM_TYPES:
+            continue
+        saw_tool = True
+        call_id = str(item.get("call_id") or "")
+        if not call_id:
+            return False
+        bucket = calls if item.get("type") == "function_call" else outputs
+        bucket[call_id] = bucket.get(call_id, 0) + 1
+    if not saw_tool:
+        return True
+    identities = set(calls) | set(outputs)
+    return all(
+        calls.get(call_id, 0) >= 1 and outputs.get(call_id, 0) >= 1
+        for call_id in identities
+    )
+
+
+def _group_cost(group: list[dict[str, Any]]) -> int:
+    total = 0
+    for event in group:
+        item = event.get("item")
+        if isinstance(item, dict):
+            total += estimate_tokens(item)
+    return total
+
+
+def _truncation_marker(removed: str) -> str:
+    count = max(1, estimate_tokens(removed) if removed else 1)
+    return f"…{count} tokens truncated…"
+
+
+def _fit_truncated_text(
+    text: str,
+    max_tokens: int,
+    build: Callable[[str], dict[str, Any]],
+) -> dict[str, Any] | None:
+    """Keep both ends of one message when the remaining tail budget is short."""
+    def _candidate(keep_chars: int) -> dict[str, Any]:
+        if keep_chars >= len(text):
+            return build(text)
+        prefix_chars = (keep_chars + 1) // 2
+        suffix_chars = keep_chars // 2
+        prefix = text[:prefix_chars]
+        suffix = text[-suffix_chars:] if suffix_chars else ""
+        removed = text[len(prefix):len(text) - len(suffix)]
+        return build(prefix + _truncation_marker(removed) + suffix)
+    if estimate_tokens(_candidate(0)) > max_tokens:
+        return None
+    low = 0
+    high = len(text)
+    best = _candidate(0)
+    while low <= high:
+        keep_chars = (low + high) // 2
+        bounded = _candidate(keep_chars)
+        if estimate_tokens(bounded) <= max_tokens:
+            best = bounded
+            low = keep_chars + 1
+        else:
+            high = keep_chars - 1
+    if estimate_tokens(best) > max_tokens or best == build(text):
+        return None
+    return best
+
+
+def _is_text_part(part: Any) -> bool:
+    if isinstance(part, str):
+        return True
+    return isinstance(part, dict) and isinstance(part.get("text"), str)
+
+
+def _part_text(part: Any) -> str:
+    if isinstance(part, str):
+        return part
+    return str(part.get("text") or "")
+
+
+def _part_with_text(part: Any, text: str) -> Any:
+    if isinstance(part, str):
+        return text
+    cloned = copy.deepcopy(part)
+    cloned["text"] = text
+    return cloned
+
+
+def _item_with_content(item: dict[str, Any], content: Any) -> dict[str, Any]:
+    cloned = copy.deepcopy(item)
+    cloned["content"] = content
+    return cloned
+
+
+def _truncate_content_parts(
+    item: dict[str, Any],
+    parts: list[Any],
+    budget: int,
+) -> dict[str, Any] | None:
+    """Middle-truncate the overflowing text part and keep parts that fit."""
+    if not any(_is_text_part(part) for part in parts):
+        return None
+    kept: list[Any] = []
+    for index, part in enumerate(parts):
+        if not _is_text_part(part):
+            trial = _item_with_content(item, [*kept, copy.deepcopy(part)])
+            if estimate_tokens(trial) <= budget:
+                kept.append(copy.deepcopy(part))
+            continue
+        text = _part_text(part)
+        full_part = _part_with_text(part, text)
+        full = _item_with_content(item, [*kept, full_part])
+        if estimate_tokens(full) <= budget:
+            kept.append(full_part)
+            continue
+        snapshot = list(kept)
+        def _build(truncated: str) -> dict[str, Any]:
+            return _item_with_content(
+                item,
+                [*snapshot, _part_with_text(part, truncated)],
+            )
+        bounded = _fit_truncated_text(text, budget, _build)
+        if bounded is None:
             break
-    while retain_idx > 0 and not _is_user_item_event(
-        candidates[retain_idx]
-    ):
-        retain_idx -= 1
-    if retain_idx < len(candidates) and not _is_user_item_event(
-        candidates[retain_idx]
-    ):
-        return len(candidates)
-    return retain_idx
+        content = bounded.get("content")
+        if not isinstance(content, list) or not content:
+            break
+        kept.append(content[-1])
+        for later in parts[index + 1:]:
+            if _is_text_part(later):
+                continue
+            trial = _item_with_content(item, [*kept, copy.deepcopy(later)])
+            if estimate_tokens(trial) <= budget:
+                kept.append(copy.deepcopy(later))
+        break
+    if not kept:
+        return None
+    result = _item_with_content(item, kept)
+    if estimate_tokens(result) > budget or result == item:
+        return None
+    return result
+
+
+def _truncate_textual_group(
+    group: list[dict[str, Any]],
+    budget: int,
+) -> tuple[int, dict[str, Any]] | None:
+    """Middle-truncate one textual message. Tool groups stay whole."""
+    if budget <= 0 or len(group) != 1:
+        return None
+    event = group[0]
+    item = event.get("item")
+    if not isinstance(item, dict) or item.get("type") in _TOOL_ITEM_TYPES:
+        return None
+    content = item.get("content")
+    bounded: dict[str, Any] | None = None
+    if isinstance(content, str):
+        def _build_string(text: str) -> dict[str, Any]:
+            return _item_with_content(item, text)
+        bounded = _fit_truncated_text(content, budget, _build_string)
+    elif isinstance(content, list):
+        bounded = _truncate_content_parts(item, content, budget)
+    if bounded is None:
+        return None
+    return int(event.get("seq") or 0), bounded
+
+
+def _select_recent_tail(
+    events: list[dict[str, Any]],
+    budget: int,
+) -> tuple[list[dict[str, Any]], tuple[int, dict[str, Any]] | None]:
+    """Walk coherent groups newest-first, then return them chronologically."""
+    if budget <= 0 or not events:
+        return [], None
+    remaining = budget
+    chosen: list[list[dict[str, Any]]] = []
+    bounded: tuple[int, dict[str, Any]] | None = None
+    for group in reversed(_coherent_groups(events)):
+        if remaining <= 0 or not _group_is_retainable(group):
+            break
+        cost = _group_cost(group)
+        if cost <= remaining:
+            chosen.append(group)
+            remaining -= cost
+            continue
+        truncated = _truncate_textual_group(group, remaining)
+        if truncated is not None:
+            chosen.append(group)
+            bounded = truncated
+        break
+    chosen.reverse()
+    retained = [event for group in chosen for event in group]
+    return retained, bounded
 
 
 def _compaction_user_input(rendered: str) -> list[dict[str, Any]]:
@@ -415,12 +651,23 @@ def _fit_checkpoint_to_active_budget(
     summary = str(checkpoint.get("summary") or "")
     anchors = _checkpoint_anchors(checkpoint)
     through_seq = int(checkpoint.get("through_seq") or 0)
-    tail = [
-        _chronological_input_item(event["item"])
-        for event in projection.items
-        if int(event.get("seq") or 0) > through_seq
-        and isinstance(event.get("item"), dict)
-    ]
+    bounded = _checkpoint_bounded_tail(checkpoint)
+    stored_tail = checkpoint.get("tail")
+    tail_record = (
+        copy.deepcopy(stored_tail)
+        if isinstance(stored_tail, dict)
+        else None
+    )
+    tail = []
+    for event in projection.items:
+        seq = int(event.get("seq") or 0)
+        if seq <= through_seq:
+            continue
+        item = event.get("item")
+        if bounded is not None and seq == bounded[0]:
+            item = bounded[1]
+        if isinstance(item, dict):
+            tail.append(_chronological_input_item(item))
 
     def _work(
         candidate_summary: str,
@@ -476,6 +723,7 @@ def _fit_checkpoint_to_active_budget(
         input_to_seq=checkpoint.get("input_to_seq"),
         reason="budget_fit",
         anchors=fitted_anchors,
+        tail=tail_record,
     )
     append_meta(
         session_id,
@@ -498,27 +746,30 @@ def _fit_contiguous_records(
     estimate_fn: EstimateCompactionRequest,
     budget: int,
 ) -> list[dict[str, Any]]:
-    """Select the largest chronological prefix without skipping records."""
+    """Select the largest chronological prefix of coherent groups."""
     selected: list[dict[str, Any]] = []
     start = 0
     if preserve_checkpoint is not None:
         selected.append(preserve_checkpoint)
         start = 1
-    for record in records[start:]:
-        candidate = [*selected, record]
+    groups = _coherent_groups(records[start:])
+    chosen: list[dict[str, Any]] = []
+    for group in groups:
+        candidate = [*records[:start], *chosen, *group]
         rendered = render_compaction_records(candidate)
         if estimate_fn(
             _compaction_user_input(rendered),
             COMPACTION_INSTRUCTIONS,
         ) <= budget:
-            selected = candidate
+            chosen.extend(group)
             continue
         break
-    # Always make forward progress on at least one native record. Individual
-    # record rendering is bounded and the request path has a second, smaller
-    # rendering retry for tokenizer disagreement.
-    if len(selected) == start and len(records) > start:
-        selected.append(records[start])
+    if chosen:
+        return [*records[:start], *chosen]
+    # Always make forward progress on a whole tool group. Individual record
+    # rendering is bounded and the request path retries with a smaller view.
+    if groups:
+        return [*records[:start], *groups[0]]
     return selected
 
 
@@ -551,11 +802,15 @@ async def compact_session(
     if not candidates and not recompact_checkpoint:
         return False
     keep_recent = 0 if force else COMPACT_KEEP_RECENT_TOKENS
-    retain_idx = _choose_retain_start_index(
-        candidates,
-        keep_recent,
-    )
-    retired = candidates[:retain_idx]
+    retained, bounded_tail = _select_recent_tail(candidates, keep_recent)
+    retained_seqs = {
+        int(event.get("seq") or 0) for event in retained
+    }
+    retired = [
+        event
+        for event in candidates
+        if int(event.get("seq") or 0) not in retained_seqs
+    ]
     if not retired and not recompact_checkpoint:
         return False
     records: list[dict[str, Any]] = []
@@ -669,9 +924,13 @@ async def compact_session(
         except ContextLengthError:
             prefix_n = 1 if preserve and selected[0] is preserve else 0
             native = selected[prefix_n:]
-            if len(native) > 1:
-                keep_n = max(1, len(native) // 2)
-                selected = selected[:prefix_n] + native[:keep_n]
+            groups = _coherent_groups(native)
+            if len(groups) > 1:
+                keep_groups = max(1, len(groups) // 2)
+                chosen: list[dict[str, Any]] = []
+                for group in groups[:keep_groups]:
+                    chosen.extend(group)
+                selected = selected[:prefix_n] + chosen
                 continue
             current_limit = (
                 COMPACTION_MAX_RECORD_CHARS
@@ -708,6 +967,9 @@ async def compact_session(
         through_seq=through,
         max_tokens=COMPACTION_USER_ANCHOR_TOKENS,
     )
+    tail = None
+    if bounded_tail is not None and bounded_tail[0] > through:
+        tail = {"seq": bounded_tail[0], "item": bounded_tail[1]}
     append_checkpoint(
         session_id,
         summary=summary,
@@ -716,6 +978,7 @@ async def compact_session(
         input_to_seq=max(item_seqs) if item_seqs else through,
         reason=reason,
         anchors=anchors,
+        tail=tail,
     )
     append_meta(
         session_id,

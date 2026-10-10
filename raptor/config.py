@@ -557,6 +557,8 @@ COMPACTION_REASONING_EFFORT = _env_string(
     allow_empty=True,
 ) or None
 
+# Newest coherent groups kept by normal compaction. Manual /compact keeps
+# none. User anchors use the separate COMPACTION_USER_ANCHOR_TOKENS budget.
 COMPACT_KEEP_RECENT_TOKENS = _env_int(
     "COMPACT_KEEP_RECENT_TOKENS",
     20_000,

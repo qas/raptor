@@ -360,10 +360,18 @@ operator decision.
 Raptor maintains three distinct layers:
 
 1. **Canonical transcript:** lossless append-only JSONL.
-2. **Active context:** the latest checkpoint, preserved user anchors, and the
-   native tail after the checkpoint boundary.
+2. **Active context:** preserved user anchors, the latest checkpoint, and the
+   recent tail still sent to the model.
 3. **Checkpoint:** a model-generated continuation summary that retires older
    items from the model window only.
+
+Normal compaction keeps the newest coherent records that fit in
+`COMPACT_KEEP_RECENT_TOKENS` (default 20,000). A function call and its result
+stay together, including interleaved parallel calls. If the oldest included
+message does not fully fit, Raptor keeps its beginning and end and marks the
+omitted tokens. That visible copy does not replace the archived message.
+`/compact` summarizes the whole active window and keeps no native tail. User
+anchors stay on `COMPACTION_USER_ANCHOR_TOKENS`.
 
 Compaction sends a plain rendered record set instead of incomplete native tool
 call fragments. If a completed compaction has no visible summary, Raptor
@@ -875,7 +883,7 @@ child retains that target for every continuation.
 |---|---:|---|
 | `CONTEXT_COMPACT_RATIO` | `0.82` | Proactive compaction ratio; must be 0.50–0.95 |
 | `CONTEXT_SAFETY_TOKENS` | `4096` | Tokens reserved below each window |
-| `COMPACT_KEEP_RECENT_TOKENS` | `20000` | Native tail retained by normal compaction |
+| `COMPACT_KEEP_RECENT_TOKENS` | `20000` | Newest coherent tail for normal compaction |
 | `COMPACTION_USER_ANCHOR_TOKENS` | `20000` | Original-user-request anchor budget |
 | `COMPACTION_MAX_RECORD_CHARS` | `12000` | Per-record compaction rendering cap; minimum 1024 |
 | `COMPACTION_OUTPUT_TOKENS` | `4000` | Durable checkpoint token cap; minimum 256 |

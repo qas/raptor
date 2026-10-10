@@ -1,6 +1,7 @@
 """Temporary conversation branch lifecycle tests."""
 import asyncio
 import copy
+import json
 import os
 import sys
 import tempfile
@@ -441,6 +442,59 @@ class ThreadTests(unittest.IsolatedAsyncioTestCase):
             ("answer", "$clear-thread", "Thread cleared.", False),
             self.provider.calls,
         )
+
+    async def test_merge_copies_exact_bounded_tail_text(self) -> None:
+        from raptor.agent import context
+        result = await start_thread("!room:example.org")
+        branch = str(result["thread"]["session_id"])
+        huge = (
+            "MERGE_START " + ("m" * 1800) + "MERGE_MIDDLE"
+            + ("m" * 1800) + " MERGE_END"
+        )
+        chat_store.append_item(
+            branch,
+            {
+                "type": "message",
+                "content": [{"type": "output_text", "text": huge}],
+            },
+            source="assistant",
+        )
+        small = {"role": "user", "content": "newest branch turn"}
+        chat_store.append_item(branch, small, source="user")
+        budget = context.estimate_tokens(small) + 120
+
+        async def create(_items, _instructions):
+            return {
+                "output": [
+                    {
+                        "type": "message",
+                        "content": [
+                            {"type": "output_text", "text": "summary"}
+                        ],
+                    }
+                ]
+            }
+
+        with patch.object(context, "COMPACT_KEEP_RECENT_TOKENS", budget):
+            compacted = await context.compact_session(
+                branch,
+                estimate_compaction_request=lambda *_args: 10,
+                create_compaction_response=create,
+                reason="threshold",
+            )
+        self.assertTrue(compacted)
+        visible = json.dumps(build_active_context(branch))
+        self.assertIn("tokens truncated", visible)
+        self.assertIn("MERGE_START", visible)
+        self.assertIn("MERGE_END", visible)
+        self.assertNotIn("MERGE_MIDDLE", visible)
+        merged = await finish_thread("!room:example.org", merge=True)
+        self.assertTrue(merged["ok"])
+        archived = json.dumps(
+            [event.get("item") for event in chat_store.item_events(self.parent)]
+        )
+        self.assertIn("MERGE_MIDDLE", archived)
+        self.assertNotIn("tokens truncated", archived)
 
 
 if __name__ == "__main__":
