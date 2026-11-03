@@ -322,6 +322,10 @@ subagents, and shells without disturbing other chats.
 Managed shells run beneath a supervisor-owned process group. Cancellation,
 timeout, normal command exit, and daemon loss all terminate remaining child
 processes; a command cannot start until its exact audit event is recorded.
+The shell command reaches the supervisor on a file descriptor, so the
+supervisor command line does not contain it. Before returning, including
+after SIGTERM, the supervisor removes exact deny-read placeholders created
+for a missing path.
 
 Request-only chat providers never discard an out-of-band completion. The
 inbound Responses adapter retains it in the conversation's bounded

@@ -16,6 +16,7 @@ SUPERVISOR_MODE = "_shell-supervisor"
 _POLL_SECONDS = 0.05
 _TERMINATION_GRACE_SECONDS = 1.0
 _MAX_POLICY_BYTES = 256 * 1024
+_MAX_COMMAND_BYTES = 256 * 1024
 
 
 def _signal_group(pgid: int, sig: signal.Signals) -> None:
@@ -36,15 +37,31 @@ def _terminate_group(pid: int, leader_exited: Callable[[], bool]) -> int:
     return status
 
 
-def _await_start(liveness_fd: int, start_fd: int) -> bool:
-    while True:
-        readable, _, _ = select.select(
-            [liveness_fd, start_fd], [], [], _POLL_SECONDS
-        )
+def _await_start(
+    liveness_fd: int,
+    start_fd: int,
+    stopped: Callable[[], bool],
+) -> bool:
+    while not stopped():
+        try:
+            readable, _, _ = select.select(
+                [liveness_fd, start_fd], [], [], _POLL_SECONDS
+            )
+        except InterruptedError:
+            continue
         if liveness_fd in readable and not os.read(liveness_fd, 1):
             return False
         if start_fd in readable:
             return os.read(start_fd, 1) == b"1"
+    return False
+
+
+def _read_command(command_fd: int) -> str:
+    with os.fdopen(command_fd, "rb") as command_file:
+        encoded = command_file.read(_MAX_COMMAND_BYTES + 1)
+    if len(encoded) > _MAX_COMMAND_BYTES:
+        raise ValueError("shell command exceeds size limit")
+    return encoded.decode("utf-8")
 
 
 def _run(
@@ -54,9 +71,20 @@ def _run(
     start_fd: int,
     ready_fd: int,
 ) -> int:
-    if not _await_start(liveness_fd, start_fd):
+    # The default SIGTERM action skips finally and leaves mode-000 deny-read
+    # placeholders in the workspace. Exit only through the cleanup paths below.
+    stop = False
+
+    def request_stop(_signum: int, _frame: object) -> None:
+        nonlocal stop
+        stop = True
+
+    signal.signal(signal.SIGTERM, request_stop)
+    if not _await_start(liveness_fd, start_fd, lambda: stop):
         return 128 + signal.SIGTERM
     os.close(start_fd)
+    if stop:
+        return 128 + signal.SIGTERM
     try:
         with os.fdopen(policy_fd, "rb") as policy_file:
             encoded_policy = policy_file.read(_MAX_POLICY_BYTES + 1)
@@ -65,9 +93,12 @@ def _run(
         policy_payload = encoded_policy.decode("utf-8")
         policy = FileAccessPolicy.from_supervisor_payload(policy_payload)
         launch = build_shell_sandbox_launch(command, policy)
-    except (OSError, RuntimeError, ValueError) as exc:
+    except (OSError, RuntimeError, UnicodeError, ValueError) as exc:
         print(f"raptor sandbox: {exc}", file=sys.stderr)
         return 126
+    if stop:
+        launch.cleanup()
+        return 128 + signal.SIGTERM
     child_exited = False
 
     def record_child_exit(_signum: int, _frame: object) -> None:
@@ -81,6 +112,8 @@ def _run(
         launch.cleanup()
         raise
     if pid == 0:
+        signal.signal(signal.SIGTERM, signal.SIG_DFL)
+        signal.signal(signal.SIGCHLD, signal.SIG_DFL)
         os.setpgid(0, 0)
         os.close(liveness_fd)
         os.close(ready_fd)
@@ -108,15 +141,18 @@ def _run(
     try:
         signal.signal(signal.SIGINT, forward_interrupt)
         parent_lost = False
-        while not child_exited:
-            readable, _, _ = select.select(
-                [liveness_fd], [], [], _POLL_SECONDS
-            )
+        while not child_exited and not stop:
+            try:
+                readable, _, _ = select.select(
+                    [liveness_fd], [], [], _POLL_SECONDS
+                )
+            except InterruptedError:
+                continue
             if readable and not os.read(liveness_fd, 1):
                 parent_lost = True
                 break
         status = _terminate_group(pid, lambda: child_exited)
-        if parent_lost:
+        if parent_lost or stop:
             return 128 + signal.SIGTERM
         return os.waitstatus_to_exitcode(status)
     finally:
@@ -131,8 +167,13 @@ def main(argv: list[str] | None = None) -> int:
     start_fd = int(args[2])
     policy_fd = int(args[3])
     ready_fd = int(args[4])
-    command = args[5]
+    command_fd = int(args[5])
     try:
+        try:
+            command = _read_command(command_fd)
+        except (OSError, UnicodeError, ValueError) as exc:
+            print(f"raptor sandbox: {exc}", file=sys.stderr)
+            return 126
         return _run(command, policy_fd, liveness_fd, start_fd, ready_fd)
     finally:
         os.close(liveness_fd)

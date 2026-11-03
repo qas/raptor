@@ -605,6 +605,7 @@ async def run_shell(
     ready_read_fd: int | None = None
     ready_write_fd: int | None = None
     policy_file = None
+    command_file = None
     try:
         policy_file = tempfile.TemporaryFile(mode="w+b")
         policy_file.write(
@@ -613,6 +614,11 @@ async def run_shell(
         policy_file.flush()
         policy_file.seek(0)
         policy_fd = policy_file.fileno()
+        command_file = tempfile.TemporaryFile(mode="w+b")
+        command_file.write(command.encode("utf-8"))
+        command_file.flush()
+        command_file.seek(0)
+        command_fd = command_file.fileno()
         liveness_read_fd, liveness_write_fd = os.pipe()
         start_read_fd, start_write_fd = os.pipe()
         ready_read_fd, ready_write_fd = os.pipe()
@@ -631,7 +637,7 @@ async def run_shell(
                         str(start_read_fd),
                         str(policy_fd),
                         str(ready_write_fd),
-                        command,
+                        str(command_fd),
                         cwd=str(AGENT_WORKDIR),
                         stdin=slave_fd,
                         stdout=slave_fd,
@@ -643,6 +649,7 @@ async def run_shell(
                             start_read_fd,
                             policy_fd,
                             ready_write_fd,
+                            command_fd,
                         ),
                     )
                 except BaseException:
@@ -674,7 +681,7 @@ async def run_shell(
                 str(start_read_fd),
                 str(policy_fd),
                 str(ready_write_fd),
-                command,
+                str(command_fd),
                 cwd=str(AGENT_WORKDIR),
                 stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE,
@@ -685,6 +692,7 @@ async def run_shell(
                     start_read_fd,
                     policy_fd,
                     ready_write_fd,
+                    command_fd,
                 ),
             )
             stdout_stream = process.stdout
@@ -706,6 +714,8 @@ async def run_shell(
             os.close(ready_write_fd)
         if policy_file is not None:
             policy_file.close()
+        if command_file is not None:
+            command_file.close()
         _spawning_sessions -= 1
     shell_session = ShellSession(
         id=_new_session_id(),

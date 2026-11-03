@@ -478,7 +478,7 @@ finally:
                     "4",
                     "policy",
                     "5",
-                    "true",
+                    "8",
                 ],
             ),
             patch.object(entrypoint, "acquire_runtime_lock") as acquire,
@@ -488,7 +488,7 @@ finally:
         self.assertEqual(result, 9)
         acquire.assert_not_called()
         supervisor.assert_called_once_with(
-            ["raptor", "3", "4", "policy", "5", "true"]
+            ["raptor", "3", "4", "policy", "5", "8"]
         )
 
     @unittest.skipUnless(hasattr(os, "fork"), "requires fork")
@@ -508,6 +508,9 @@ finally:
             ).encode("utf-8")
         )
         policy_file.seek(0)
+        command_file = tempfile.TemporaryFile(mode="w+b")
+        command_file.write(b"printf ok")
+        command_file.seek(0)
         try:
             process = subprocess.Popen(
                 [
@@ -518,7 +521,7 @@ finally:
                     str(start_read),
                     str(policy_file.fileno()),
                     str(ready_write),
-                    "printf ok",
+                    str(command_file.fileno()),
                 ],
                 cwd=root,
                 env=os.environ.copy(),
@@ -529,6 +532,7 @@ finally:
                     start_read,
                     policy_file.fileno(),
                     ready_write,
+                    command_file.fileno(),
                 ),
             )
         except BaseException:
@@ -539,6 +543,7 @@ finally:
             os.close(ready_read)
             os.close(ready_write)
             policy_file.close()
+            command_file.close()
             raise
         os.close(liveness_read)
         os.close(start_read)
@@ -558,6 +563,7 @@ finally:
                 process.kill()
                 process.wait(timeout=2)
             policy_file.close()
+            command_file.close()
         self.assertEqual(process.returncode, 0, stderr.decode())
         self.assertEqual(stdout, b"ok")
 
