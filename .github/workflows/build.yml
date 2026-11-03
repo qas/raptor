@@ -129,24 +129,33 @@ jobs:
               "glob_scan_max_depth": 32,
           }).encode("utf-8"))
           policy_file.seek(0)
+          command_file = tempfile.TemporaryFile(mode="w+b")
+          command_file.write(b"printf smoke")
+          command_file.flush()
+          command_file.seek(0)
           process = subprocess.Popen(
               [binary, "_shell-supervisor", str(liveness_read),
                str(start_read), str(policy_file.fileno()), str(ready_write),
-               "printf smoke"],
+               str(command_file.fileno())],
               cwd=workdir,
               stdout=subprocess.PIPE,
               stderr=subprocess.PIPE,
               pass_fds=(liveness_read, start_read, policy_file.fileno(),
-                        ready_write),
+                        ready_write, command_file.fileno()),
           )
           policy_file.close()
+          command_file.close()
           os.close(liveness_read)
           os.close(start_read)
           os.close(ready_write)
           os.write(start_write, b"1")
           os.close(start_write)
           if os.read(ready_read, 1) != b"1":
-              raise SystemExit("shell supervisor did not signal readiness")
+              _stdout, stderr = process.communicate(timeout=5)
+              raise SystemExit(
+                  "shell supervisor did not signal readiness\n"
+                  + stderr.decode()
+              )
           os.close(ready_read)
           stdout, stderr = process.communicate(timeout=10)
           os.close(liveness_write)
